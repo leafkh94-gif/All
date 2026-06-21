@@ -12,8 +12,8 @@ SETUP (once):
     pip install anthropic requests pandas
 
 SECRETS (set as environment variables — never hard-code):
-    ANTHROPIC_API_KEY   TWELVEDATA_KEY   NEWSAPI_KEY
-    TELEGRAM_BOT_TOKEN  TELEGRAM_CHAT_ID
+    ANTHROPIC_API_KEY   CAPITAL_API_KEY   CAPITAL_EMAIL   CAPITAL_PASSWORD
+    NEWSAPI_KEY   TELEGRAM_BOT_TOKEN   TELEGRAM_CHAT_ID
 
 RUN:
     python main.py
@@ -27,10 +27,17 @@ from anthropic import Anthropic
 # ─────────────────────────────────────────────────────────────────────
 # 1) CONFIG
 # ─────────────────────────────────────────────────────────────────────
-TD_KEY = os.environ["TWELVEDATA_KEY"]
+CAPITAL_KEY   = os.environ["CAPITAL_API_KEY"]
+CAPITAL_EMAIL = os.environ["CAPITAL_EMAIL"]
+CAPITAL_PASS  = os.environ["CAPITAL_PASSWORD"]
+CAPITAL_BASE  = "https://api-capital.backend.gbgroupplc.com/api/v1"
 
-SYMBOLS = {"BTC": "BTC/USD", "Gold": "XAU/USD",
-           "US500": "SPX", "US100": "NDX", "US30": "DJI"}
+# Capital.com epic names
+SYMBOLS = {"BTC": "BITCOIN", "Gold": "GOLD",
+           "US500": "US500", "US100": "US100", "US30": "US30"}
+
+# Capital.com resolution strings
+RESOLUTION = {"15min": "MINUTE_15", "1h": "HOUR", "4h": "HOUR_4"}
 
 CACHE_DIR = ".cache"; os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_TTL = {"15min": 0, "1h": 3600, "4h": 14400}  # 15m always fresh; 1h/4h cached
@@ -40,22 +47,44 @@ COOLDOWN = 2 * 3600                                  # 2h between same-setup ale
 client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ─────────────────────────────────────────────────────────────────────
-# 2) DATA  (Twelve Data only — no Binance — with caching for the limit)
+# 2) DATA  (Capital.com — session auth + caching for 1h/4h)
 # ─────────────────────────────────────────────────────────────────────
+_cap_session = {"cst": None, "token": None}
+
+def _open_session():
+    r = requests.post(f"{CAPITAL_BASE}/session",
+        headers={"X-CAP-API-KEY": CAPITAL_KEY, "Content-Type": "application/json"},
+        json={"identifier": CAPITAL_EMAIL, "password": CAPITAL_PASS}, timeout=20)
+    r.raise_for_status()
+    _cap_session["cst"]   = r.headers["CST"]
+    _cap_session["token"] = r.headers["X-SECURITY-TOKEN"]
+
+def _headers():
+    return {"X-CAP-API-KEY": CAPITAL_KEY,
+            "CST": _cap_session["cst"],
+            "X-SECURITY-TOKEN": _cap_session["token"]}
+
 def _path(sym, interval):
-    return os.path.join(CACHE_DIR, f"{sym.replace('/','_')}_{interval}.json")
+    return os.path.join(CACHE_DIR, f"{sym}_{interval}.json")
 
 def get_candles(symbol, interval, n=60):
     ttl = CACHE_TTL.get(interval, 0)
     p = _path(symbol, interval)
     if ttl and os.path.exists(p) and time.time() - os.path.getmtime(p) < ttl:
         return json.load(open(p))
-    r = requests.get("https://api.twelvedata.com/time_series", params={
-        "symbol": symbol, "interval": interval, "outputsize": n,
-        "apikey": TD_KEY}, timeout=20)
-    vals = r.json().get("values", [])
-    candles = [{"t": c["datetime"], "o": float(c["open"]), "h": float(c["high"]),
-                "l": float(c["low"]), "c": float(c["close"])} for c in reversed(vals)]
+    res = RESOLUTION[interval]
+    r = requests.get(f"{CAPITAL_BASE}/prices/{symbol}",
+        headers=_headers(), params={"resolution": res, "max": n}, timeout=20)
+    if r.status_code == 401:          # session expired — re-auth once
+        _open_session()
+        r = requests.get(f"{CAPITAL_BASE}/prices/{symbol}",
+            headers=_headers(), params={"resolution": res, "max": n}, timeout=20)
+    data = r.json().get("prices", [])
+    candles = [{"t": c["snapshotTime"],
+                "o": float(c["openPrice"]["bid"]),
+                "h": float(c["highPrice"]["bid"]),
+                "l": float(c["lowPrice"]["bid"]),
+                "c": float(c["closePrice"]["bid"])} for c in data]
     if candles:
         json.dump(candles, open(p, "w"))
     return candles
@@ -206,6 +235,7 @@ def send_telegram(text):
 # ─────────────────────────────────────────────────────────────────────
 def run():
     now = datetime.now(timezone.utc)
+    _open_session()          # one auth call per run; re-used by all get_candles calls
     state = load_state()
     candidates = []
 
@@ -264,7 +294,9 @@ if __name__ == "__main__":
 #       - run: python main.py
 #         env:
 #           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
-#           TWELVEDATA_KEY:     ${{ secrets.TWELVEDATA_KEY }}
+#           CAPITAL_API_KEY:    ${{ secrets.CAPITAL_API_KEY }}
+#           CAPITAL_EMAIL:      ${{ secrets.CAPITAL_EMAIL }}
+#           CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
 #           NEWSAPI_KEY:        ${{ secrets.NEWSAPI_KEY }}
 #           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 #           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
