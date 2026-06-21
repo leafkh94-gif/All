@@ -9,10 +9,10 @@
 ═══════════════════════════════════════════════════════════════════════
 
 SETUP (once):
-    pip install anthropic requests pandas
+    pip install anthropic requests pandas yfinance
 
 SECRETS (set as environment variables — never hard-code):
-    ANTHROPIC_API_KEY   TWELVEDATA_KEY   NEWSAPI_KEY
+    ANTHROPIC_API_KEY   NEWSAPI_KEY
     TELEGRAM_BOT_TOKEN  TELEGRAM_CHAT_ID
 
 RUN:
@@ -21,16 +21,19 @@ RUN:
 """
 import os, json, time, requests
 import pandas as pd
+import yfinance as yf
 from datetime import datetime, timezone
 from anthropic import Anthropic
 
 # ─────────────────────────────────────────────────────────────────────
 # 1) CONFIG
 # ─────────────────────────────────────────────────────────────────────
-TD_KEY = os.environ["TWELVEDATA_KEY"]
-
-SYMBOLS = {"BTC": "BTC/USD", "Gold": "XAU/USD",
-           "US500": "SPX", "US100": "NDX", "US30": "DJI"}
+# Yahoo Finance tickers — no API key required
+SYMBOLS = {"BTC":   "BTC-USD",
+           "Gold":  "GC=F",
+           "US500": "^GSPC",
+           "US100": "^NDX",
+           "US30":  "^DJI"}
 
 CACHE_DIR = ".cache"; os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_TTL = {"15min": 0, "1h": 3600, "4h": 14400}  # 15m always fresh; 1h/4h cached
@@ -40,22 +43,30 @@ COOLDOWN = 2 * 3600                                  # 2h between same-setup ale
 client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ─────────────────────────────────────────────────────────────────────
-# 2) DATA  (Twelve Data only — no Binance — with caching for the limit)
+# 2) DATA  (Yahoo Finance — no API key, works from GitHub Actions)
 # ─────────────────────────────────────────────────────────────────────
 def _path(sym, interval):
-    return os.path.join(CACHE_DIR, f"{sym.replace('/','_')}_{interval}.json")
+    safe = "".join(c for c in sym if c.isalnum() or c == "-")
+    return os.path.join(CACHE_DIR, f"{safe}_{interval}.json")
 
 def get_candles(symbol, interval, n=60):
     ttl = CACHE_TTL.get(interval, 0)
     p = _path(symbol, interval)
     if ttl and os.path.exists(p) and time.time() - os.path.getmtime(p) < ttl:
         return json.load(open(p))
-    r = requests.get("https://api.twelvedata.com/time_series", params={
-        "symbol": symbol, "interval": interval, "outputsize": n,
-        "apikey": TD_KEY}, timeout=20)
-    vals = r.json().get("values", [])
-    candles = [{"t": c["datetime"], "o": float(c["open"]), "h": float(c["high"]),
-                "l": float(c["low"]), "c": float(c["close"])} for c in reversed(vals)]
+    ticker = yf.Ticker(symbol)
+    if interval == "15min":
+        raw = ticker.history(period="5d", interval="15m")
+    elif interval == "1h":
+        raw = ticker.history(period="7d", interval="1h")
+    else:                              # 4h — resample 1h data
+        raw = ticker.history(period="60d", interval="1h")
+        raw = raw[["Open", "High", "Low", "Close"]].resample("4h").agg(
+            {"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
+    raw = raw.tail(n)
+    candles = [{"t": str(idx), "o": float(r["Open"]), "h": float(r["High"]),
+                "l": float(r["Low"]),  "c": float(r["Close"])}
+               for idx, r in raw.iterrows()]
     if candles:
         json.dump(candles, open(p, "w"))
     return candles
@@ -260,11 +271,10 @@ if __name__ == "__main__":
 #         with: { python-version: "3.11" }
 #       - uses: actions/cache@v4
 #         with: { path: .cache, key: bot-cache }
-#       - run: pip install anthropic requests pandas
+#       - run: pip install anthropic requests pandas yfinance
 #       - run: python main.py
 #         env:
 #           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
-#           TWELVEDATA_KEY:     ${{ secrets.TWELVEDATA_KEY }}
 #           NEWSAPI_KEY:        ${{ secrets.NEWSAPI_KEY }}
 #           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 #           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
