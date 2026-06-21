@@ -9,11 +9,11 @@
 ═══════════════════════════════════════════════════════════════════════
 
 SETUP (once):
-    pip install anthropic requests pandas yfinance
+    pip install anthropic requests pandas
 
 SECRETS (set as environment variables — never hard-code):
-    ANTHROPIC_API_KEY   NEWSAPI_KEY
-    TELEGRAM_BOT_TOKEN  TELEGRAM_CHAT_ID
+    ANTHROPIC_API_KEY   CAPITAL_API_KEY   CAPITAL_EMAIL   CAPITAL_PASSWORD
+    NEWSAPI_KEY   TELEGRAM_BOT_TOKEN   TELEGRAM_CHAT_ID
 
 RUN:
     python main.py
@@ -21,19 +21,27 @@ RUN:
 """
 import os, json, time, requests
 import pandas as pd
-import yfinance as yf
 from datetime import datetime, timezone
 from anthropic import Anthropic
 
 # ─────────────────────────────────────────────────────────────────────
 # 1) CONFIG
 # ─────────────────────────────────────────────────────────────────────
-# Yahoo Finance tickers — no API key required
-SYMBOLS = {"BTC":   "BTC-USD",
-           "Gold":  "GC=F",
-           "US500": "^GSPC",
-           "US100": "^NDX",
-           "US30":  "^DJI"}
+CAPITAL_KEY   = os.environ["CAPITAL_API_KEY"]
+CAPITAL_EMAIL = os.environ["CAPITAL_EMAIL"]
+CAPITAL_PASS  = os.environ["CAPITAL_PASSWORD"]
+# Demo: https://demo-api-capital.backend-capital.com/api/v1
+# Live: https://api-capital.backend-capital.com/api/v1
+CAPITAL_BASE  = os.environ.get("CAPITAL_BASE_URL",
+                               "https://demo-api-capital.backend-capital.com/api/v1")
+
+SYMBOLS = {"BTC":   "BITCOIN",
+           "Gold":  "GOLD",
+           "US500": "US500",
+           "US100": "US100",
+           "US30":  "US30"}
+
+RESOLUTION = {"15min": "MINUTE_15", "1h": "HOUR", "4h": "HOUR_4"}
 
 CACHE_DIR = ".cache"; os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_TTL = {"15min": 0, "1h": 3600, "4h": 14400}  # 15m always fresh; 1h/4h cached
@@ -43,30 +51,44 @@ COOLDOWN = 2 * 3600                                  # 2h between same-setup ale
 client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ─────────────────────────────────────────────────────────────────────
-# 2) DATA  (Yahoo Finance — no API key, works from GitHub Actions)
+# 2) DATA  (Capital.com — session auth + caching for 1h/4h)
 # ─────────────────────────────────────────────────────────────────────
+_cap_session = {"cst": None, "token": None}
+
+def _open_session():
+    r = requests.post(f"{CAPITAL_BASE}/session",
+        headers={"X-CAP-API-KEY": CAPITAL_KEY, "Content-Type": "application/json"},
+        json={"identifier": CAPITAL_EMAIL, "password": CAPITAL_PASS}, timeout=20)
+    r.raise_for_status()
+    _cap_session["cst"]   = r.headers["CST"]
+    _cap_session["token"] = r.headers["X-SECURITY-TOKEN"]
+
+def _headers():
+    return {"X-CAP-API-KEY": CAPITAL_KEY,
+            "CST": _cap_session["cst"],
+            "X-SECURITY-TOKEN": _cap_session["token"]}
+
 def _path(sym, interval):
-    safe = "".join(c for c in sym if c.isalnum() or c == "-")
-    return os.path.join(CACHE_DIR, f"{safe}_{interval}.json")
+    return os.path.join(CACHE_DIR, f"{sym}_{interval}.json")
 
 def get_candles(symbol, interval, n=60):
     ttl = CACHE_TTL.get(interval, 0)
     p = _path(symbol, interval)
     if ttl and os.path.exists(p) and time.time() - os.path.getmtime(p) < ttl:
         return json.load(open(p))
-    ticker = yf.Ticker(symbol)
-    if interval == "15min":
-        raw = ticker.history(period="5d", interval="15m")
-    elif interval == "1h":
-        raw = ticker.history(period="7d", interval="1h")
-    else:                              # 4h — resample 1h data
-        raw = ticker.history(period="60d", interval="1h")
-        raw = raw[["Open", "High", "Low", "Close"]].resample("4h").agg(
-            {"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
-    raw = raw.tail(n)
-    candles = [{"t": str(idx), "o": float(r["Open"]), "h": float(r["High"]),
-                "l": float(r["Low"]),  "c": float(r["Close"])}
-               for idx, r in raw.iterrows()]
+    res = RESOLUTION[interval]
+    r = requests.get(f"{CAPITAL_BASE}/prices/{symbol}",
+        headers=_headers(), params={"resolution": res, "max": n}, timeout=20)
+    if r.status_code == 401:          # session expired — re-auth once
+        _open_session()
+        r = requests.get(f"{CAPITAL_BASE}/prices/{symbol}",
+            headers=_headers(), params={"resolution": res, "max": n}, timeout=20)
+    data = r.json().get("prices", [])
+    candles = [{"t": c["snapshotTime"],
+                "o": float(c["openPrice"]["bid"]),
+                "h": float(c["highPrice"]["bid"]),
+                "l": float(c["lowPrice"]["bid"]),
+                "c": float(c["closePrice"]["bid"])} for c in data]
     if candles:
         json.dump(candles, open(p, "w"))
     return candles
@@ -217,6 +239,7 @@ def send_telegram(text):
 # ─────────────────────────────────────────────────────────────────────
 def run():
     now = datetime.now(timezone.utc)
+    _open_session()          # one auth call per run; re-used by all get_candles calls
     state = load_state()
     candidates = []
 
@@ -271,10 +294,13 @@ if __name__ == "__main__":
 #         with: { python-version: "3.11" }
 #       - uses: actions/cache@v4
 #         with: { path: .cache, key: bot-cache }
-#       - run: pip install anthropic requests pandas yfinance
+#       - run: pip install anthropic requests pandas
 #       - run: python main.py
 #         env:
 #           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+#           CAPITAL_API_KEY:    ${{ secrets.CAPITAL_API_KEY }}
+#           CAPITAL_EMAIL:      ${{ secrets.CAPITAL_EMAIL }}
+#           CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
 #           NEWSAPI_KEY:        ${{ secrets.NEWSAPI_KEY }}
 #           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 #           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}

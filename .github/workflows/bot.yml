@@ -14,10 +14,13 @@ jobs:
         with: { python-version: "3.11" }
       - uses: actions/cache@v4
         with: { path: .cache, key: bot-cache }
-      - run: pip install anthropic requests pandas yfinance
+      - run: pip install anthropic requests pandas
       - run: python main.py
         env:
           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+          CAPITAL_API_KEY:    ${{ secrets.CAPITAL_API_KEY }}
+          CAPITAL_EMAIL:      ${{ secrets.CAPITAL_EMAIL }}
+          CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
           NEWSAPI_KEY:        ${{ secrets.NEWSAPI_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
