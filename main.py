@@ -239,7 +239,7 @@ def run():
     state = load_state()
     candidates = []
 
-    for name, sym in SYMBOLS.items():
+    for name, sym in symbols.items():
         if not market_open(name, now):
             continue
         setup = detect_setup(get_candles(sym, "15min"))
