@@ -30,13 +30,17 @@ from anthropic import Anthropic
 CAPITAL_KEY   = os.environ["CAPITAL_API_KEY"]
 CAPITAL_EMAIL = os.environ["CAPITAL_EMAIL"]
 CAPITAL_PASS  = os.environ["CAPITAL_PASSWORD"]
-CAPITAL_BASE  = "https://api-capital.backend.gbgroupplc.com/api/v1"
+# Demo: https://demo-api-capital.backend-capital.com/api/v1
+# Live: https://api-capital.backend-capital.com/api/v1
+CAPITAL_BASE  = os.environ.get("CAPITAL_BASE_URL",
+                               "https://demo-api-capital.backend-capital.com/api/v1")
 
-# Capital.com epic names
-SYMBOLS = {"BTC": "BITCOIN", "Gold": "GOLD",
-           "US500": "US500", "US100": "US100", "US30": "US30"}
+SYMBOL_SEARCH = {"BTC":   "bitcoin",
+                 "Gold":  "gold",
+                 "US500": "S&P 500",
+                 "US100": "NASDAQ 100",
+                 "US30":  "Dow Jones"}
 
-# Capital.com resolution strings
 RESOLUTION = {"15min": "MINUTE_15", "1h": "HOUR", "4h": "HOUR_4"}
 
 CACHE_DIR = ".cache"; os.makedirs(CACHE_DIR, exist_ok=True)
@@ -66,6 +70,15 @@ def _headers():
 
 def _path(sym, interval):
     return os.path.join(CACHE_DIR, f"{sym}_{interval}.json")
+
+def find_epic(search_term):
+    r = requests.get(f"{CAPITAL_BASE}/markets",
+        headers=_headers(), params={"searchTerm": search_term}, timeout=20)
+    r.raise_for_status()
+    markets = r.json().get("markets", [])
+    if not markets:
+        raise ValueError(f"No markets found for {search_term!r}")
+    return markets[0]["epic"]
 
 def get_candles(symbol, interval, n=60):
     ttl = CACHE_TTL.get(interval, 0)
@@ -236,6 +249,8 @@ def send_telegram(text):
 def run():
     now = datetime.now(timezone.utc)
     _open_session()          # one auth call per run; re-used by all get_candles calls
+    symbols = {name: find_epic(q) for name, q in SYMBOL_SEARCH.items()}
+    print("resolved epics:", symbols)
     state = load_state()
     candidates = []
 
