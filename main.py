@@ -39,7 +39,7 @@ SYMBOL_SEARCH = {"BTC":   "bitcoin",
                  "Gold":  "gold",
                  "US500": "S&P 500",
                  "US100": "NASDAQ 100",
-                 "US30":  "Dow Jones"}
+                 "US30":  "Wall Street 30"}
 
 RESOLUTION = {"15min": "MINUTE_15", "1h": "HOUR", "4h": "HOUR_4"}
 
