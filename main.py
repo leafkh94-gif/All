@@ -1,137 +1,273 @@
 """
-XAU/USD gold trading bot — main event loop.
+═══════════════════════════════════════════════════════════════════════
+  MARKET-EXPERT BOT — single-file build
+  Watches Gold, Bitcoin & US indices on 15m/1h/4h, reads the news,
+  detects setups in Python, and asks Claude (a 10-yr analyst) to judge,
+  rank and explain. Sends the best read to Telegram.
 
-Loop order (spec section 5.8 / Phase 3):
-  kill_switch.check()
-    → feed.get_candles()
-    → strategy.evaluate()
-    → attempt_trade()  [kill_switch + risk_guard checked again here — belt-and-suspenders]
-    → broker.place_order()
-    → alert
+  IT SUGGESTS. IT DOES NOT PROMISE WINNERS. Paper-test 30 trades first.
+═══════════════════════════════════════════════════════════════════════
 
-Start:  python main.py
-Stop:   echo "reason" > state/KILL   (from any terminal or SSH session)
+SETUP (once):
+    pip install anthropic requests pandas
+
+SECRETS (set as environment variables — never hard-code):
+    ANTHROPIC_API_KEY   TWELVEDATA_KEY   NEWSAPI_KEY
+    TELEGRAM_BOT_TOKEN  TELEGRAM_CHAT_ID
+
+RUN:
+    python main.py
+    (schedule every 15 min on Render, or GitHub Actions — see the bottom)
 """
-import logging
-import os
-import signal as _signal
-import time
+import os, json, time, requests
+import pandas as pd
+from datetime import datetime, timezone
+from anthropic import Anthropic
 
-from alerts.notifier import Notifier, build_notifier
-from config.settings import settings
-from core.kill_switch import kill_switch
-from core.log_sanitizer import setup_logging
-from core.risk_limits import RiskGuard, RiskLimits
-from core.state_store import state_store
-from execution.models import Signal
-from execution.paper_broker import PaperBroker
-from strategy.feed import PriceFeed, RandomWalkFeed
-from strategy.gold_strategy import GoldStrategy
+# ─────────────────────────────────────────────────────────────────────
+# 1) CONFIG
+# ─────────────────────────────────────────────────────────────────────
+TD_KEY = os.environ["TWELVEDATA_KEY"]
 
-logger = logging.getLogger("main")
+SYMBOLS = {"BTC": "BTC/USD", "Gold": "XAU/USD",
+           "US500": "SPX", "US100": "NDX", "US30": "DJI"}
 
+CACHE_DIR = ".cache"; os.makedirs(CACHE_DIR, exist_ok=True)
+CACHE_TTL = {"15min": 0, "1h": 3600, "4h": 14400}  # 15m always fresh; 1h/4h cached
+STATE = os.path.join(CACHE_DIR, "state.json")
+COOLDOWN = 2 * 3600                                  # 2h between same-setup alerts
 
-def attempt_trade(
-    sig: Signal,
-    broker: PaperBroker,
-    guard: RiskGuard,
-    notifier: Notifier,
-) -> bool:
-    """
-    Outer pre-trade gate. Returns True if an order was placed, False otherwise.
+client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    Belt-and-suspenders design: the guard is checked here AND inside
-    broker.place_order() — both layers are intentional so the main loop
-    gets an early-exit without catching RuntimeError on every loop tick.
-    """
-    if kill_switch.check():
-        logger.warning("kill switch active — skipping signal")
-        return False
+# ─────────────────────────────────────────────────────────────────────
+# 2) DATA  (Twelve Data only — no Binance — with caching for the limit)
+# ─────────────────────────────────────────────────────────────────────
+def _path(sym, interval):
+    return os.path.join(CACHE_DIR, f"{sym.replace('/','_')}_{interval}.json")
 
-    ok, reason = guard.can_trade(
-        proposed_lots=sig.lots,
-        open_positions=broker.open_position_count(),
-    )
-    if not ok:
-        logger.warning("trade rejected: %s", reason)
-        return False
+def get_candles(symbol, interval, n=60):
+    ttl = CACHE_TTL.get(interval, 0)
+    p = _path(symbol, interval)
+    if ttl and os.path.exists(p) and time.time() - os.path.getmtime(p) < ttl:
+        return json.load(open(p))
+    r = requests.get("https://api.twelvedata.com/time_series", params={
+        "symbol": symbol, "interval": interval, "outputsize": n,
+        "apikey": TD_KEY}, timeout=20)
+    vals = r.json().get("values", [])
+    candles = [{"t": c["datetime"], "o": float(c["open"]), "h": float(c["high"]),
+                "l": float(c["low"]), "c": float(c["close"])} for c in reversed(vals)]
+    if candles:
+        json.dump(candles, open(p, "w"))
+    return candles
 
-    try:
-        broker.place_order(sig)
+# ─────────────────────────────────────────────────────────────────────
+# 3) INDICATORS + SETUP DETECTION  (ALL risk math here — never the LLM)
+# ─────────────────────────────────────────────────────────────────────
+def _df(c): return pd.DataFrame(c)
+
+def atr(df, period=14):
+    pc = df["c"].shift(1)
+    tr = pd.concat([df["h"] - df["l"], (df["h"] - pc).abs(), (df["l"] - pc).abs()],
+                   axis=1).max(axis=1)
+    return tr.ewm(alpha=1/period, adjust=False).mean()
+
+def ema(s, span): return s.ewm(span=span, adjust=False).mean()
+
+def trend_of(candles):
+    df = _df(candles)
+    if len(df) < 25: return "unknown"
+    return "up" if df["c"].iloc[-1] > ema(df["c"], 20).iloc[-1] else "down"
+
+def detect_setup(candles15):
+    df = _df(candles15)
+    if len(df) < 30: return None
+    df["atr"] = atr(df); df["ema20"] = ema(df["c"], 20)
+    df["atr_ma"] = df["atr"].rolling(5).mean()
+    last, prev = df.iloc[-1], df.iloc[-2]
+    a = last["atr"]
+    if pd.isna(a) or a <= 0: return None
+
+    vol_expanding = last["atr"] > last["atr_ma"]          # ATR-breakout filter
+    up   = last["c"] > last["ema20"];  down = last["c"] < last["ema20"]
+    broke_high = last["c"] > prev["h"]; broke_low = last["c"] < prev["l"]
+    direction = "BUY" if (up and broke_high) else "SELL" if (down and broke_low) else None
+    if not direction: return None
+
+    entry = last["c"]
+    if direction == "BUY":
+        chase = (entry - prev["h"]) / a; stop, target = entry - a, entry + 2*a
+    else:
+        chase = (prev["l"] - entry) / a; stop, target = entry + a, entry - 2*a
+    if chase > 0.5: return None                            # chasing — skip
+
+    trend = min(40, abs(entry - last["ema20"]) / a * 25)
+    trig  = min(30, abs(last["c"] - last["o"]) / a * 30)
+    loc   = max(0, 20 - chase * 40)
+    vola  = 10 if vol_expanding else 0
+    score = int(min(100, round(trend + trig + loc + vola)))
+
+    return {"direction": direction, "entry": float(round(entry, 2)),
+            "stop": float(round(stop, 2)), "target": float(round(target, 2)),
+            "atr": float(round(a, 2)), "score": int(score),
+            "vol_expanding": bool(vol_expanding)}
+
+# ─────────────────────────────────────────────────────────────────────
+# 4) MARKET-HOURS GUARD
+# ─────────────────────────────────────────────────────────────────────
+def market_open(instrument, now=None):
+    now = now or datetime.now(timezone.utc)
+    wd = now.weekday(); h = now.hour + now.minute/60
+    if instrument in ("US500", "US100", "US30"):
+        return wd < 5 and 13.5 <= h < 20.0
+    if instrument == "Gold":
+        if wd == 5: return False
+        if wd == 6 and h < 22: return False
+        if wd == 4 and h >= 21: return False
         return True
-    except RuntimeError as exc:
-        logger.error("order failed: %s", exc)
-        notifier.send(f"order error: {exc}")
-        return False
+    return True   # BTC 24/7
 
+# ─────────────────────────────────────────────────────────────────────
+# 5) COOLDOWN STATE
+# ─────────────────────────────────────────────────────────────────────
+def load_state():
+    try: return json.load(open(STATE))
+    except Exception: return {}
 
-def _build_broker(guard: RiskGuard, notifier: Notifier) -> PaperBroker:
-    return PaperBroker(
-        guard=guard,
-        switch=kill_switch,
-        store=state_store,
-        notifier=notifier,
-    )
+def save_state(s): json.dump(s, open(STATE, "w"))
 
+def on_cooldown(state, key, now_ts):
+    return key in state and (now_ts - state[key]) < COOLDOWN
 
-def main(
-    feed: PriceFeed | None = None,
-    strategy: GoldStrategy | None = None,
-    broker: PaperBroker | None = None,
-) -> None:
-    """
-    Entry point. Parameters are injectable for integration testing;
-    production callers pass nothing and let the defaults build.
-    """
-    setup_logging(log_dir=settings.logs_dir)
-    logger.info("gold bot starting (env=%s)", os.getenv("ENVIRONMENT", "development"))
-
-    notifier = build_notifier()
-    limits = RiskLimits()
-    guard = RiskGuard(limits=limits, store=state_store, switch=kill_switch)
-
-    feed = feed or RandomWalkFeed()
-    strategy = strategy or GoldStrategy(lots=limits.max_position_size_lots)
-    broker = broker or _build_broker(guard, notifier)
-
-    # ── Startup ───────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
+# 6) NEWS + CALENDAR
+# ─────────────────────────────────────────────────────────────────────
+def get_news():
     try:
-        broker.connect()
-        broker.reconcile()
-        logger.info("startup reconcile complete")
-        notifier.send("gold bot started — paper trading mode")
-    except Exception as exc:
-        logger.critical("startup failed: %s", exc)
-        notifier.send(f"startup failed: {exc}")
-        raise
+        r = requests.get("https://newsapi.org/v2/everything", params={
+            "q": 'gold OR bitcoin OR Nasdaq OR "Federal Reserve" OR inflation',
+            "language": "en", "sortBy": "publishedAt", "pageSize": 6,
+            "apiKey": os.environ["NEWSAPI_KEY"]}, timeout=20)
+        return [a["title"] for a in r.json().get("articles", [])]
+    except Exception:
+        return []
 
-    # Graceful shutdown on SIGTERM / SIGINT — trips the kill switch so the
-    # loop exits cleanly on the next iteration rather than mid-operation.
-    def _shutdown(signum, frame):
-        logger.info("shutdown signal received (sig=%s)", signum)
-        kill_switch.trip("SIGTERM received")
+def get_calendar():
+    try:
+        r = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", timeout=20)
+        return [f'{e["title"]} ({e["date"]})' for e in r.json()
+                if e.get("impact") == "High" and e.get("country") == "USD"]
+    except Exception:
+        return []
 
-    _signal.signal(_signal.SIGTERM, _shutdown)
-    _signal.signal(_signal.SIGINT, _shutdown)
+# ─────────────────────────────────────────────────────────────────────
+# 7) THE EXPERT PROMPT  (judgement only — never recomputes numbers)
+# ─────────────────────────────────────────────────────────────────────
+JUDGE_PROMPT = """You are a trading analyst with 10 years of experience in
+gold, Bitcoin, and the US indices. You know every strategy (supply/demand,
+liquidity sweep + break of structure, double tops, flags, post-news retests,
+trend-following, mean reversion).
 
-    # ── Main loop ─────────────────────────────────────────────────────────────
-    while True:
-        if kill_switch.check():
-            logger.warning("kill switch active — reason: %s", kill_switch.reason)
-            notifier.send(f"bot stopped: {kill_switch.reason}")
-            break
+You are given ONLY the instruments that ALREADY have a valid 15-minute setup,
+detected and PRICED by our system. The entry, stop, target and score are
+already calculated correctly in code. DO NOT recompute or change any number.
 
-        try:
-            candles = feed.get_candles()
-            sig = strategy.evaluate(candles)
-            if sig is not None:
-                attempt_trade(sig, broker, guard, notifier)
-        except Exception as exc:
-            logger.error("loop error: %s", exc, exc_info=True)
-            notifier.send(f"loop error: {exc}")
+Your job is JUDGEMENT, not arithmetic:
+1. Does the 15m setup agree with the 1h and 4h trend given? If it fights the
+   higher timeframe, downgrade or VETO it and say why.
+2. News gate: if a high-impact release (CPI/NFP/FOMC) is near, say STAND ASIDE.
+3. Rank the valid setups and name the single BEST one, with a one-line reason.
+4. Explain each in one or two plain sentences using the given numbers as-is.
 
-        time.sleep(settings.loop_interval_seconds)
+Never invent setups for instruments not listed. Never use the words
+guaranteed, sure, or high win rate. End each with:
+"Setup read - not a promise it will win."
 
+DATA: {data}
+"""
+
+def analyze(bundle):
+    msg = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1200,
+        messages=[{"role": "user",
+                   "content": JUDGE_PROMPT.format(data=json.dumps(bundle, indent=2))}])
+    return msg.content[0].text
+
+# ─────────────────────────────────────────────────────────────────────
+# 8) TELEGRAM
+# ─────────────────────────────────────────────────────────────────────
+def send_telegram(text):
+    requests.post(
+        f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+        json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}, timeout=20)
+
+# ─────────────────────────────────────────────────────────────────────
+# 9) MAIN LOOP (one pass — schedule it every 15 min)
+# ─────────────────────────────────────────────────────────────────────
+def run():
+    now = datetime.now(timezone.utc)
+    state = load_state()
+    candidates = []
+
+    for name, sym in SYMBOLS.items():
+        if not market_open(name, now):
+            continue
+        setup = detect_setup(get_candles(sym, "15min"))
+        if not setup:
+            continue
+        key = f"{name}_{setup['direction']}"
+        if on_cooldown(state, key, now.timestamp()):
+            continue
+        setup["instrument"] = name
+        setup["trend_1h"] = trend_of(get_candles(sym, "1h"))
+        setup["trend_4h"] = trend_of(get_candles(sym, "4h"))
+        candidates.append(setup)
+
+    if not candidates:
+        print(now.strftime("%H:%M"), "no setup - no message sent")
+        return
+
+    bundle = {"time_utc": now.isoformat(), "setups": candidates,
+              "news": get_news(), "events": get_calendar()}
+    read = analyze(bundle)
+
+    for s in candidates:
+        state[f"{s['instrument']}_{s['direction']}"] = now.timestamp()
+    save_state(state)
+
+    send_telegram("MARKET READ " + now.strftime("%H:%M UTC") + "\n\n" + read)
+    print("alert sent for:", [c["instrument"] for c in candidates])
 
 if __name__ == "__main__":
-    main()
+    run()
+
+# ─────────────────────────────────────────────────────────────────────
+# 10) SCHEDULE IT — GitHub Actions (.github/workflows/bot.yml)
+# ─────────────────────────────────────────────────────────────────────
+# Prefer Render (always-on, keeps .cache). Actions cron drifts 5-20 min.
+#
+# name: market-expert-bot
+# on:
+#   schedule:
+#     - cron: "*/15 * * * *"
+#   workflow_dispatch:
+# jobs:
+#   run:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: actions/setup-python@v5
+#         with: { python-version: "3.11" }
+#       - uses: actions/cache@v4
+#         with: { path: .cache, key: bot-cache }
+#       - run: pip install anthropic requests pandas
+#       - run: python main.py
+#         env:
+#           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+#           TWELVEDATA_KEY:     ${{ secrets.TWELVEDATA_KEY }}
+#           NEWSAPI_KEY:        ${{ secrets.NEWSAPI_KEY }}
+#           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+#           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+#
+# ── BEFORE REAL MONEY: paper-trade the first 30 suggestions, log them,
+#    go live only if profitable, at 2% size. That gate protects your $3,000.
