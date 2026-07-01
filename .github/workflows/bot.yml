@@ -1,8 +1,9 @@
 name: market-expert-bot
 
+# Manual fallback only. GitHub throttles free-tier schedules to fire every
+# 2-3 hours, so the */15 cron was removed — live alerting runs via
+# run_forever.py on an always-on host instead (see README).
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 jobs:
