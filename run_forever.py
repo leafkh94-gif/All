@@ -29,6 +29,13 @@ import strategy_config as cfg
 TELEGRAM_API = f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}"
 CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
 
+# 0 = run forever (dedicated host). On GitHub Actions each relay job sets this
+# below the 6h job limit so the process exits cleanly and the next job takes over.
+MAX_RUNTIME_MINUTES = float(os.environ.get("MAX_RUNTIME_MINUTES", "0"))
+# Suppress the "Bot online" greeting (set on relay jobs so a restart every
+# ~6h doesn't spam the chat).
+QUIET_START = os.environ.get("QUIET_START", "") == "1"
+
 OFFSET_PATH = os.path.join(ma.STATE_DIR, "telegram_offset.json")
 
 HELP_TEXT = (
@@ -133,18 +140,27 @@ def next_scan_timestamp(now_ts=None):
 
 
 def main():
-    print("bot starting — real-time mode")
-    reply("🤖 Bot online — real-time mode.\n" + HELP_TEXT)
+    deadline = time.time() + MAX_RUNTIME_MINUTES * 60 if MAX_RUNTIME_MINUTES else None
+    print(f"bot starting — real-time mode"
+          + (f" (bounded, {MAX_RUNTIME_MINUTES:.0f} min)" if deadline else ""))
+    if not QUIET_START:
+        reply("🤖 Bot online — real-time mode.\n" + HELP_TEXT)
     run_scan_safely("startup")
     next_scan = next_scan_timestamp()
     while True:
+        if deadline and time.time() >= deadline:
+            print("max runtime reached — exiting cleanly for the next relay job")
+            return
         remaining = next_scan - time.time()
         if remaining <= 0:
             run_scan_safely("scheduled")
             next_scan = next_scan_timestamp()
             continue
         # long-poll Telegram in <=45s slices until the next quarter-hour boundary
-        poll_telegram(int(min(45, max(1, remaining))))
+        slice_s = min(45, max(1, remaining))
+        if deadline:
+            slice_s = min(slice_s, max(1, deadline - time.time()))
+        poll_telegram(int(slice_s))
 
 
 if __name__ == "__main__":

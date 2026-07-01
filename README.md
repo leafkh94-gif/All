@@ -21,28 +21,45 @@ Telegram messages in real time:
 | `/status` | active WATCHes, pending A+ confirmations, last scan time |
 | `/help` | command menu |
 
-### Deploying on Render (always-on host)
+### Option A — run it on GitHub Actions for free (relay mode)
 
-1. Push this repo to GitHub (done).
-2. In Render: **New → Background Worker → connect this repo.** Render reads
-   `render.yaml` automatically.
-3. Set the environment variables when prompted:
-   `CAPITAL_API_KEY`, `CAPITAL_EMAIL`, `CAPITAL_PASSWORD`,
-   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
-   (and switch `CAPITAL_BASE_URL` to the live URL when you go off demo).
-4. Deploy. The bot messages you "🤖 Bot online" when it starts.
+Because this repo is **public**, Actions minutes are free and unlimited, so
+the workflow runs the bot in "relay" mode: each job keeps `run_forever.py`
+alive for ~5h40m (GitHub kills jobs at 6h), then dispatches the next job
+before exiting. One-time setup:
 
-Any always-on host works the same way (Railway, a VPS with
-`systemd`/`tmux`, etc.) — the only requirement is that `run_forever.py`
-stays running.
+1. **Create a PAT so jobs can chain themselves.** GitHub profile →
+   Settings → Developer settings → Personal access tokens →
+   Fine-grained tokens → Generate new token. Repository access: only this
+   repo. Permissions: **Actions → Read and write**. Long expiration.
+2. **Add the secrets.** Repo → Settings → Secrets and variables →
+   Actions → New repository secret, one per name:
+   `WORKFLOW_PAT` (the token from step 1), `CAPITAL_API_KEY`,
+   `CAPITAL_EMAIL`, `CAPITAL_PASSWORD`, `TELEGRAM_BOT_TOKEN`,
+   `TELEGRAM_CHAT_ID`.
+3. **Start the chain once:** Actions tab → market-expert-bot →
+   Run workflow.
 
-### Why not GitHub Actions?
+Known trade-offs of relay mode:
 
-The `market-expert-bot` workflow can still be triggered manually
-(**Actions → market-expert-bot → Run workflow**) for a one-off scan, but
-GitHub's `*/15` cron is throttled to fire only every 2–3 hours on free
-repos and each job exits after one pass — it cannot hold a 15-minute
-cadence or answer Telegram commands. Do not rely on it for live alerts.
+- a ~1–3 min blind spot every ~5h40m while jobs hand off (longer if
+  GitHub's queue is slow); the hourly cron restarts the chain if it
+  ever breaks
+- GitHub's terms discourage using Actions as generic always-on compute;
+  small bots usually fly under the radar, but GitHub may disable the
+  workflow — if that happens, switch to Option B
+- the repo must stay **public** (private repos get only 2,000 free
+  minutes/month — a day and a half of relay), so never commit secrets
+
+### Option B — any always-on host (Render, Railway, VPS, old laptop)
+
+No gaps, no terms-of-service gray area. In Render: **New → Background
+Worker → connect this repo** (it reads `render.yaml` automatically), set
+the same env vars, deploy. Or on any machine you own that stays on:
+set the env vars and run `python run_forever.py` under
+`systemd`/`tmux`. If a host is running the bot, disable the Actions
+workflow (Actions → market-expert-bot → ⋯ → Disable workflow) so you
+don't get duplicate alerts.
 
 ## Environment variables
 
