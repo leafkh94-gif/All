@@ -1,29 +1,64 @@
 name: market-expert-bot
 
-# Manual fallback only. GitHub throttles free-tier schedules to fire every
-# 2-3 hours, so the */15 cron was removed — live alerting runs via
-# run_forever.py on an always-on host instead (see README).
+# GitHub-native always-on mode ("relay" pattern):
+#   - each run keeps run_forever.py alive for ~5h40m (under GitHub's 6h job cap),
+#     scanning every 15 min and answering Telegram commands in real time
+#   - just before exiting it dispatches the next run via the WORKFLOW_PAT secret,
+#     so coverage is continuous apart from a ~1-3 min handoff gap
+#   - the hourly cron is only a safety net that restarts the chain if it breaks
+#     (GitHub throttles cron heavily, so it must never be the primary trigger)
+# Start the chain once by hand: Actions -> market-expert-bot -> Run workflow.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "23 * * * *"
+
+# Never let two relay jobs run at once (duplicate alerts / state races).
+# A queued run simply waits for the active one to finish.
+concurrency:
+  group: market-expert-bot
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      HAS_PAT: ${{ secrets.WORKFLOW_PAT != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
+      # Cache keys are immutable on GitHub, so save under a fresh key each run
+      # and restore the newest previous one via the prefix.
       - uses: actions/cache@v4
         with:
           path: |
             .cache
             state
-          key: bot-cache
+          key: bot-state-${{ github.run_id }}
+          restore-keys: |
+            bot-state-
+            bot-cache
       - run: pip install -r requirements.txt
-      - run: python main_alerts.py
+      - name: Run bot (real-time relay, ~5h40m)
+        run: python run_forever.py
         env:
+          MAX_RUNTIME_MINUTES: "340"
+          QUIET_START: "1"
           CAPITAL_API_KEY:    ${{ secrets.CAPITAL_API_KEY }}
           CAPITAL_EMAIL:      ${{ secrets.CAPITAL_EMAIL }}
           CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Chain the next relay run
+        # GITHUB_TOKEN cannot trigger new workflow runs, so this needs a
+        # fine-grained PAT (Actions: read+write on this repo) stored as the
+        # WORKFLOW_PAT secret. Without it, only the hourly cron restarts us.
+        if: ${{ always() && env.HAS_PAT == 'true' }}
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.WORKFLOW_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/bot.yml/dispatches" \
+            -d '{"ref":"main"}'
