@@ -74,6 +74,75 @@ def test_counter_trend_hard_block_buy_in_downtrend():
     assert result is None
 
 
+def test_diagnostic_mode_reports_counter_trend_block_instead_of_none():
+    """/scan needs a reason string even when the setup is hard-blocked."""
+    market = {
+        "entry": make_candles(80, start_price=100.0, noise=0.3),
+        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
+        "h4": trending_h4_candles(up=True),
+    }
+    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "SELL",
+                 "sweep_price": 100.0, "quality": 38}
+    import datetime as dt
+    result = strat.score_candidate(
+        "US500", "US_INDEX", candidate, market,
+        dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc),
+        _fake_level_store(), diagnostic=True)
+    assert result is not None
+    assert result["score"] is None
+    assert "counter-trend" in result["blocked"]
+
+
+def test_diagnostic_mode_reports_below_threshold_score():
+    """A setup that scores below WATCH_MIN_SCORE must still surface its score."""
+    market = {
+        "entry": make_candles(80, start_price=100.0, noise=0.3),
+        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
+        "h4": make_candles(260, start_price=100.0, step=0.0, noise=0.5, interval_minutes=240),
+    }
+    candidate = {"pattern": "FLAG", "direction": "BUY", "sweep_price": 100.0, "quality": 5}
+    import datetime as dt
+    with patch.object(strat, "technical_confirm_score", return_value=0), \
+         patch.object(strat, "ma20_filter_score", return_value=0), \
+         patch.object(strat, "choppy_market_penalty", return_value=0), \
+         patch.object(strat.market_sessions, "killzone_bonus", return_value=(0, "NONE")), \
+         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
+         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+        result = strat.score_candidate(
+            "US500", "US_INDEX", candidate, market,
+            dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc),
+            _fake_level_store(), diagnostic=True)
+    assert result is not None
+    assert result["score"] is not None
+    assert result["score"] < 62
+    assert "below WATCH threshold" in result["blocked"]
+
+
+def test_diagnostic_mode_qualifying_setup_has_no_blocked_reason():
+    market = {
+        "entry": make_candles(80, start_price=100.0, noise=0.3),
+        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
+        "h4": trending_h4_candles(up=True),
+    }
+    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
+                 "sweep_price": 100.0, "quality": 38}
+    import datetime as dt
+    with patch.object(strat, "technical_confirm_score", return_value=10), \
+         patch.object(strat, "ma20_filter_score", return_value=4), \
+         patch.object(strat, "choppy_market_penalty", return_value=0), \
+         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
+         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
+         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+        result = strat.score_candidate(
+            "US500", "US_INDEX", candidate, market,
+            dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc),
+            _fake_level_store(), diagnostic=True)
+    assert result["blocked"] is None
+    assert result["score"] >= 75
+
+
 def test_with_trend_signal_is_not_blocked_and_scores():
     """A BUY signal in a confirmed uptrend must not be hard-blocked, and with all
     sub-factors forced to known values it must clear the A+ threshold."""

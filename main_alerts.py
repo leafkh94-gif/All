@@ -302,13 +302,19 @@ def run():
     maybe_send_health_check(main_state, watch_tracker, now)
 
     candidates = []
+    diagnostics = {}
     for instrument, meta in cfg.INSTRUMENTS.items():
         market = build_market(feed, instrument)
         candidate = strat.find_candidate(market["entry"])
         if not candidate:
+            diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,
+                                        "blocked": "no pattern detected"}
             continue
-        scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store)
-        if scored:
+        scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store,
+                                        diagnostic=True)
+        diagnostics[instrument] = {"pattern": scored["pattern"], "direction": scored["direction"],
+                                    "score": scored["score"], "blocked": scored["blocked"]}
+        if scored["blocked"] is None:
             candidates.append((instrument, scored))
 
     candidates = dedup_us_index_candidates(candidates)
@@ -333,7 +339,9 @@ def run():
             watch_tracker.add(scored, now)
 
     main_state["last_scan_time"] = now.strftime("%Y-%m-%d %H:%M UTC")
+    main_state["last_diagnostics"] = diagnostics
     save_json(MAIN_STATE_PATH, main_state)
+    return diagnostics
 
 
 if __name__ == "__main__":
