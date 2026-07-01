@@ -51,7 +51,6 @@ jobs:
         run: python run_forever.py
         env:
           MAX_RUNTIME_MINUTES: "340"
-          QUIET_START: "1"
           CAPITAL_API_KEY:    ${{ secrets.CAPITAL_API_KEY }}
           CAPITAL_EMAIL:      ${{ secrets.CAPITAL_EMAIL }}
           CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
