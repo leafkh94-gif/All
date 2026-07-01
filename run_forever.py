@@ -73,6 +73,24 @@ def status_text():
     return "\n".join(lines)
 
 
+def diagnostics_text():
+    main_state = ma.load_json(ma.MAIN_STATE_PATH)
+    diag = main_state.get("last_diagnostics")
+    if not diag:
+        return "No scan diagnostics yet."
+    lines = ["📈 Scan detail (why each instrument didn't qualify):"]
+    for instrument, d in diag.items():
+        if d["blocked"] == "no pattern detected":
+            lines.append(f"  {instrument}: no pattern detected")
+        elif d["score"] is None:
+            lines.append(f"  {instrument}: {d['direction']} {d['pattern']} — {d['blocked']}")
+        elif d["blocked"] is None:
+            lines.append(f"  {instrument}: {d['direction']} {d['pattern']} — {d['score']}/100 ✅ qualified")
+        else:
+            lines.append(f"  {instrument}: {d['direction']} {d['pattern']} — {d['score']}/100 ({d['blocked']})")
+    return "\n".join(lines)
+
+
 def run_scan_safely(trigger):
     try:
         ma.run()
@@ -91,7 +109,8 @@ def handle_command(text):
         main_state = ma.load_json(ma.MAIN_STATE_PATH)
         if ok:
             reply(f"Scan complete ({main_state.get('last_scan_time', 'n/a')}). "
-                  f"Any qualifying WATCH/A+ alerts were sent above.\n\n{status_text()}")
+                  f"Any qualifying WATCH/A+ alerts were sent above.\n\n{status_text()}\n\n"
+                  f"{diagnostics_text()}")
         else:
             reply("⚠️ Scan hit an error — check the host logs. Will retry on the next cycle.")
     elif t.startswith("/status"):

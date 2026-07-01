@@ -312,24 +312,38 @@ def compute_entry_exit(candidate, breakout_candle, atr_value, rng=random):
 # score_candidate() — the full pipeline
 # ─────────────────────────────────────────────────────────────────────
 def score_candidate(instrument, instrument_class, candidate, market, now_utc, level_store,
-                     confirmation_bonus=0):
+                     confirmation_bonus=0, diagnostic=False):
     """
     market: {'entry': [...15m candles], 'h1': [...], 'h4': [...], 'daily': [...]}
     Returns a dict with the full score breakdown + entry/stop/targets, or None if
     the setup is hard-blocked or scores below the no-alert floor.
+
+    diagnostic=True never returns None: every hard-block or below-threshold
+    case instead returns a dict with a "blocked" reason and "score" (None if
+    the block happened before a score could be computed at all). Used to show
+    near-miss scores on /scan without changing normal alerting behavior.
     """
     direction = candidate["direction"]
 
     # Section 2 — PRIORITY FIX: counter-trend hard block
     htf = htf_bias(market["h4"])
     if htf == "TRENDING_UP" and direction == "SELL":
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": None, "htf_bias": htf, "blocked": "counter-trend (H4 uptrend blocks SELL)"}
         return None
     if htf == "TRENDING_DOWN" and direction == "BUY":
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": None, "htf_bias": htf, "blocked": "counter-trend (H4 downtrend blocks BUY)"}
         return None
 
     df_entry = _df(market["entry"])
     a = ind.atr(df_entry).iloc[-1]
     if pd.isna(a) or a <= 0:
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": None, "htf_bias": htf, "blocked": "invalid ATR"}
         return None
 
     breakdown = {"pattern": candidate["pattern"], "pattern_quality": candidate["quality"]}
@@ -379,13 +393,20 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     breakdown["confirmation_bonus"] = confirmation_bonus
 
     if total < cfg.WATCH_MIN_SCORE:
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": int(round(total)), "htf_bias": htf,
+                     "blocked": f"below WATCH threshold ({cfg.WATCH_MIN_SCORE})"}
         return None
 
     exits = compute_entry_exit(candidate, df_entry.iloc[-1], a)
-    return {
+    result = {
         "instrument": instrument, "direction": direction, "score": int(round(total)),
         "breakdown": breakdown, "htf_bias": htf, **exits,
     }
+    if diagnostic:
+        result["blocked"] = None
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────
