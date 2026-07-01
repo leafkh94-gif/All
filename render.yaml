@@ -1,0 +1,21 @@
+services:
+  - type: worker
+    name: trading-alert-bot
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run_forever.py
+    autoDeploy: true
+    envVars:
+      - key: CAPITAL_API_KEY
+        sync: false
+      - key: CAPITAL_EMAIL
+        sync: false
+      - key: CAPITAL_PASSWORD
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: CAPITAL_BASE_URL
+        value: https://demo-api-capital.backend-capital.com/api/v1
