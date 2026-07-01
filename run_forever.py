@@ -76,6 +76,7 @@ def status_text():
 def run_scan_safely(trigger):
     try:
         ma.run()
+        print(f"[{trigger}] scan ok — {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
         return True
     except Exception:
         print(f"[{trigger}] scan failed:\n{traceback.format_exc()}")
@@ -161,6 +162,8 @@ def main():
         if deadline:
             slice_s = min(slice_s, max(1, deadline - time.time()))
         poll_telegram(int(slice_s))
+        mins_left = max(0, int((next_scan - time.time()) // 60))
+        print(f"alive — listening on Telegram, next scan in ~{mins_left} min")
 
 
 if __name__ == "__main__":
