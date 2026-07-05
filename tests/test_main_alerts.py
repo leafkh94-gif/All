@@ -1,6 +1,7 @@
 import datetime as dt
 
 import main_alerts as ma
+from strategy import modes
 
 
 def test_hard_flat_active_after_1830_us_index():
@@ -62,6 +63,69 @@ def test_active_entry_tracker_expires_after_2_hours(tmp_path, monkeypatch):
     tracker.evaluate_all(now + dt.timedelta(hours=2, minutes=1), FakeFeed())
     assert any("entry expired" in m for m in sent)
     assert "US500" not in tracker._data
+
+
+def test_active_entry_tracker_fast_mode_expires_sooner(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+
+    class FakeFeed:
+        def get_current_price(self, instrument):
+            return 5050.0  # never touched the entry
+
+    default_tracker = ma.ActiveEntryTracker(path=str(tmp_path / "entries_default.json"))
+    default_tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0}, now)
+    default_tracker.evaluate_all(now + dt.timedelta(minutes=41), FakeFeed())
+    assert "US500" in default_tracker._data  # default 120-min expiry not yet reached
+
+    fast_tracker = ma.ActiveEntryTracker(path=str(tmp_path / "entries_fast.json"))
+    fast_tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0}, now)
+    fast_tracker.evaluate_all(now + dt.timedelta(minutes=41), FakeFeed(), mode=modes.FAST)
+    assert "US500" not in fast_tracker._data  # fast mode's 40-min expiry reached
+    assert any("entry expired" in m for m in sent)
+
+
+def test_build_market_fast_mode_requests_5min_entry():
+    requested = {}
+
+    class FakeFeed:
+        def get_candles(self, instrument, interval, n=60):
+            requested[interval] = requested.get(interval, 0) + 1
+            return []
+
+    ma.build_market(FakeFeed(), "US500", mode=modes.FAST)
+    assert "5min" in requested
+    assert "15min" not in requested
+
+
+def test_build_market_defaults_to_15min_entry():
+    requested = {}
+
+    class FakeFeed:
+        def get_candles(self, instrument, interval, n=60):
+            requested[interval] = requested.get(interval, 0) + 1
+            return []
+
+    ma.build_market(FakeFeed(), "US500")
+    assert "15min" in requested
+
+
+def test_load_active_mode_defaults_to_standard_with_no_state_file(tmp_path):
+    mode = ma.load_active_mode(path=str(tmp_path / "mode.json"))
+    assert mode is modes.STANDARD
+
+
+def test_save_and_load_active_mode_roundtrip(tmp_path):
+    path = str(tmp_path / "mode.json")
+    ma.save_active_mode_name("fast", path=path)
+    assert ma.load_active_mode(path=path) is modes.FAST
+
+
+def test_load_active_mode_falls_back_on_invalid_name(tmp_path):
+    path = str(tmp_path / "mode.json")
+    ma.save_json(path, {"mode": "not-a-real-mode"})
+    assert ma.load_active_mode(path=path) is modes.STANDARD
 
 
 def test_format_aplus_alert_contains_partial_tp_guidance():

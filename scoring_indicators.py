@@ -9,6 +9,7 @@ import os
 import pandas as pd
 
 import strategy_config as cfg
+from strategy import modes
 
 STATE_DIR = "state"
 LEVELS_PATH = os.path.join(STATE_DIR, "levels.json")
@@ -64,12 +65,13 @@ def atr_percentile(df, lookback=cfg.ATR_LOOKBACK_BARS, period=14):
     return float((window <= latest).sum() / len(window) * 100)
 
 
-def atr_sweet_spot_penalty(df, lookback=cfg.ATR_LOOKBACK_BARS, period=14):
+def atr_sweet_spot_penalty(df, lookback=cfg.ATR_LOOKBACK_BARS, period=14, mode=None):
     """Section 5.7 — penalize dead (< 10th pct) and chaotic (> 80th pct) ATR regimes."""
+    m = mode or modes.STANDARD
     pct = atr_percentile(df, lookback, period)
-    if pct < cfg.ATR_LOW_PERCENTILE:
+    if pct < m.atr_low_percentile:
         return cfg.ATR_DEAD_MARKET_PENALTY, "dead_market"
-    if pct > cfg.ATR_HIGH_PERCENTILE:
+    if pct > m.atr_high_percentile:
         return cfg.ATR_TOO_VOLATILE_PENALTY, "too_volatile"
     return 0, "normal"
 

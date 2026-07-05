@@ -1,6 +1,9 @@
+from unittest.mock import patch
+
 import pandas as pd
 
 import scoring_indicators as ind
+from strategy import modes
 from tests.helpers import make_candles
 
 
@@ -37,6 +40,27 @@ def test_round_number_bonus_far_from_level():
 
 def test_round_number_bonus_btc():
     assert ind.round_number_bonus(100010.0, "CRYPTO") == 5
+
+
+def test_atr_sweet_spot_penalty_uses_mode_percentiles():
+    """A percentile between standard's 80th and loose's 85th high bound must be
+    'too_volatile' under standard mode but 'normal' under loose mode."""
+    df = pd.DataFrame(make_candles(30, start_price=100.0, step=0.5, noise=1.0))
+    with patch.object(ind, "atr_percentile", return_value=82.0):
+        std_penalty, std_state = ind.atr_sweet_spot_penalty(df, mode=modes.STANDARD)
+        loose_penalty, loose_state = ind.atr_sweet_spot_penalty(df, mode=modes.LOOSE)
+    assert std_state == "too_volatile"
+    assert std_penalty < 0
+    assert loose_state == "normal"
+    assert loose_penalty == 0
+
+
+def test_atr_sweet_spot_penalty_defaults_to_standard_mode():
+    df = pd.DataFrame(make_candles(30, start_price=100.0, step=0.5, noise=1.0))
+    with patch.object(ind, "atr_percentile", return_value=82.0):
+        penalty, state = ind.atr_sweet_spot_penalty(df)
+    assert state == "too_volatile"
+    assert penalty < 0
 
 
 def test_level_store_roundtrip(tmp_path):

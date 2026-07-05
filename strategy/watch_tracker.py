@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 
-import strategy_config as cfg
+from strategy import modes
 
 STATE_DIR = "state"
 WATCH_STATE_PATH = os.path.join(STATE_DIR, "watches.json")
@@ -36,14 +36,19 @@ class WatchTracker:
     notifier(text) -> sends a Telegram message.
     aplus_formatter(scored) -> full A+ alert body (Section 7 format)."""
 
-    def __init__(self, rescorer, notifier, aplus_formatter, on_upgrade=None, path=WATCH_STATE_PATH):
+    def __init__(self, rescorer, notifier, aplus_formatter, on_upgrade=None, path=WATCH_STATE_PATH,
+                 mode=None):
         self.rescorer = rescorer
         self.notifier = notifier
         self.aplus_formatter = aplus_formatter
         self.on_upgrade = on_upgrade
         self.path = path
+        self.mode = mode
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self._data = self._load()
+
+    def _m(self):
+        return self.mode or modes.STANDARD
 
     def _load(self):
         try:
@@ -70,7 +75,7 @@ class WatchTracker:
             "tp1": scored["tp1"],
             "tp2": scored["tp2"],
             "issued_at": _iso(now_utc),
-            "expires_at": _iso(now_utc + timedelta(hours=cfg.WATCH_EXPIRY_HOURS)),
+            "expires_at": _iso(now_utc + timedelta(minutes=self._m().watch_expiry_minutes)),
             "last_update_sent": _iso(now_utc),
         }
         self._save()
@@ -80,6 +85,7 @@ class WatchTracker:
 
     def evaluate_all(self, now_utc):
         """Run the Section 3.2 decision tree for every active WATCH."""
+        m = self._m()
         for instrument, w in list(self._data.items()):
             expires_at = _parse(w["expires_at"])
             if now_utc > expires_at:
@@ -90,7 +96,7 @@ class WatchTracker:
             scored = self.rescorer(w["direction"], instrument, now_utc)
             new_score = scored["score"] if scored else 0
 
-            if new_score >= cfg.WATCH_UPGRADE_SCORE:
+            if new_score >= m.aplus_min_score:
                 self.notifier(
                     f"\U0001F7E2 WATCH → A+ — {instrument}\n"
                     f"Setup confirmed. Full signal now active.\n\n"
@@ -102,7 +108,7 @@ class WatchTracker:
                 self._save()
                 continue
 
-            if new_score < cfg.WATCH_COLLAPSE_SCORE:
+            if new_score < m.watch_collapse_score:
                 self.notifier(
                     f"✖️ {instrument} watch closed.\n"
                     f"Setup did not complete. No action needed."
@@ -113,7 +119,7 @@ class WatchTracker:
 
             # Score still 55-74 — continue monitoring, send update every 45 min
             last_update = _parse(w["last_update_sent"])
-            if now_utc - last_update > timedelta(minutes=cfg.WATCH_UPDATE_INTERVAL_MINUTES):
+            if now_utc - last_update > timedelta(minutes=m.watch_update_interval_minutes):
                 arrow = _trend_arrow(w["score"], new_score)
                 remaining = expires_at - now_utc
                 hrs, rem = divmod(int(remaining.total_seconds()), 3600)

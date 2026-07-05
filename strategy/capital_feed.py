@@ -13,8 +13,8 @@ import strategy_config as cfg
 CAPITAL_BASE = os.environ.get(
     "CAPITAL_BASE_URL", "https://demo-api-capital.backend-capital.com/api/v1")
 
-RESOLUTION = {"15min": "MINUTE_15", "1h": "HOUR", "4h": "HOUR_4", "daily": "DAY"}
-CACHE_TTL = {"15min": 0, "1h": 3600, "4h": 14400, "daily": 3600}
+RESOLUTION = {"15min": "MINUTE_15", "5min": "MINUTE_5", "1h": "HOUR", "4h": "HOUR_4", "daily": "DAY"}
+CACHE_TTL = {"15min": 0, "5min": 0, "1h": 3600, "4h": 14400, "daily": 3600}
 
 CACHE_DIR = ".cache"
 
