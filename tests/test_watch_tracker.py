@@ -1,5 +1,6 @@
 import datetime as dt
 
+from strategy import modes
 from strategy.watch_tracker import WatchTracker
 import strategy_config as cfg
 
@@ -13,7 +14,7 @@ def _scored(instrument="US500", direction="BUY", score=68):
             "entry_price": 5420.0, "stop_loss": 5398.0, "tp1": 5464.0, "tp2": 5508.0}
 
 
-def _tracker(tmp_path, rescore_value):
+def _tracker(tmp_path, rescore_value, mode=None):
     messages = []
     rescorer = lambda direction, instrument, now_utc: (
         {"score": rescore_value, "instrument": instrument, "direction": direction,
@@ -22,7 +23,7 @@ def _tracker(tmp_path, rescore_value):
     tracker = WatchTracker(
         rescorer=rescorer, notifier=lambda text: messages.append(text),
         aplus_formatter=lambda scored: "A+ BODY",
-        path=str(tmp_path / "watches.json"))
+        path=str(tmp_path / "watches.json"), mode=mode)
     return tracker, messages
 
 
@@ -80,6 +81,55 @@ def test_pattern_gone_treated_as_collapse(tmp_path):
     tracker.evaluate_all(_now() + dt.timedelta(minutes=15))
     assert not tracker.has_active("US500")
     assert any("watch closed" in m for m in messages)
+
+
+def test_mode_shorter_expiry_fast(tmp_path):
+    """Fast mode's 80-min expiry must close a WATCH that would still be
+    active under the default 240-min (4h) expiry."""
+    tracker, messages = _tracker(tmp_path, rescore_value=70, mode=modes.FAST)
+    tracker.add(_scored(score=68), _now())
+    tracker.evaluate_all(_now() + dt.timedelta(minutes=81))
+    assert not tracker.has_active("US500")
+    assert messages == []  # silent expiry, same as the default-mode expiry test
+
+
+def test_mode_default_expiry_unaffected_at_81_minutes(tmp_path):
+    tracker, _ = _tracker(tmp_path, rescore_value=70)
+    tracker.add(_scored(score=68), _now())
+    tracker.evaluate_all(_now() + dt.timedelta(minutes=81))
+    assert tracker.has_active("US500")
+
+
+def test_mode_aplus_threshold_loose(tmp_path):
+    """A rescore of 70 must upgrade to A+ under loose mode (aplus_min=68) but
+    stay in monitoring under the default mode (aplus_min=75)."""
+    default_tracker, default_messages = _tracker(tmp_path, rescore_value=70)
+    default_tracker.add(_scored(score=68), _now())
+    default_tracker.evaluate_all(_now() + dt.timedelta(minutes=15))
+    assert default_tracker.has_active("US500")
+    assert default_messages == []
+
+    loose_tracker, loose_messages = _tracker(tmp_path, rescore_value=70, mode=modes.LOOSE)
+    loose_tracker.add(_scored(score=68), _now())
+    loose_tracker.evaluate_all(_now() + dt.timedelta(minutes=15))
+    assert not loose_tracker.has_active("US500")
+    assert any("WATCH → A+" in m for m in loose_messages)
+
+
+def test_mode_collapse_threshold_loose(tmp_path):
+    """A rescore of 50 must collapse under the default mode (collapse=55) but
+    stay in monitoring under loose mode (collapse=48)."""
+    default_tracker, default_messages = _tracker(tmp_path, rescore_value=50)
+    default_tracker.add(_scored(score=68), _now())
+    default_tracker.evaluate_all(_now() + dt.timedelta(minutes=15))
+    assert not default_tracker.has_active("US500")
+    assert any("watch closed" in m for m in default_messages)
+
+    loose_tracker, loose_messages = _tracker(tmp_path, rescore_value=50, mode=modes.LOOSE)
+    loose_tracker.add(_scored(score=68), _now())
+    loose_tracker.evaluate_all(_now() + dt.timedelta(minutes=15))
+    assert loose_tracker.has_active("US500")
+    assert loose_messages == []
 
 
 def test_on_upgrade_callback_invoked(tmp_path):

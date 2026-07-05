@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import scoring_strategy as strat
+from strategy import modes
 from tests.helpers import make_candles, trending_h4_candles
 
 
@@ -141,6 +142,60 @@ def test_diagnostic_mode_qualifying_setup_has_no_blocked_reason():
             _fake_level_store(), diagnostic=True)
     assert result["blocked"] is None
     assert result["score"] >= 75
+
+
+def _ranging_market(quality):
+    market = {
+        "entry": make_candles(80, start_price=100.0, noise=0.3),
+        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
+        "h4": make_candles(260, start_price=100.0, step=0.0, noise=0.5, interval_minutes=240),
+    }
+    candidate = {"pattern": "FLAG", "direction": "BUY", "sweep_price": 100.0, "quality": quality}
+    return market, candidate
+
+
+def test_score_candidate_loose_mode_lower_watch_threshold():
+    """A setup scoring ~58 (RANGING bias +5, quality 27) must be blocked under
+    the default 62 threshold but pass under loose mode's 55 threshold."""
+    import datetime as dt
+    market, candidate = _ranging_market(quality=27)
+    now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
+    with patch.object(strat, "technical_confirm_score", return_value=10), \
+         patch.object(strat, "ma20_filter_score", return_value=4), \
+         patch.object(strat, "choppy_market_penalty", return_value=0), \
+         patch.object(strat, "volume_confirmation_bonus", return_value=0), \
+         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
+         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
+         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+        default_result = strat.score_candidate(
+            "US500", "US_INDEX", candidate, market, now, _fake_level_store())
+        loose_result = strat.score_candidate(
+            "US500", "US_INDEX", candidate, market, now, _fake_level_store(), mode=modes.LOOSE)
+    assert default_result is None
+    assert loose_result is not None
+    assert loose_result["score"] == 58
+
+
+def test_score_candidate_diagnostic_blocked_message_reflects_mode_threshold():
+    import datetime as dt
+    market, candidate = _ranging_market(quality=10)
+    now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
+    with patch.object(strat, "technical_confirm_score", return_value=10), \
+         patch.object(strat, "ma20_filter_score", return_value=4), \
+         patch.object(strat, "choppy_market_penalty", return_value=0), \
+         patch.object(strat, "volume_confirmation_bonus", return_value=0), \
+         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
+         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
+         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+        default_result = strat.score_candidate(
+            "US500", "US_INDEX", candidate, market, now, _fake_level_store(), diagnostic=True)
+        loose_result = strat.score_candidate(
+            "US500", "US_INDEX", candidate, market, now, _fake_level_store(),
+            diagnostic=True, mode=modes.LOOSE)
+    assert "62" in default_result["blocked"]
+    assert "55" in loose_result["blocked"]
 
 
 def test_with_trend_signal_is_not_blocked_and_scores():

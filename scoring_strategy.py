@@ -18,6 +18,7 @@ import pandas as pd
 import market_sessions
 import scoring_indicators as ind
 import strategy_config as cfg
+from strategy import modes
 
 STATE_DIR = "state"
 PENDING_APLUS_PATH = os.path.join(STATE_DIR, "pending_aplus.json")
@@ -312,7 +313,7 @@ def compute_entry_exit(candidate, breakout_candle, atr_value, rng=random):
 # score_candidate() — the full pipeline
 # ─────────────────────────────────────────────────────────────────────
 def score_candidate(instrument, instrument_class, candidate, market, now_utc, level_store,
-                     confirmation_bonus=0, diagnostic=False):
+                     confirmation_bonus=0, diagnostic=False, mode=None):
     """
     market: {'entry': [...15m candles], 'h1': [...], 'h4': [...], 'daily': [...]}
     Returns a dict with the full score breakdown + entry/stop/targets, or None if
@@ -322,7 +323,11 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     case instead returns a dict with a "blocked" reason and "score" (None if
     the block happened before a score could be computed at all). Used to show
     near-miss scores on /scan without changing normal alerting behavior.
+
+    mode: an optional strategy.modes.ModeConfig; defaults to modes.STANDARD
+    (today's behavior) when omitted.
     """
+    m = mode or modes.STANDARD
     direction = candidate["direction"]
 
     # Section 2 — PRIORITY FIX: counter-trend hard block
@@ -363,7 +368,7 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     total += volume_confirmation_bonus(df_entry, direction)
     total += choppy_market_penalty(df_entry)
 
-    atr_penalty, atr_state = ind.atr_sweet_spot_penalty(df_entry)
+    atr_penalty, atr_state = ind.atr_sweet_spot_penalty(df_entry, mode=m)
     total += atr_penalty
     breakdown["atr_state"] = atr_state
 
@@ -392,11 +397,11 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     total += confirmation_bonus
     breakdown["confirmation_bonus"] = confirmation_bonus
 
-    if total < cfg.WATCH_MIN_SCORE:
+    if total < m.watch_min_score:
         if diagnostic:
             return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
                      "score": int(round(total)), "htf_bias": htf,
-                     "blocked": f"below WATCH threshold ({cfg.WATCH_MIN_SCORE})"}
+                     "blocked": f"below WATCH threshold ({m.watch_min_score})"}
         return None
 
     exits = compute_entry_exit(candidate, df_entry.iloc[-1], a)

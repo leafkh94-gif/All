@@ -9,6 +9,7 @@ you can talk to the bot in real time.
 Commands you can text the bot:
     /scan    run a full scan right now and get the read
     /status  active WATCHes, pending A+ confirmations, last scan time
+    /mode    show or switch trading mode (standard/loose/fast)
     /help    this menu
 
 RUN (must stay running — Render/Railway/VPS worker, NOT a 15-min cron):
@@ -24,7 +25,7 @@ import requests
 
 import main_alerts as ma
 import scoring_strategy as strat
-import strategy_config as cfg
+from strategy import modes
 
 TELEGRAM_API = f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}"
 CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
@@ -38,13 +39,18 @@ QUIET_START = os.environ.get("QUIET_START", "") == "1"
 
 OFFSET_PATH = os.path.join(ma.STATE_DIR, "telegram_offset.json")
 
-HELP_TEXT = (
-    "Commands:\n"
-    "/scan - run a full scan right now\n"
-    "/status - active WATCHes and last scan\n"
-    "/help - this menu\n\n"
-    f"Automatic scans run every {cfg.SCAN_INTERVAL_MINUTES} min at :00/:15/:30/:45 UTC."
-)
+
+def help_text():
+    m = ma.load_active_mode()
+    return (
+        "Commands:\n"
+        "/scan - run a full scan right now\n"
+        "/status - active WATCHes and last scan\n"
+        "/mode - show or switch mode (standard/loose/fast)\n"
+        "/help - this menu\n\n"
+        f"Mode: {m.name} — scans every {m.scan_interval_minutes} min "
+        f"on a {m.entry_timeframe} entry timeframe."
+    )
 
 
 def reply(text):
@@ -59,7 +65,9 @@ def status_text():
     main_state = ma.load_json(ma.MAIN_STATE_PATH)
     watches = ma.load_json(os.path.join(ma.STATE_DIR, "watches.json"))
     pending = strat.PendingAPlusStore().all()
+    mode_name = main_state.get("last_scan_mode") or ma.load_active_mode().name
     lines = [f"📊 Bot status — {datetime.now(timezone.utc).strftime('%H:%M')} UTC",
+             f"Mode: {mode_name}",
              f"Last scan: {main_state.get('last_scan_time', 'n/a')}",
              f"Today's A+ signals: {main_state.get('aplus_count', 0)}"]
     if watches:
@@ -115,8 +123,23 @@ def handle_command(text):
             reply("⚠️ Scan hit an error — check the host logs. Will retry on the next cycle.")
     elif t.startswith("/status"):
         reply(status_text())
+    elif t.startswith("/mode"):
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) == 1:
+            current = ma.load_active_mode().name
+            reply(f"Current mode: {current}\nAvailable: standard, loose, fast\n"
+                  f"Usage: /mode <name> to switch.")
+        else:
+            requested = parts[1].strip().lower()
+            if requested not in modes.MODES:
+                reply(f"Unknown mode '{requested}'. Available: standard, loose, fast")
+            else:
+                ma.save_active_mode_name(requested)
+                new_mode = modes.MODES[requested]
+                reply(f"✅ Mode set to '{requested}'. Takes effect on the next scan cycle "
+                      f"(every {new_mode.scan_interval_minutes} min).")
     elif t.startswith(("/help", "/start")):
-        reply(HELP_TEXT)
+        reply(help_text())
 
 
 def _load_offset():
@@ -152,10 +175,14 @@ def poll_telegram(timeout_s):
         _save_offset(offset)
 
 
-def next_scan_timestamp(now_ts=None):
-    """Next :00/:15/:30/:45 UTC boundary as a unix timestamp."""
+def next_scan_timestamp(now_ts=None, interval_minutes=None):
+    """Next scan-cadence boundary (e.g. :00/:15/:30/:45 UTC at the default
+    15-min interval) as a unix timestamp. interval_minutes defaults to the
+    currently active mode's cadence when not given explicitly."""
     now_ts = now_ts if now_ts is not None else time.time()
-    interval = cfg.SCAN_INTERVAL_MINUTES * 60
+    if interval_minutes is None:
+        interval_minutes = ma.load_active_mode().scan_interval_minutes
+    interval = interval_minutes * 60
     return (int(now_ts) // interval + 1) * interval
 
 
@@ -164,9 +191,10 @@ def main():
     print(f"bot starting — real-time mode"
           + (f" (bounded, {MAX_RUNTIME_MINUTES:.0f} min)" if deadline else ""))
     if not QUIET_START:
-        reply("🤖 Bot online — real-time mode.\n" + HELP_TEXT)
+        reply("🤖 Bot online — real-time mode.\n" + help_text())
     run_scan_safely("startup")
     next_scan = next_scan_timestamp()
+    current_interval = ma.load_active_mode().scan_interval_minutes
     while True:
         if deadline and time.time() >= deadline:
             print("max runtime reached — exiting cleanly for the next relay job")
@@ -175,12 +203,17 @@ def main():
         if remaining <= 0:
             run_scan_safely("scheduled")
             next_scan = next_scan_timestamp()
+            current_interval = ma.load_active_mode().scan_interval_minutes
             continue
-        # long-poll Telegram in <=45s slices until the next quarter-hour boundary
+        # long-poll Telegram in <=45s slices until the next scan boundary
         slice_s = min(45, max(1, remaining))
         if deadline:
             slice_s = min(slice_s, max(1, deadline - time.time()))
         poll_telegram(int(slice_s))
+        new_interval = ma.load_active_mode().scan_interval_minutes
+        if new_interval != current_interval:
+            next_scan = next_scan_timestamp()  # mode changed mid-wait — rebase to new cadence
+            current_interval = new_interval
         mins_left = max(0, int((next_scan - time.time()) // 60))
         print(f"alive — listening on Telegram, next scan in ~{mins_left} min")
 
