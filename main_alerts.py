@@ -15,6 +15,7 @@ import scoring_indicators as ind
 import scoring_strategy as strat
 import strategy_config as cfg
 from strategy import modes
+from strategy import scan_diagnostics
 from strategy.capital_feed import CapitalFeed
 from strategy.watch_tracker import WatchTracker
 
@@ -339,10 +340,12 @@ def run():
     for instrument, meta in cfg.INSTRUMENTS.items():
         try:
             market = build_market(feed, instrument, mode=mode)
+            bars_diag = scan_diagnostics.bars_report(instrument, market["entry"], now)
+            print(bars_diag)
             candidate = strat.find_candidate(market["entry"])
             if not candidate:
                 diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,
-                                            "blocked": "no pattern detected"}
+                                            "blocked": f"no pattern detected ({bars_diag.split(': ', 1)[1]})"}
                 continue
             scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store,
                                             diagnostic=True, mode=mode)

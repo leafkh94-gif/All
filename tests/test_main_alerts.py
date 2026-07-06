@@ -2,6 +2,7 @@ import datetime as dt
 
 import main_alerts as ma
 from strategy import modes
+from strategy import scan_diagnostics
 
 
 def test_hard_flat_active_after_1830_us_index():
@@ -148,3 +149,17 @@ def test_daily_reset_if_needed_resets_new_day():
     ma.daily_reset_if_needed(state, dt.datetime(2026, 7, 1, 0, 0, tzinfo=dt.timezone.utc))
     assert state["aplus_count"] == 0
     assert state["aplus_count_date"] == "2026-07-01"
+
+
+def test_no_pattern_blocked_message_includes_bars_diagnostic():
+    """Reproduces the exact blocked-message construction from main_alerts.run()'s
+    per-instrument scan loop when find_candidate returns None, to confirm the
+    bar-count detail (data problem vs detectors-too-tight) is folded in."""
+    too_few_candles = [{"t": f"2026-01-01T00:{i:02d}:00", "o": 1, "h": 2, "l": 0, "c": 1}
+                        for i in range(10)]
+    now = dt.datetime(2026, 1, 1, 0, 20, tzinfo=dt.timezone.utc)
+    bars_diag = scan_diagnostics.bars_report("US500", too_few_candles, now)
+    blocked = f"no pattern detected ({bars_diag.split(': ', 1)[1]})"
+    assert "no pattern detected" in blocked
+    assert "10/30 bars" in blocked
+    assert "data problem" in blocked
