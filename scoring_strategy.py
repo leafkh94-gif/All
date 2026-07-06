@@ -406,8 +406,8 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
 
     exits = compute_entry_exit(candidate, df_entry.iloc[-1], a)
     result = {
-        "instrument": instrument, "direction": direction, "score": int(round(total)),
-        "breakdown": breakdown, "htf_bias": htf, **exits,
+        "instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+        "score": int(round(total)), "breakdown": breakdown, "htf_bias": htf, **exits,
     }
     if diagnostic:
         result["blocked"] = None

@@ -142,6 +142,38 @@ def test_diagnostic_mode_qualifying_setup_has_no_blocked_reason():
             _fake_level_store(), diagnostic=True)
     assert result["blocked"] is None
     assert result["score"] >= 75
+    assert result["pattern"] == "LIQUIDITY_SWEEP_BOS"
+
+
+def test_diagnostic_mode_qualifying_result_survives_main_alerts_diagnostics_dict():
+    """Regression test: main_alerts.run() builds a diagnostics dict via
+    scored["pattern"]/["direction"]/["score"]/["blocked"] for every candidate,
+    qualifying or not. A prior bug omitted "pattern" from the qualifying-case
+    result (it was only nested under result["breakdown"]["pattern"]), which
+    raised a KeyError and silently killed every scan that found a real signal,
+    blocking all alerts. This reproduces that exact access pattern."""
+    market = {
+        "entry": make_candles(80, start_price=100.0, noise=0.3),
+        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
+        "h4": trending_h4_candles(up=True),
+    }
+    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
+                 "sweep_price": 100.0, "quality": 38}
+    import datetime as dt
+    with patch.object(strat, "technical_confirm_score", return_value=10), \
+         patch.object(strat, "ma20_filter_score", return_value=4), \
+         patch.object(strat, "choppy_market_penalty", return_value=0), \
+         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
+         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
+         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+        scored = strat.score_candidate(
+            "US500", "US_INDEX", candidate, market,
+            dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc),
+            _fake_level_store(), diagnostic=True)
+    diagnostic_entry = {"pattern": scored["pattern"], "direction": scored["direction"],
+                         "score": scored["score"], "blocked": scored["blocked"]}
+    assert diagnostic_entry["pattern"] == "LIQUIDITY_SWEEP_BOS"
 
 
 def _ranging_market(quality):

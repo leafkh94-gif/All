@@ -5,6 +5,7 @@ Alert-only. Never executes trades. Scans every 15 minutes aligned to
 """
 import json
 import os
+import traceback
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -336,18 +337,25 @@ def run():
     candidates = []
     diagnostics = {}
     for instrument, meta in cfg.INSTRUMENTS.items():
-        market = build_market(feed, instrument, mode=mode)
-        candidate = strat.find_candidate(market["entry"])
-        if not candidate:
+        try:
+            market = build_market(feed, instrument, mode=mode)
+            candidate = strat.find_candidate(market["entry"])
+            if not candidate:
+                diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,
+                                            "blocked": "no pattern detected"}
+                continue
+            scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store,
+                                            diagnostic=True, mode=mode)
+            diagnostics[instrument] = {"pattern": scored["pattern"], "direction": scored["direction"],
+                                        "score": scored["score"], "blocked": scored["blocked"]}
+            if scored["blocked"] is None:
+                candidates.append((instrument, scored))
+        except Exception:
+            # One instrument's scoring must never take down the scan for the
+            # other three, or block an already-collected qualifying alert.
+            print(f"[{instrument}] scoring failed:\n{traceback.format_exc()}")
             diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,
-                                        "blocked": "no pattern detected"}
-            continue
-        scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store,
-                                        diagnostic=True, mode=mode)
-        diagnostics[instrument] = {"pattern": scored["pattern"], "direction": scored["direction"],
-                                    "score": scored["score"], "blocked": scored["blocked"]}
-        if scored["blocked"] is None:
-            candidates.append((instrument, scored))
+                                        "blocked": "internal error (see logs)"}
 
     candidates = dedup_us_index_candidates(candidates)
 
