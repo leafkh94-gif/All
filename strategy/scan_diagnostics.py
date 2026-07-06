@@ -96,6 +96,10 @@ def bars_report(symbol, data, now_utc=None):
     ts = _last_timestamp(data)
     age = _minutes_old(ts, now_utc)
 
+    if age is not None and age < 0:
+        return (f"{symbol}: {n} bars OK, but last-candle timestamp looks inconsistent "
+                f"(age={age:.0f}min) — freshness unverified, check detectors separately")
+
     if age is not None and age > STALE_AFTER_MIN:
         return (f"{symbol}: {n} bars OK but last candle {age:.0f} min old "
                 f"— stale feed (data problem, common on indices Mon/session open)")
