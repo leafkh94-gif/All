@@ -64,6 +64,7 @@ def reply(text):
 def status_text():
     main_state = ma.load_json(ma.MAIN_STATE_PATH)
     watches = ma.load_json(os.path.join(ma.STATE_DIR, "watches.json"))
+    open_trades = ma.load_json(ma.OPEN_TRADES_PATH)
     pending = strat.PendingAPlusStore().all()
     mode_name = main_state.get("last_scan_mode") or ma.load_active_mode().name
     lines = [f"📊 Bot status — {datetime.now(timezone.utc).strftime('%H:%M')} UTC",
@@ -76,6 +77,13 @@ def status_text():
             lines.append(f"  ⚡ {inst} {w['direction']} — score {w['score']}, entry {w['entry_price']}")
     else:
         lines.append("Active WATCHes: none")
+    if open_trades:
+        lines.append("Open trades:")
+        for inst, t in open_trades.items():
+            stage = "past TP1, trailing to TP2" if t.get("tp1_hit") else "before TP1"
+            lines.append(f"  📌 {inst} {t['direction']} — entry {t['entry_price']} ({stage})")
+    else:
+        lines.append("Open trades: none")
     if pending:
         lines.append("Awaiting A+ confirmation: " + ", ".join(pending))
     return "\n".join(lines)

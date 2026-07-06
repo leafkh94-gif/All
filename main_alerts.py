@@ -22,6 +22,7 @@ from strategy.watch_tracker import WatchTracker
 STATE_DIR = "state"
 MAIN_STATE_PATH = os.path.join(STATE_DIR, "main_state.json")
 ACTIVE_ENTRIES_PATH = os.path.join(STATE_DIR, "active_entries.json")
+OPEN_TRADES_PATH = os.path.join(STATE_DIR, "open_trades.json")
 MODE_STATE_PATH = os.path.join(STATE_DIR, "mode.json")
 
 
@@ -86,11 +87,14 @@ class ActiveEntryTracker:
         self._data[scored["instrument"]] = {
             "direction": scored["direction"],
             "entry_price": scored["entry_price"],
+            "stop_loss": scored.get("stop_loss"),
+            "tp1": scored.get("tp1"),
+            "tp2": scored.get("tp2"),
             "alert_time": now_utc.isoformat(),
         }
         save_json(self.path, self._data)
 
-    def evaluate_all(self, now_utc, feed, mode=None):
+    def evaluate_all(self, now_utc, feed, mode=None, open_tracker=None):
         m = mode or modes.STANDARD
         for instrument, e in list(self._data.items()):
             alert_time = datetime.fromisoformat(e["alert_time"])
@@ -102,6 +106,8 @@ class ActiveEntryTracker:
             if touched:
                 del self._data[instrument]
                 save_json(self.path, self._data)
+                if open_tracker is not None and e.get("stop_loss") is not None:
+                    open_tracker.add({**e, "instrument": instrument}, now_utc)
                 continue
             if now_utc - alert_time > timedelta(minutes=m.entry_expiry_minutes):
                 send_telegram(
@@ -111,6 +117,81 @@ class ActiveEntryTracker:
                 )
                 del self._data[instrument]
                 save_json(self.path, self._data)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Section 7 — Live TP/stop tracking for filled entries.
+# Alert-only: tells you what to do (close 50%, move stop, etc.), never
+# touches the broker itself.
+# ─────────────────────────────────────────────────────────────────────
+class OpenTradeTracker:
+    def __init__(self, path=OPEN_TRADES_PATH):
+        self.path = path
+        self._data = load_json(path)
+
+    def add(self, scored, now_utc):
+        self._data[scored["instrument"]] = {
+            "direction": scored["direction"],
+            "entry_price": scored["entry_price"],
+            "stop_loss": scored["stop_loss"],
+            "tp1": scored["tp1"],
+            "tp2": scored["tp2"],
+            "tp1_hit": False,
+            "opened_at": now_utc.isoformat(),
+        }
+        save_json(self.path, self._data)
+
+    def evaluate_all(self, now_utc, feed):
+        for instrument, t in list(self._data.items()):
+            price = feed.get_current_price(instrument)
+            if price is None:
+                continue
+            is_buy = t["direction"] == "BUY"
+
+            if not t["tp1_hit"]:
+                hit_tp1 = price >= t["tp1"] if is_buy else price <= t["tp1"]
+                hit_stop = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
+                if hit_tp1:
+                    t["tp1_hit"] = True
+                    t["stop_loss"] = t["entry_price"]
+                    save_json(self.path, self._data)
+                    send_telegram(
+                        f"🎯 {instrument} TP1 hit @ {t['tp1']}.\n"
+                        f"Close 50% of the position now.\n"
+                        f"Stop loss moved to breakeven ({t['entry_price']}) on the rest — let it run to TP2."
+                    )
+                    continue
+                if hit_stop:
+                    del self._data[instrument]
+                    save_json(self.path, self._data)
+                    send_telegram(f"🛑 {instrument} stop loss hit @ {t['stop_loss']}. Full position closed.")
+                    continue
+            else:
+                hit_tp2 = price >= t["tp2"] if is_buy else price <= t["tp2"]
+                hit_be = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
+                if hit_tp2:
+                    del self._data[instrument]
+                    save_json(self.path, self._data)
+                    send_telegram(f"✅ {instrument} TP2 hit @ {t['tp2']}. Close the remaining position — trade complete.")
+                    continue
+                if hit_be:
+                    del self._data[instrument]
+                    save_json(self.path, self._data)
+                    send_telegram(
+                        f"⚖️ {instrument} breakeven stop hit after TP1. "
+                        f"Remainder closed at entry — partial profit locked in."
+                    )
+                    continue
+
+            cls = cfg.INSTRUMENTS.get(instrument, {}).get("class")
+            if hard_flat_active(now_utc, cls):
+                del self._data[instrument]
+                save_json(self.path, self._data)
+                send_telegram(
+                    f"⏰ {instrument} — TP2 not hit before "
+                    f"{cfg.HARD_FLAT_UTC_HOUR:02d}:{cfg.HARD_FLAT_UTC_MINUTE:02d} UTC.\n"
+                    f"Close all remaining position now, per the original A+ plan."
+                )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -308,6 +389,7 @@ def run():
     level_store = ind.LevelStore()
     pending_store = strat.PendingAPlusStore()
     entry_tracker = ActiveEntryTracker()
+    open_trade_tracker = OpenTradeTracker()
 
     maybe_record_daily_levels(feed, level_store, now)
     maybe_record_weekly_levels(feed, level_store, now)
@@ -331,7 +413,8 @@ def run():
 
     # START of every 15-min loop, per Section 3.4 — evaluate WATCHes before scanning.
     watch_tracker.evaluate_all(now)
-    entry_tracker.evaluate_all(now, feed, mode=mode)
+    open_trade_tracker.evaluate_all(now, feed)
+    entry_tracker.evaluate_all(now, feed, mode=mode, open_tracker=open_trade_tracker)
     evaluate_pending_confirmations(pending_store, feed, level_store, now, entry_tracker, main_state, mode=mode)
     maybe_send_health_check(main_state, watch_tracker, now)
 
