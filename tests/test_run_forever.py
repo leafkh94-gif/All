@@ -94,3 +94,22 @@ def test_handle_command_mode_rejects_unknown_name(monkeypatch):
     rf.handle_command("/mode bogus")
     assert saved == []
     assert any("Unknown mode" in m for m in sent)
+
+
+def test_diagnostics_text_no_pattern_never_renders_none_none(monkeypatch):
+    # Reproduces the exact live-bot output that surfaced the regression: a
+    # dynamic "no pattern detected (...)" blocked message (introduced when
+    # scan_diagnostics.py started folding bar-count/staleness detail into it)
+    # must not fall through to the "direction pattern — blocked" branch, which
+    # would render the literal string "None None" since neither is known yet.
+    monkeypatch.setattr(ma, "load_json", lambda path: {
+        "last_diagnostics": {
+            "BTCUSD": {
+                "pattern": None, "direction": None, "score": None,
+                "blocked": "no pattern detected (80 bars OK, last candle age=-226min, fresh — detectors too tight)",
+            }
+        }
+    })
+    text = rf.diagnostics_text()
+    assert "None None" not in text
+    assert "no pattern detected" in text

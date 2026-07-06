@@ -43,6 +43,18 @@ def test_bars_report_ok_fresh_data_means_detectors_too_tight():
     assert "stale" not in report
 
 
+def test_bars_report_future_timestamp_reports_inconsistent_not_fresh():
+    # Reproduces the observed anomaly: a last-candle timestamp after now_utc
+    # is physically impossible and must not be asserted as "fresh".
+    candles = [_candle(f"2026-01-01T04:{i:02d}:00") for i in range(30)]
+    now = dt.datetime(2026, 1, 1, 0, 30, tzinfo=dt.timezone.utc)  # hours before the last candle
+    report = diag.bars_report("BTCUSD", candles, now_utc=now)
+    assert "inconsistent" in report
+    assert "freshness unverified" in report
+    assert "detectors too tight" not in report
+    assert "stale feed" not in report
+
+
 def test_bars_report_never_raises_on_malformed_candles():
     # no "t" key at all — timestamp lookup should quietly give up, not raise
     candles = [{"o": 1, "h": 2, "l": 0, "c": 1} for _ in range(30)]

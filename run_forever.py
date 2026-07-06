@@ -88,8 +88,8 @@ def diagnostics_text():
         return "No scan diagnostics yet."
     lines = ["📈 Scan detail (why each instrument didn't qualify):"]
     for instrument, d in diag.items():
-        if d["blocked"] == "no pattern detected":
-            lines.append(f"  {instrument}: no pattern detected")
+        if d["pattern"] is None:
+            lines.append(f"  {instrument}: {d['blocked']}")
         elif d["score"] is None:
             lines.append(f"  {instrument}: {d['direction']} {d['pattern']} — {d['blocked']}")
         elif d["blocked"] is None:
