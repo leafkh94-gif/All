@@ -379,17 +379,35 @@ def daily_reset_if_needed(main_state, now_utc):
 
 # ─────────────────────────────────────────────────────────────────────
 # Daily loss circuit-breaker — self-reported, since this alert-only bot has
-# no visibility into the user's real account balance/P&L.
+# no visibility into the user's real account balance/P&L. Runs as a
+# DAILY_LOSS_BREAKER_DURATION_DAYS trial: the window starts the first time
+# the bot ever sees it (not a hardcoded date, so it isn't thrown off by
+# when this actually goes live), and enforcement quietly stops once it
+# expires — /loss and /win keep logging, they just stop pausing alerts.
 # ─────────────────────────────────────────────────────────────────────
+def ensure_loss_breaker_window(main_state, now_utc):
+    if "loss_breaker_active_until" not in main_state:
+        main_state["loss_breaker_active_until"] = (
+            now_utc + timedelta(days=cfg.DAILY_LOSS_BREAKER_DURATION_DAYS)
+        ).isoformat()
+
+
+def loss_breaker_window_active(main_state, now_utc):
+    until = main_state.get("loss_breaker_active_until")
+    return until is not None and now_utc < datetime.fromisoformat(until)
+
+
 def record_loss(amount, now_utc=None, path=None):
     now_utc = now_utc or datetime.now(timezone.utc)
     path = path or MAIN_STATE_PATH
     main_state = load_json(path)
     daily_reset_if_needed(main_state, now_utc)
-    was_tripped = main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD
+    ensure_loss_breaker_window(main_state, now_utc)
+    window_active = loss_breaker_window_active(main_state, now_utc)
+    was_tripped = window_active and main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD
     main_state["daily_loss_total"] = main_state.get("daily_loss_total", 0.0) + amount
     save_json(path, main_state)
-    now_tripped = main_state["daily_loss_total"] >= cfg.DAILY_LOSS_LIMIT_USD
+    now_tripped = window_active and main_state["daily_loss_total"] >= cfg.DAILY_LOSS_LIMIT_USD
     if now_tripped and not was_tripped:
         send_telegram(
             f"🛑 Daily loss limit (${cfg.DAILY_LOSS_LIMIT_USD:.2f}) reached "
@@ -404,6 +422,7 @@ def record_win(amount, now_utc=None, path=None):
     path = path or MAIN_STATE_PATH
     main_state = load_json(path)
     daily_reset_if_needed(main_state, now_utc)
+    ensure_loss_breaker_window(main_state, now_utc)
     main_state["daily_loss_total"] = main_state.get("daily_loss_total", 0.0) - amount
     save_json(path, main_state)
     return main_state["daily_loss_total"]
@@ -413,8 +432,10 @@ def run():
     now = datetime.now(timezone.utc)
     main_state = load_json(MAIN_STATE_PATH)
     daily_reset_if_needed(main_state, now)
+    ensure_loss_breaker_window(main_state, now)
     mode = load_active_mode()
-    breaker_tripped = main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD
+    breaker_tripped = (loss_breaker_window_active(main_state, now)
+                       and main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD)
 
     feed = CapitalFeed()
     feed.open_session()

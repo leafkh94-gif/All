@@ -54,6 +54,7 @@ WATCH_MAX_SCORE = 74
 APLUS_MIN_SCORE = 75
 
 DAILY_LOSS_LIMIT_USD = 20.0   # self-reported via /loss; new WATCH/A+ alerts pause once hit
+DAILY_LOSS_BREAKER_DURATION_DAYS = 14   # trial window; breaker stops enforcing after this
 
 # ─────────────────────────────────────────────────────────────────────
 # 1.5  Entry & exit logic

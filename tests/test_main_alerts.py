@@ -303,6 +303,46 @@ def test_record_win_reduces_daily_total_and_can_go_negative(tmp_path):
     assert total == -5.0
 
 
+def test_ensure_loss_breaker_window_sets_start_only_once():
+    state = {}
+    first = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    ma.ensure_loss_breaker_window(state, first)
+    first_until = state["loss_breaker_active_until"]
+    later = dt.datetime(2026, 7, 5, 10, 0, tzinfo=dt.timezone.utc)
+    ma.ensure_loss_breaker_window(state, later)
+    assert state["loss_breaker_active_until"] == first_until  # not reset on a later touch
+
+
+def test_loss_breaker_window_active_within_14_days_inactive_after():
+    state = {}
+    start = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    ma.ensure_loss_breaker_window(state, start)
+    within = start + dt.timedelta(days=13)
+    after = start + dt.timedelta(days=15)
+    assert ma.loss_breaker_window_active(state, within) is True
+    assert ma.loss_breaker_window_active(state, after) is False
+
+
+def test_record_loss_does_not_trip_or_notify_after_trial_window_ends(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
+    path = str(tmp_path / "main_state.json")
+    start = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    ma.record_loss(1.0, now_utc=start, path=path)  # starts the trial window
+
+    after_trial = start + dt.timedelta(days=15)
+    # Seed a same-day total already past the limit, isolating the trial-expiry
+    # check from the unrelated daily reset (a new UTC day would zero it anyway).
+    state = ma.load_json(path)
+    state["aplus_count_date"] = after_trial.strftime("%Y-%m-%d")
+    state["daily_loss_total"] = 25.0
+    ma.save_json(path, state)
+
+    total = ma.record_loss(5.0, now_utc=after_trial, path=path)
+    assert total == 30.0
+    assert sent == []  # no breaker-tripped notification once the trial has expired
+
+
 
 
 def test_no_pattern_blocked_message_includes_bars_diagnostic():

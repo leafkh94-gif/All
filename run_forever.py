@@ -64,6 +64,7 @@ def reply(text):
 
 
 def status_text():
+    now = datetime.now(timezone.utc)
     main_state = ma.load_json(ma.MAIN_STATE_PATH)
     watches = ma.load_json(os.path.join(ma.STATE_DIR, "watches.json"))
     open_trades = ma.load_json(ma.OPEN_TRADES_PATH)
@@ -71,10 +72,17 @@ def status_text():
     mode_name = main_state.get("last_scan_mode") or ma.load_active_mode().name
     daily_loss = main_state.get("daily_loss_total", 0.0)
     limit = ma.cfg.DAILY_LOSS_LIMIT_USD
+    window_active = ma.loss_breaker_window_active(main_state, now)
     loss_line = f"Today's P&L: ${daily_loss:.2f} logged (limit ${limit:.2f})"
-    if daily_loss >= limit:
-        loss_line += " — 🛑 new alerts paused until UTC midnight"
-    lines = [f"📊 Bot status — {datetime.now(timezone.utc).strftime('%H:%M')} UTC",
+    if window_active:
+        if daily_loss >= limit:
+            loss_line += " — 🛑 new alerts paused until UTC midnight"
+        until = datetime.fromisoformat(main_state["loss_breaker_active_until"])
+        days_left = max(0, (until - now).days)
+        loss_line += f"\nLoss-limit trial: {days_left}d left"
+    else:
+        loss_line += "\nLoss-limit trial ended — no longer enforced"
+    lines = [f"📊 Bot status — {now.strftime('%H:%M')} UTC",
              f"Mode: {mode_name}",
              f"Last scan: {main_state.get('last_scan_time', 'n/a')}",
              f"Today's A+ signals: {main_state.get('aplus_count', 0)}",
@@ -158,9 +166,12 @@ def handle_command(text):
         parts = text.strip().split(maxsplit=1)
         limit = ma.cfg.DAILY_LOSS_LIMIT_USD
         if len(parts) == 1:
-            total = ma.load_json(ma.MAIN_STATE_PATH).get("daily_loss_total", 0.0)
-            status = " — alerts paused" if total >= limit else ""
-            reply(f"Today's logged loss: ${total:.2f} / ${limit:.2f} limit{status}.\n"
+            main_state = ma.load_json(ma.MAIN_STATE_PATH)
+            total = main_state.get("daily_loss_total", 0.0)
+            window_active = ma.loss_breaker_window_active(main_state, datetime.now(timezone.utc))
+            status = " — alerts paused" if window_active and total >= limit else ""
+            trial_note = "" if window_active else " (trial ended — no longer enforced)"
+            reply(f"Today's logged loss: ${total:.2f} / ${limit:.2f} limit{status}{trial_note}.\n"
                   f"Usage: /loss <amount> to log a realized loss.")
         else:
             try:
