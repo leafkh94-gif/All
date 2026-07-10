@@ -264,6 +264,47 @@ def test_daily_reset_if_needed_resets_new_day():
     assert state["aplus_count_date"] == "2026-07-01"
 
 
+def test_daily_reset_if_needed_zeroes_daily_loss_on_new_day():
+    state = {"aplus_count_date": "2026-06-30", "aplus_count": 5, "daily_loss_total": 20.0}
+    ma.daily_reset_if_needed(state, dt.datetime(2026, 7, 1, 0, 0, tzinfo=dt.timezone.utc))
+    assert state["daily_loss_total"] == 0.0
+
+
+def test_record_loss_accumulates_and_trips_breaker_at_limit(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
+    path = str(tmp_path / "main_state.json")
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    total = ma.record_loss(15.0, now_utc=now, path=path)
+    assert total == 15.0
+    assert sent == []  # under the $20 limit — no notification yet
+    total = ma.record_loss(5.0, now_utc=now, path=path)
+    assert total == 20.0
+    assert any("Daily loss limit" in m for m in sent)
+
+
+def test_record_loss_only_notifies_once_when_already_tripped(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
+    path = str(tmp_path / "main_state.json")
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    ma.record_loss(20.0, now_utc=now, path=path)
+    assert len(sent) == 1
+    total = ma.record_loss(5.0, now_utc=now, path=path)
+    assert total == 25.0
+    assert len(sent) == 1  # no second notification
+
+
+def test_record_win_reduces_daily_total_and_can_go_negative(tmp_path):
+    path = str(tmp_path / "main_state.json")
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    ma.record_loss(10.0, now_utc=now, path=path)
+    total = ma.record_win(15.0, now_utc=now, path=path)
+    assert total == -5.0
+
+
+
+
 def test_no_pattern_blocked_message_includes_bars_diagnostic():
     """Reproduces the exact blocked-message construction from main_alerts.run()'s
     per-instrument scan loop when find_candidate returns None, to confirm the

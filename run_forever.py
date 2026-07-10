@@ -47,6 +47,8 @@ def help_text():
         "/scan - run a full scan right now\n"
         "/status - active WATCHes and last scan\n"
         "/mode - show or switch mode (standard/loose/fast)\n"
+        "/loss <amount> - log a realized loss (pauses new alerts at the daily limit)\n"
+        "/win <amount> - log a realized win\n"
         "/help - this menu\n\n"
         f"Mode: {m.name} — scans every {m.scan_interval_minutes} min "
         f"on a {m.entry_timeframe} entry timeframe."
@@ -67,10 +69,16 @@ def status_text():
     open_trades = ma.load_json(ma.OPEN_TRADES_PATH)
     pending = strat.PendingAPlusStore().all()
     mode_name = main_state.get("last_scan_mode") or ma.load_active_mode().name
+    daily_loss = main_state.get("daily_loss_total", 0.0)
+    limit = ma.cfg.DAILY_LOSS_LIMIT_USD
+    loss_line = f"Today's P&L: ${daily_loss:.2f} logged (limit ${limit:.2f})"
+    if daily_loss >= limit:
+        loss_line += " — 🛑 new alerts paused until UTC midnight"
     lines = [f"📊 Bot status — {datetime.now(timezone.utc).strftime('%H:%M')} UTC",
              f"Mode: {mode_name}",
              f"Last scan: {main_state.get('last_scan_time', 'n/a')}",
-             f"Today's A+ signals: {main_state.get('aplus_count', 0)}"]
+             f"Today's A+ signals: {main_state.get('aplus_count', 0)}",
+             loss_line]
     if watches:
         lines.append("Active WATCHes:")
         for inst, w in watches.items():
@@ -146,6 +154,35 @@ def handle_command(text):
                 new_mode = modes.MODES[requested]
                 reply(f"✅ Mode set to '{requested}'. Takes effect on the next scan cycle "
                       f"(every {new_mode.scan_interval_minutes} min).")
+    elif t.startswith("/loss"):
+        parts = text.strip().split(maxsplit=1)
+        limit = ma.cfg.DAILY_LOSS_LIMIT_USD
+        if len(parts) == 1:
+            total = ma.load_json(ma.MAIN_STATE_PATH).get("daily_loss_total", 0.0)
+            status = " — alerts paused" if total >= limit else ""
+            reply(f"Today's logged loss: ${total:.2f} / ${limit:.2f} limit{status}.\n"
+                  f"Usage: /loss <amount> to log a realized loss.")
+        else:
+            try:
+                amount = float(parts[1])
+            except ValueError:
+                reply("Usage: /loss <amount>, e.g. /loss 15.50")
+            else:
+                total = ma.record_loss(amount)
+                reply(f"Logged ${amount:.2f} loss. Today's total: ${total:.2f} / ${limit:.2f} limit.")
+    elif t.startswith("/win"):
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) == 1:
+            reply("Usage: /win <amount> to log a realized win.")
+        else:
+            try:
+                amount = float(parts[1])
+            except ValueError:
+                reply("Usage: /win <amount>, e.g. /win 15.50")
+            else:
+                total = ma.record_win(amount)
+                reply(f"Logged ${amount:.2f} win. Today's net: ${total:.2f} "
+                      f"(limit ${ma.cfg.DAILY_LOSS_LIMIT_USD:.2f}).")
     elif t.startswith(("/help", "/start")):
         reply(help_text())
 

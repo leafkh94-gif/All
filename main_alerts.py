@@ -374,6 +374,39 @@ def daily_reset_if_needed(main_state, now_utc):
     if main_state.get("aplus_count_date") != today_key:
         main_state["aplus_count_date"] = today_key
         main_state["aplus_count"] = 0
+        main_state["daily_loss_total"] = 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Daily loss circuit-breaker — self-reported, since this alert-only bot has
+# no visibility into the user's real account balance/P&L.
+# ─────────────────────────────────────────────────────────────────────
+def record_loss(amount, now_utc=None, path=None):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    path = path or MAIN_STATE_PATH
+    main_state = load_json(path)
+    daily_reset_if_needed(main_state, now_utc)
+    was_tripped = main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD
+    main_state["daily_loss_total"] = main_state.get("daily_loss_total", 0.0) + amount
+    save_json(path, main_state)
+    now_tripped = main_state["daily_loss_total"] >= cfg.DAILY_LOSS_LIMIT_USD
+    if now_tripped and not was_tripped:
+        send_telegram(
+            f"🛑 Daily loss limit (${cfg.DAILY_LOSS_LIMIT_USD:.2f}) reached "
+            f"(logged: ${main_state['daily_loss_total']:.2f}).\n"
+            f"No new WATCH/A+ alerts until the reset at UTC midnight."
+        )
+    return main_state["daily_loss_total"]
+
+
+def record_win(amount, now_utc=None, path=None):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    path = path or MAIN_STATE_PATH
+    main_state = load_json(path)
+    daily_reset_if_needed(main_state, now_utc)
+    main_state["daily_loss_total"] = main_state.get("daily_loss_total", 0.0) - amount
+    save_json(path, main_state)
+    return main_state["daily_loss_total"]
 
 
 def run():
@@ -381,6 +414,7 @@ def run():
     main_state = load_json(MAIN_STATE_PATH)
     daily_reset_if_needed(main_state, now)
     mode = load_active_mode()
+    breaker_tripped = main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD
 
     feed = CapitalFeed()
     feed.open_session()
@@ -447,6 +481,9 @@ def run():
 
     for instrument, scored in candidates:
         cls = cfg.INSTRUMENTS[instrument]["class"]
+
+        if breaker_tripped:
+            continue  # daily loss limit hit — no new entries until UTC-midnight reset
 
         if scored["score"] >= mode.aplus_min_score:
             if hard_flat_active(now, cls):

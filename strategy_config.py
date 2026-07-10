@@ -53,6 +53,8 @@ WATCH_MIN_SCORE = 62
 WATCH_MAX_SCORE = 74
 APLUS_MIN_SCORE = 75
 
+DAILY_LOSS_LIMIT_USD = 20.0   # self-reported via /loss; new WATCH/A+ alerts pause once hit
+
 # ─────────────────────────────────────────────────────────────────────
 # 1.5  Entry & exit logic
 # ─────────────────────────────────────────────────────────────────────

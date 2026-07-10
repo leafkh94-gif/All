@@ -96,6 +96,37 @@ def test_handle_command_mode_rejects_unknown_name(monkeypatch):
     assert any("Unknown mode" in m for m in sent)
 
 
+def test_handle_command_loss_logs_and_confirms(monkeypatch, tmp_path):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "record_loss", lambda amount: 15.0)
+    rf.handle_command("/loss 15")
+    assert any("Logged $15.00 loss" in m for m in sent)
+
+
+def test_handle_command_loss_alone_reports_current_total(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "load_json", lambda path: {"daily_loss_total": 12.0})
+    rf.handle_command("/loss")
+    assert any("$12.00" in m for m in sent)
+
+
+def test_handle_command_loss_rejects_bad_number(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    rf.handle_command("/loss abc")
+    assert any("Usage" in m for m in sent)
+
+
+def test_handle_command_win_reduces_total(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "record_win", lambda amount: -5.0)
+    rf.handle_command("/win 10")
+    assert any("Logged $10.00 win" in m for m in sent)
+
+
 def test_diagnostics_text_no_pattern_never_renders_none_none(monkeypatch):
     # Reproduces the exact live-bot output that surfaced the regression: a
     # dynamic "no pattern detected (...)" blocked message (introduced when
