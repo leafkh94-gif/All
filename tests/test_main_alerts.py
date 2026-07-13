@@ -343,7 +343,26 @@ def test_record_loss_does_not_trip_or_notify_after_trial_window_ends(tmp_path, m
     assert sent == []  # no breaker-tripped notification once the trial has expired
 
 
+def test_set_blackout_makes_manual_blackout_active(tmp_path):
+    path = str(tmp_path / "main_state.json")
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    ma.set_blackout(30, now_utc=now, path=path)
+    state = ma.load_json(path)
+    assert ma.manual_blackout_active(state, now + dt.timedelta(minutes=10)) is True
+    assert ma.manual_blackout_active(state, now + dt.timedelta(minutes=31)) is False
 
+
+def test_clear_blackout_ends_it_early(tmp_path):
+    path = str(tmp_path / "main_state.json")
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    ma.set_blackout(30, now_utc=now, path=path)
+    ma.clear_blackout(path=path)
+    state = ma.load_json(path)
+    assert ma.manual_blackout_active(state, now + dt.timedelta(minutes=5)) is False
+
+
+def test_manual_blackout_active_false_with_no_state():
+    assert ma.manual_blackout_active({}, dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)) is False
 
 def test_no_pattern_blocked_message_includes_bars_diagnostic():
     """Reproduces the exact blocked-message construction from main_alerts.run()'s

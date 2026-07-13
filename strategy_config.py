@@ -45,6 +45,10 @@ VOLUME_CONFIRM_BONUS = 3
 HIGH_ATR_PENALTY = -10
 CHOPPY_MARKET_PENALTY = -10
 
+NEWS_SPIKE_ATR_MULT = 2.5   # a candle range >= this many ATRs is treated as a news-like spike
+RECENT_SPIKE_LOOKBACK = 3   # bars checked (excluding current) for a recent spike
+RECENT_SPIKE_PENALTY = -8   # applied to non-NEWS_RETEST patterns firing right after a spike
+
 # ─────────────────────────────────────────────────────────────────────
 # 1.4  Alert thresholds
 # ─────────────────────────────────────────────────────────────────────

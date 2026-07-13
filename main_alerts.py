@@ -428,6 +428,31 @@ def record_win(amount, now_utc=None, path=None):
     return main_state["daily_loss_total"]
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Manual blackout — user-declared "go quiet" window (e.g. ahead of known
+# news), separate from the self-reported loss breaker above.
+# ─────────────────────────────────────────────────────────────────────
+def manual_blackout_active(main_state, now_utc):
+    until = main_state.get("blackout_until")
+    return until is not None and now_utc < datetime.fromisoformat(until)
+
+
+def set_blackout(minutes, now_utc=None, path=None):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    path = path or MAIN_STATE_PATH
+    main_state = load_json(path)
+    main_state["blackout_until"] = (now_utc + timedelta(minutes=minutes)).isoformat()
+    save_json(path, main_state)
+    return main_state["blackout_until"]
+
+
+def clear_blackout(path=None):
+    path = path or MAIN_STATE_PATH
+    main_state = load_json(path)
+    main_state.pop("blackout_until", None)
+    save_json(path, main_state)
+
+
 def run():
     now = datetime.now(timezone.utc)
     main_state = load_json(MAIN_STATE_PATH)
@@ -436,6 +461,7 @@ def run():
     mode = load_active_mode()
     breaker_tripped = (loss_breaker_window_active(main_state, now)
                        and main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD)
+    suppress_new_alerts = breaker_tripped or manual_blackout_active(main_state, now)
 
     feed = CapitalFeed()
     feed.open_session()
@@ -503,8 +529,8 @@ def run():
     for instrument, scored in candidates:
         cls = cfg.INSTRUMENTS[instrument]["class"]
 
-        if breaker_tripped:
-            continue  # daily loss limit hit — no new entries until UTC-midnight reset
+        if suppress_new_alerts:
+            continue  # daily loss limit hit or manual /blackout active — no new entries
 
         if scored["score"] >= mode.aplus_min_score:
             if hard_flat_active(now, cls):

@@ -127,6 +127,39 @@ def test_handle_command_win_reduces_total(monkeypatch):
     assert any("Logged $10.00 win" in m for m in sent)
 
 
+def test_handle_command_blackout_sets_it(monkeypatch):
+    sent, saved = [], []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "set_blackout", lambda minutes: saved.append(minutes))
+    rf.handle_command("/blackout 30")
+    assert saved == [30.0]
+    assert any("30 min" in m for m in sent)
+
+
+def test_handle_command_blackout_off_clears_it(monkeypatch):
+    sent, cleared = [], []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "clear_blackout", lambda: cleared.append(True))
+    rf.handle_command("/blackout off")
+    assert cleared == [True]
+    assert any("cleared" in m for m in sent)
+
+
+def test_handle_command_blackout_alone_reports_inactive(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "load_json", lambda path: {})
+    rf.handle_command("/blackout")
+    assert any("No blackout active" in m for m in sent)
+
+
+def test_handle_command_blackout_rejects_bad_number(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    rf.handle_command("/blackout abc")
+    assert any("Usage" in m for m in sent)
+
+
 def test_diagnostics_text_no_pattern_never_renders_none_none(monkeypatch):
     # Reproduces the exact live-bot output that surfaced the regression: a
     # dynamic "no pattern detected (...)" blocked message (introduced when

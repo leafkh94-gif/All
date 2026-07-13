@@ -49,6 +49,7 @@ def help_text():
         "/mode - show or switch mode (standard/loose/fast)\n"
         "/loss <amount> - log a realized loss (pauses new alerts at the daily limit)\n"
         "/win <amount> - log a realized win\n"
+        "/blackout <minutes> - pause new alerts for N minutes (e.g. ahead of known news)\n"
         "/help - this menu\n\n"
         f"Mode: {m.name} — scans every {m.scan_interval_minutes} min "
         f"on a {m.entry_timeframe} entry timeframe."
@@ -82,6 +83,10 @@ def status_text():
         loss_line += f"\nLoss-limit trial: {days_left}d left"
     else:
         loss_line += "\nLoss-limit trial ended — no longer enforced"
+    if ma.manual_blackout_active(main_state, now):
+        until = datetime.fromisoformat(main_state["blackout_until"])
+        mins_left = max(0, int((until - now).total_seconds() // 60))
+        loss_line += f"\n🔇 Manual blackout active — {mins_left} min left"
     lines = [f"📊 Bot status — {now.strftime('%H:%M')} UTC",
              f"Mode: {mode_name}",
              f"Last scan: {main_state.get('last_scan_time', 'n/a')}",
@@ -194,6 +199,28 @@ def handle_command(text):
                 total = ma.record_win(amount)
                 reply(f"Logged ${amount:.2f} win. Today's net: ${total:.2f} "
                       f"(limit ${ma.cfg.DAILY_LOSS_LIMIT_USD:.2f}).")
+    elif t.startswith("/blackout"):
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) == 1:
+            main_state = ma.load_json(ma.MAIN_STATE_PATH)
+            now = datetime.now(timezone.utc)
+            if ma.manual_blackout_active(main_state, now):
+                until = datetime.fromisoformat(main_state["blackout_until"])
+                mins_left = max(0, int((until - now).total_seconds() // 60))
+                reply(f"🔇 Blackout active — {mins_left} min left. Usage: /blackout off to end it early.")
+            else:
+                reply("No blackout active. Usage: /blackout <minutes> or /blackout off.")
+        elif parts[1].strip().lower() == "off":
+            ma.clear_blackout()
+            reply("✅ Blackout cleared. New alerts can resume.")
+        else:
+            try:
+                minutes = float(parts[1])
+            except ValueError:
+                reply("Usage: /blackout <minutes>, e.g. /blackout 30, or /blackout off.")
+            else:
+                ma.set_blackout(minutes)
+                reply(f"🔇 Blackout set — no new alerts for {int(minutes)} min.")
     elif t.startswith(("/help", "/start")):
         reply(help_text())
 
