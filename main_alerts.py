@@ -15,6 +15,7 @@ import scoring_indicators as ind
 import scoring_strategy as strat
 import strategy_config as cfg
 from strategy import modes
+from strategy import news_calendar
 from strategy import scan_diagnostics
 from strategy.capital_feed import CapitalFeed
 from strategy.watch_tracker import WatchTracker
@@ -503,7 +504,10 @@ def run():
     mode = load_active_mode()
     breaker_tripped = (loss_breaker_window_active(main_state, now)
                        and main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD)
-    suppress_new_alerts = breaker_tripped or manual_blackout_active(main_state, now)
+    news_events = news_calendar.fetch_high_impact_events(now)
+    news_blackout, news_event_name = news_calendar.is_news_blackout_active(now, news_events)
+    main_state["news_blackout_event"] = news_event_name if news_blackout else None
+    suppress_new_alerts = breaker_tripped or manual_blackout_active(main_state, now) or news_blackout
 
     feed = CapitalFeed()
     feed.open_session()
@@ -572,7 +576,7 @@ def run():
         cls = cfg.INSTRUMENTS[instrument]["class"]
 
         if suppress_new_alerts:
-            continue  # daily loss limit hit or manual /blackout active — no new entries
+            continue  # daily loss limit, manual /blackout, or news blackout — no new entries
 
         if scored["score"] >= mode.aplus_min_score:
             if hard_flat_active(now, cls):

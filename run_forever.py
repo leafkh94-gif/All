@@ -7,10 +7,13 @@ scans exactly at :00/:15/:30/:45 UTC, and between scans long-polls Telegram so
 you can talk to the bot in real time.
 
 Commands you can text the bot:
-    /scan    run a full scan right now and get the read
-    /status  active WATCHes, pending A+ confirmations, last scan time
-    /mode    show or switch trading mode (standard/loose/fast)
-    /help    this menu
+    /scan        run a full scan right now and get the read
+    /status      active WATCHes, pending A+ confirmations, last scan time
+    /mode        show or switch trading mode (standard/loose/fast)
+    /loss /win   log realized P&L (feeds the daily loss circuit-breaker)
+    /blackout    pause new alerts for N minutes, or /blackout off
+    /performance win rate and avg R by pattern, from tracked TP/stop outcomes
+    /help        this menu
 
 RUN (must stay running — Render/Railway/VPS worker, NOT a 15-min cron):
     python run_forever.py
@@ -88,6 +91,9 @@ def status_text():
         until = datetime.fromisoformat(main_state["blackout_until"])
         mins_left = max(0, int((until - now).total_seconds() // 60))
         loss_line += f"\n🔇 Manual blackout active — {mins_left} min left"
+    news_event = main_state.get("news_blackout_event")
+    if news_event:
+        loss_line += f"\n📰 News blackout active — {news_event}"
     lines = [f"📊 Bot status — {now.strftime('%H:%M')} UTC",
              f"Mode: {mode_name}",
              f"Last scan: {main_state.get('last_scan_time', 'n/a')}",

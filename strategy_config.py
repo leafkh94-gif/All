@@ -49,6 +49,10 @@ NEWS_SPIKE_ATR_MULT = 2.5   # a candle range >= this many ATRs is treated as a n
 RECENT_SPIKE_LOOKBACK = 3   # bars checked (excluding current) for a recent spike
 RECENT_SPIKE_PENALTY = -8   # applied to non-NEWS_RETEST patterns firing right after a spike
 
+NEWS_BLACKOUT_MINUTES_BEFORE = 15   # pause new alerts this long before a high-impact event
+NEWS_BLACKOUT_MINUTES_AFTER = 15    # ...and this long after it
+NEWS_CALENDAR_MIN_IMPACT = "High"   # only events at/above this impact level trigger a blackout
+
 # ─────────────────────────────────────────────────────────────────────
 # 1.4  Alert thresholds
 # ─────────────────────────────────────────────────────────────────────
