@@ -160,6 +160,39 @@ def test_handle_command_blackout_rejects_bad_number(monkeypatch):
     assert any("Usage" in m for m in sent)
 
 
+def test_performance_text_reports_no_trades(monkeypatch):
+    monkeypatch.setattr(ma, "load_json", lambda path: {})
+    text = rf.performance_text()
+    assert "No closed trades logged" in text
+
+
+def test_performance_text_groups_by_pattern_with_win_rate_and_avg_r(monkeypatch):
+    entries = [
+        {"pattern": "FLAG", "r_multiple": 2.0},
+        {"pattern": "FLAG", "r_multiple": -1.0},
+        {"pattern": "HEAD_SHOULDERS", "r_multiple": -1.0},
+    ]
+    monkeypatch.setattr(ma, "load_json", lambda path: {"entries": entries})
+    text = rf.performance_text()
+    assert "Overall: 3 trades" in text
+    assert "FLAG: 2 trades, 50% win rate" in text
+    assert "HEAD_SHOULDERS: 1 trades, 0% win rate" in text
+
+
+def test_performance_text_groups_unknown_pattern(monkeypatch):
+    monkeypatch.setattr(ma, "load_json", lambda path: {"entries": [{"pattern": None, "r_multiple": 1.0}]})
+    text = rf.performance_text()
+    assert "unknown: 1 trades" in text
+
+
+def test_handle_command_performance_replies(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(rf, "performance_text", lambda: "PERF")
+    rf.handle_command("/performance")
+    assert sent == ["PERF"]
+
+
 def test_diagnostics_text_no_pattern_never_renders_none_none(monkeypatch):
     # Reproduces the exact live-bot output that surfaced the regression: a
     # dynamic "no pattern detected (...)" blocked message (introduced when

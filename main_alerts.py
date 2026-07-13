@@ -23,6 +23,8 @@ STATE_DIR = "state"
 MAIN_STATE_PATH = os.path.join(STATE_DIR, "main_state.json")
 ACTIVE_ENTRIES_PATH = os.path.join(STATE_DIR, "active_entries.json")
 OPEN_TRADES_PATH = os.path.join(STATE_DIR, "open_trades.json")
+TRADE_LOG_PATH = os.path.join(STATE_DIR, "trade_log.json")
+TRADE_LOG_MAX_ENTRIES = 500
 MODE_STATE_PATH = os.path.join(STATE_DIR, "mode.json")
 
 
@@ -90,6 +92,7 @@ class ActiveEntryTracker:
             "stop_loss": scored.get("stop_loss"),
             "tp1": scored.get("tp1"),
             "tp2": scored.get("tp2"),
+            "pattern": scored.get("pattern"),
             "alert_time": now_utc.isoformat(),
         }
         save_json(self.path, self._data)
@@ -124,22 +127,54 @@ class ActiveEntryTracker:
 # Alert-only: tells you what to do (close 50%, move stop, etc.), never
 # touches the broker itself.
 # ─────────────────────────────────────────────────────────────────────
+def _r_multiple(direction, entry_price, initial_risk, exit_price):
+    """R-multiple of exit_price relative to entry, sized by the trade's original
+    risk distance (captured before any breakeven-stop adjustment)."""
+    if not initial_risk:
+        return 0.0
+    raw = (exit_price - entry_price) / initial_risk
+    return raw if direction == "BUY" else -raw
+
+
+def _append_trade_log(entry, path=None):
+    path = path or TRADE_LOG_PATH
+    log = load_json(path)
+    entries = log.get("entries", [])
+    entries.append(entry)
+    log["entries"] = entries[-TRADE_LOG_MAX_ENTRIES:]
+    save_json(path, log)
+
+
 class OpenTradeTracker:
-    def __init__(self, path=OPEN_TRADES_PATH):
+    def __init__(self, path=OPEN_TRADES_PATH, trade_log_path=None):
         self.path = path
+        self.trade_log_path = trade_log_path or TRADE_LOG_PATH
         self._data = load_json(path)
 
     def add(self, scored, now_utc):
+        entry_price = scored["entry_price"]
+        stop_loss = scored["stop_loss"]
         self._data[scored["instrument"]] = {
             "direction": scored["direction"],
-            "entry_price": scored["entry_price"],
-            "stop_loss": scored["stop_loss"],
+            "pattern": scored.get("pattern"),
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "initial_risk": abs(entry_price - stop_loss),
             "tp1": scored["tp1"],
             "tp2": scored["tp2"],
             "tp1_hit": False,
+            "locked_r": 0.0,
             "opened_at": now_utc.isoformat(),
         }
         save_json(self.path, self._data)
+
+    def _close(self, instrument, t, now_utc, outcome, r_multiple):
+        del self._data[instrument]
+        save_json(self.path, self._data)
+        _append_trade_log({
+            "instrument": instrument, "pattern": t.get("pattern"), "direction": t["direction"],
+            "outcome": outcome, "r_multiple": round(r_multiple, 2), "closed_at": now_utc.isoformat(),
+        }, path=self.trade_log_path)
 
     def evaluate_all(self, now_utc, feed):
         for instrument, t in list(self._data.items()):
@@ -147,36 +182,38 @@ class OpenTradeTracker:
             if price is None:
                 continue
             is_buy = t["direction"] == "BUY"
+            entry_price, initial_risk = t["entry_price"], t["initial_risk"]
 
             if not t["tp1_hit"]:
                 hit_tp1 = price >= t["tp1"] if is_buy else price <= t["tp1"]
                 hit_stop = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
                 if hit_tp1:
                     t["tp1_hit"] = True
-                    t["stop_loss"] = t["entry_price"]
+                    t["locked_r"] = 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp1"])
+                    t["stop_loss"] = entry_price
                     save_json(self.path, self._data)
                     send_telegram(
                         f"🎯 {instrument} TP1 hit @ {t['tp1']}.\n"
                         f"Close 50% of the position now.\n"
-                        f"Stop loss moved to breakeven ({t['entry_price']}) on the rest — let it run to TP2."
+                        f"Stop loss moved to breakeven ({entry_price}) on the rest — let it run to TP2."
                     )
                     continue
                 if hit_stop:
-                    del self._data[instrument]
-                    save_json(self.path, self._data)
+                    r = _r_multiple(t["direction"], entry_price, initial_risk, t["stop_loss"])
+                    self._close(instrument, t, now_utc, "stop_before_tp1", r)
                     send_telegram(f"🛑 {instrument} stop loss hit @ {t['stop_loss']}. Full position closed.")
                     continue
             else:
                 hit_tp2 = price >= t["tp2"] if is_buy else price <= t["tp2"]
                 hit_be = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
                 if hit_tp2:
-                    del self._data[instrument]
-                    save_json(self.path, self._data)
+                    r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp2"])
+                    self._close(instrument, t, now_utc, "tp2_after_tp1", r)
                     send_telegram(f"✅ {instrument} TP2 hit @ {t['tp2']}. Close the remaining position — trade complete.")
                     continue
                 if hit_be:
-                    del self._data[instrument]
-                    save_json(self.path, self._data)
+                    r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["stop_loss"])
+                    self._close(instrument, t, now_utc, "breakeven_after_tp1", r)
                     send_telegram(
                         f"⚖️ {instrument} breakeven stop hit after TP1. "
                         f"Remainder closed at entry — partial profit locked in."
@@ -185,8 +222,13 @@ class OpenTradeTracker:
 
             cls = cfg.INSTRUMENTS.get(instrument, {}).get("class")
             if hard_flat_active(now_utc, cls):
-                del self._data[instrument]
-                save_json(self.path, self._data)
+                if t["tp1_hit"]:
+                    r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, price)
+                    outcome = "session_cutoff_after_tp1"
+                else:
+                    r = _r_multiple(t["direction"], entry_price, initial_risk, price)
+                    outcome = "session_cutoff_before_tp1"
+                self._close(instrument, t, now_utc, outcome, r)
                 send_telegram(
                     f"⏰ {instrument} — TP2 not hit before "
                     f"{cfg.HARD_FLAT_UTC_HOUR:02d}:{cfg.HARD_FLAT_UTC_MINUTE:02d} UTC.\n"

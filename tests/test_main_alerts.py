@@ -50,13 +50,32 @@ def test_active_entry_tracker_touch_removes_without_message(tmp_path, monkeypatc
     assert "US500" not in tracker._data
 
 
+def test_r_multiple_buy_and_sell_directions():
+    assert ma._r_multiple("BUY", 100.0, 10.0, 120.0) == 2.0
+    assert ma._r_multiple("SELL", 100.0, 10.0, 80.0) == 2.0
+    assert ma._r_multiple("BUY", 100.0, 10.0, 90.0) == -1.0
+
+
+def test_r_multiple_zero_risk_returns_zero():
+    assert ma._r_multiple("BUY", 100.0, 0.0, 150.0) == 0.0
+
+
+def test_append_trade_log_caps_length(tmp_path):
+    path = str(tmp_path / "trade_log.json")
+    for i in range(ma.TRADE_LOG_MAX_ENTRIES + 10):
+        ma._append_trade_log({"instrument": "US500", "r_multiple": i}, path=path)
+    entries = ma.load_json(path)["entries"]
+    assert len(entries) == ma.TRADE_LOG_MAX_ENTRIES
+    assert entries[-1]["r_multiple"] == ma.TRADE_LOG_MAX_ENTRIES + 9  # newest kept
+
+
 def test_active_entry_tracker_touch_hands_off_to_open_tracker(tmp_path, monkeypatch):
     monkeypatch.setattr(ma, "send_telegram", lambda text: None)
     tracker = ma.ActiveEntryTracker(path=str(tmp_path / "entries.json"))
-    open_tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"))
+    open_tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
-                 "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0}, now)
+                 "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "pattern": "SD_REJECTION"}, now)
 
     class FakeFeed:
         def get_current_price(self, instrument):
@@ -67,12 +86,14 @@ def test_active_entry_tracker_touch_hands_off_to_open_tracker(tmp_path, monkeypa
     assert "US500" in open_tracker._data
     assert open_tracker._data["US500"]["stop_loss"] == 4980.0
     assert open_tracker._data["US500"]["tp1_hit"] is False
+    assert open_tracker._data["US500"]["pattern"] == "SD_REJECTION"
+    assert open_tracker._data["US500"]["initial_risk"] == 20.0
 
 
 def test_open_trade_tracker_tp1_hit_closes_half_and_moves_stop_to_breakeven(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
-    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"))
+    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
                  "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0}, now)
@@ -85,15 +106,17 @@ def test_open_trade_tracker_tp1_hit_closes_half_and_moves_stop_to_breakeven(tmp_
     assert any("TP1 hit" in m for m in sent)
     assert tracker._data["US500"]["tp1_hit"] is True
     assert tracker._data["US500"]["stop_loss"] == 5000.0  # moved to breakeven
+    assert tracker._data["US500"]["locked_r"] == 1.0  # 0.5 * (40/20)
+    assert ma.load_json(tracker.trade_log_path).get("entries", []) == []  # not a final close yet
 
 
 def test_open_trade_tracker_stop_hit_before_tp1_closes_full_position(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
-    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"))
+    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
-                 "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0}, now)
+                 "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "pattern": "FLAG"}, now)
 
     class FakeFeed:
         def get_current_price(self, instrument):
@@ -102,17 +125,22 @@ def test_open_trade_tracker_stop_hit_before_tp1_closes_full_position(tmp_path, m
     tracker.evaluate_all(now + dt.timedelta(minutes=15), FakeFeed())
     assert any("stop loss hit" in m for m in sent)
     assert "US500" not in tracker._data
+    entry = ma.load_json(tracker.trade_log_path)["entries"][0]
+    assert entry["outcome"] == "stop_before_tp1"
+    assert entry["pattern"] == "FLAG"
+    assert entry["r_multiple"] == -1.0
 
 
 def test_open_trade_tracker_tp2_hit_after_tp1_closes_trade(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
-    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"))
+    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
                  "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0}, now)
     tracker._data["US500"]["tp1_hit"] = True
     tracker._data["US500"]["stop_loss"] = 5000.0  # already at breakeven
+    tracker._data["US500"]["locked_r"] = 1.0  # as if TP1 had already fired at 5040
 
     class FakeFeed:
         def get_current_price(self, instrument):
@@ -121,17 +149,21 @@ def test_open_trade_tracker_tp2_hit_after_tp1_closes_trade(tmp_path, monkeypatch
     tracker.evaluate_all(now + dt.timedelta(minutes=30), FakeFeed())
     assert any("TP2 hit" in m for m in sent)
     assert "US500" not in tracker._data
+    entry = ma.load_json(tracker.trade_log_path)["entries"][0]
+    assert entry["outcome"] == "tp2_after_tp1"
+    assert entry["r_multiple"] == 2.5  # locked 1.0 + 0.5 * (60/20)
 
 
 def test_open_trade_tracker_breakeven_stop_after_tp1_closes_remainder(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
-    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"))
+    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
                  "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0}, now)
     tracker._data["US500"]["tp1_hit"] = True
     tracker._data["US500"]["stop_loss"] = 5000.0  # breakeven
+    tracker._data["US500"]["locked_r"] = 1.0  # as if TP1 had already fired at 5040
 
     class FakeFeed:
         def get_current_price(self, instrument):
@@ -140,12 +172,15 @@ def test_open_trade_tracker_breakeven_stop_after_tp1_closes_remainder(tmp_path, 
     tracker.evaluate_all(now + dt.timedelta(minutes=30), FakeFeed())
     assert any("breakeven stop hit" in m for m in sent)
     assert "US500" not in tracker._data
+    entry = ma.load_json(tracker.trade_log_path)["entries"][0]
+    assert entry["outcome"] == "breakeven_after_tp1"
+    assert entry["r_multiple"] == 1.0  # locked 1.0 + 0.5 * 0
 
 
 def test_open_trade_tracker_session_cutoff_closes_us_index_not_crypto(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
-    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"))
+    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
                  "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0}, now)
@@ -159,8 +194,35 @@ def test_open_trade_tracker_session_cutoff_closes_us_index_not_crypto(tmp_path, 
     past_hard_flat = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
     tracker.evaluate_all(past_hard_flat, FakeFeed())
     assert any("US500" in m and "18:30" in m for m in sent)
+    assert "BTCUSD" in tracker._data  # crypto exempt, never closed
+    entries = ma.load_json(tracker.trade_log_path)["entries"]
+    assert len(entries) == 1
+    assert entries[0]["instrument"] == "US500"
+    assert entries[0]["outcome"] == "session_cutoff_before_tp1"
+    assert entries[0]["r_multiple"] == 0.5  # (5010-5000)/20, never reached TP1/stop
+
+
+def test_open_trade_tracker_session_cutoff_after_tp1_blends_locked_r(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
+    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
+                 "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0}, now)
+    tracker._data["US500"]["tp1_hit"] = True
+    tracker._data["US500"]["stop_loss"] = 5000.0
+    tracker._data["US500"]["locked_r"] = 1.0
+
+    class FakeFeed:
+        def get_current_price(self, instrument):
+            return 5030.0  # short of TP2, above breakeven, when cutoff hits
+
+    past_hard_flat = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
+    tracker.evaluate_all(past_hard_flat, FakeFeed())
+    entry = ma.load_json(tracker.trade_log_path)["entries"][0]
+    assert entry["outcome"] == "session_cutoff_after_tp1"
+    assert entry["r_multiple"] == 1.75  # locked 1.0 + 0.5 * (30/20)
     assert "US500" not in tracker._data
-    assert "BTCUSD" in tracker._data  # crypto is never subject to the US-index session cutoff
 
 
 def test_active_entry_tracker_expires_after_2_hours(tmp_path, monkeypatch):

@@ -50,6 +50,7 @@ def help_text():
         "/loss <amount> - log a realized loss (pauses new alerts at the daily limit)\n"
         "/win <amount> - log a realized win\n"
         "/blackout <minutes> - pause new alerts for N minutes (e.g. ahead of known news)\n"
+        "/performance - win rate and avg R by pattern, from tracked TP/stop outcomes\n"
         "/help - this menu\n\n"
         f"Mode: {m.name} — scans every {m.scan_interval_minutes} min "
         f"on a {m.entry_timeframe} entry timeframe."
@@ -107,6 +108,29 @@ def status_text():
         lines.append("Open trades: none")
     if pending:
         lines.append("Awaiting A+ confirmation: " + ", ".join(pending))
+    return "\n".join(lines)
+
+
+def _pattern_stats(entries):
+    count = len(entries)
+    wins = sum(1 for e in entries if e["r_multiple"] > 0)
+    avg_r = sum(e["r_multiple"] for e in entries) / count
+    return count, wins / count, avg_r
+
+
+def performance_text():
+    entries = ma.load_json(ma.TRADE_LOG_PATH).get("entries", [])
+    if not entries:
+        return "📉 No closed trades logged yet."
+    lines = ["📉 Strategy performance (from tracked TP/stop outcomes):"]
+    count, win_rate, avg_r = _pattern_stats(entries)
+    lines.append(f"Overall: {count} trades, {win_rate:.0%} win rate, {avg_r:+.2f}R avg")
+    by_pattern = {}
+    for e in entries:
+        by_pattern.setdefault(e.get("pattern") or "unknown", []).append(e)
+    for pattern, group in sorted(by_pattern.items(), key=lambda kv: -len(kv[1])):
+        count, win_rate, avg_r = _pattern_stats(group)
+        lines.append(f"  {pattern}: {count} trades, {win_rate:.0%} win rate, {avg_r:+.2f}R avg")
     return "\n".join(lines)
 
 
@@ -221,6 +245,8 @@ def handle_command(text):
             else:
                 ma.set_blackout(minutes)
                 reply(f"🔇 Blackout set — no new alerts for {int(minutes)} min.")
+    elif t.startswith("/performance"):
+        reply(performance_text())
     elif t.startswith(("/help", "/start")):
         reply(help_text())
 
