@@ -56,9 +56,9 @@ jobs:
           CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Optional: real economic-calendar news blackout (strategy/news_calendar.py).
-          # If unset, fetch_high_impact_events() returns [] and this feature is a no-op.
-          NEWS_CALENDAR_API_KEY: ${{ secrets.NEWS_CALENDAR_API_KEY }}
+          # No secret needed: strategy/news_calendar.py reads a public RSS feed.
+          # Override only if the default (Khaleej Times) needs to change.
+          # NEWS_RSS_URL: "https://example.com/rss"
       - name: Chain the next relay run
         if: always()
         env:

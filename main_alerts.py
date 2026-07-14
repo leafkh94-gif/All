@@ -504,8 +504,8 @@ def run():
     mode = load_active_mode()
     breaker_tripped = (loss_breaker_window_active(main_state, now)
                        and main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD)
-    news_events = news_calendar.fetch_high_impact_events(now)
-    news_blackout, news_event_name = news_calendar.is_news_blackout_active(now, news_events)
+    news_headlines = news_calendar.fetch_recent_headlines(now)
+    news_blackout, news_event_name = news_calendar.is_news_blackout_active(now, news_headlines)
     main_state["news_blackout_event"] = news_event_name if news_blackout else None
     suppress_new_alerts = breaker_tripped or manual_blackout_active(main_state, now) or news_blackout
 
