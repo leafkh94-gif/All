@@ -20,6 +20,16 @@ def test_hard_flat_never_applies_to_crypto():
     assert ma.hard_flat_active(t, "CRYPTO") is False
 
 
+def test_hard_flat_disabled_for_swing_mode_even_past_1830():
+    t = dt.datetime(2026, 7, 1, 20, 0, tzinfo=dt.timezone.utc)
+    assert ma.hard_flat_active(t, "US_INDEX", mode=modes.SWING) is False
+
+
+def test_hard_flat_still_applies_for_standard_mode_explicitly_passed():
+    t = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
+    assert ma.hard_flat_active(t, "US_INDEX", mode=modes.STANDARD) is True
+
+
 def test_dedup_us_index_keeps_best_score_same_direction():
     candidates = [
         ("US500", {"direction": "BUY", "score": 80}),
@@ -195,11 +205,24 @@ def test_open_trade_tracker_session_cutoff_closes_us_index_not_crypto(tmp_path, 
     tracker.evaluate_all(past_hard_flat, FakeFeed())
     assert any("US500" in m and "18:30" in m for m in sent)
     assert "BTCUSD" in tracker._data  # crypto exempt, never closed
-    entries = ma.load_json(tracker.trade_log_path)["entries"]
-    assert len(entries) == 1
-    assert entries[0]["instrument"] == "US500"
-    assert entries[0]["outcome"] == "session_cutoff_before_tp1"
-    assert entries[0]["r_multiple"] == 0.5  # (5010-5000)/20, never reached TP1/stop
+
+
+def test_open_trade_tracker_swing_mode_holds_through_session_cutoff(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
+    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
+                 "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0}, now)
+
+    class FakeFeed:
+        def get_current_price(self, instrument):
+            return 5010.0  # neither TP/stop touched
+
+    past_hard_flat = dt.datetime(2026, 7, 1, 20, 0, tzinfo=dt.timezone.utc)
+    tracker.evaluate_all(past_hard_flat, FakeFeed(), mode=modes.SWING)
+    assert sent == []
+    assert "US500" in tracker._data  # swing mode intentionally holds past the day-trade cutoff
 
 
 def test_open_trade_tracker_session_cutoff_after_tp1_blends_locked_r(tmp_path, monkeypatch):

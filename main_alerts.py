@@ -177,7 +177,7 @@ class OpenTradeTracker:
             "outcome": outcome, "r_multiple": round(r_multiple, 2), "closed_at": now_utc.isoformat(),
         }, path=self.trade_log_path)
 
-    def evaluate_all(self, now_utc, feed):
+    def evaluate_all(self, now_utc, feed, mode=None):
         for instrument, t in list(self._data.items()):
             price = feed.get_current_price(instrument)
             if price is None:
@@ -222,7 +222,7 @@ class OpenTradeTracker:
                     continue
 
             cls = cfg.INSTRUMENTS.get(instrument, {}).get("class")
-            if hard_flat_active(now_utc, cls):
+            if hard_flat_active(now_utc, cls, mode=mode):
                 if t["tp1_hit"]:
                     r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, price)
                     outcome = "session_cutoff_after_tp1"
@@ -297,7 +297,10 @@ def format_health_check(main_state, watch_tracker, now_utc):
 # ─────────────────────────────────────────────────────────────────────
 # Hard flat (Section 1.5 / 9.1) — no new entry alerts after 18:30 UTC, US indices
 # ─────────────────────────────────────────────────────────────────────
-def hard_flat_active(now_utc, instrument_class):
+def hard_flat_active(now_utc, instrument_class, mode=None):
+    m = mode or modes.STANDARD
+    if not m.session_cutoff_enabled:
+        return False  # swing-style modes intentionally hold across session boundaries
     if instrument_class != "US_INDEX":
         return False
     return (now_utc.hour, now_utc.minute) >= (cfg.HARD_FLAT_UTC_HOUR, cfg.HARD_FLAT_UTC_MINUTE)
@@ -540,7 +543,7 @@ def run():
 
     # START of every 15-min loop, per Section 3.4 — evaluate WATCHes before scanning.
     watch_tracker.evaluate_all(now)
-    open_trade_tracker.evaluate_all(now, feed)
+    open_trade_tracker.evaluate_all(now, feed, mode=mode)
     entry_tracker.evaluate_all(now, feed, mode=mode, open_tracker=open_trade_tracker)
     evaluate_pending_confirmations(pending_store, feed, level_store, now, entry_tracker, main_state, mode=mode)
     maybe_send_health_check(main_state, watch_tracker, now)
@@ -579,7 +582,7 @@ def run():
             continue  # daily loss limit, manual /blackout, or news blackout — no new entries
 
         if scored["score"] >= mode.aplus_min_score:
-            if hard_flat_active(now, cls):
+            if hard_flat_active(now, cls, mode=mode):
                 continue  # no new entry alerts after 18:30 UTC, US indices
             if watch_tracker.has_active(instrument) or pending_store.get(instrument):
                 continue

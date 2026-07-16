@@ -9,7 +9,7 @@ you can talk to the bot in real time.
 Commands you can text the bot:
     /scan        run a full scan right now and get the read
     /status      active WATCHes, pending A+ confirmations, last scan time
-    /mode        show or switch trading mode (standard/loose/fast)
+    /mode        show or switch trading mode (standard/loose/fast/swing)
     /loss /win   log realized P&L (feeds the daily loss circuit-breaker)
     /blackout    pause new alerts for N minutes, or /blackout off
     /performance win rate and avg R by pattern, from tracked TP/stop outcomes
@@ -49,7 +49,7 @@ def help_text():
         "Commands:\n"
         "/scan - run a full scan right now\n"
         "/status - active WATCHes and last scan\n"
-        "/mode - show or switch mode (standard/loose/fast)\n"
+        "/mode - show or switch mode (standard/loose/fast/swing)\n"
         "/loss <amount> - log a realized loss (pauses new alerts at the daily limit)\n"
         "/win <amount> - log a realized win\n"
         "/blackout <minutes> - pause new alerts for N minutes (e.g. ahead of known news)\n"
@@ -186,12 +186,12 @@ def handle_command(text):
         parts = text.strip().split(maxsplit=1)
         if len(parts) == 1:
             current = ma.load_active_mode().name
-            reply(f"Current mode: {current}\nAvailable: standard, loose, fast\n"
+            reply(f"Current mode: {current}\nAvailable: standard, loose, fast, swing\n"
                   f"Usage: /mode <name> to switch.")
         else:
             requested = parts[1].strip().lower()
             if requested not in modes.MODES:
-                reply(f"Unknown mode '{requested}'. Available: standard, loose, fast")
+                reply(f"Unknown mode '{requested}'. Available: standard, loose, fast, swing")
             else:
                 ma.save_active_mode_name(requested)
                 new_mode = modes.MODES[requested]

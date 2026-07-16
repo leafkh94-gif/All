@@ -96,6 +96,19 @@ def test_handle_command_mode_rejects_unknown_name(monkeypatch):
     assert any("Unknown mode" in m for m in sent)
 
 
+def test_handle_command_mode_switches_to_swing(monkeypatch):
+    sent, saved = [], []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "save_active_mode_name", lambda name: saved.append(name))
+    rf.handle_command("/mode swing")
+    assert saved == ["swing"]
+    assert any("swing" in m for m in sent)
+
+
+def test_help_text_mentions_swing_mode():
+    assert "swing" in rf.help_text()
+
+
 def test_handle_command_loss_logs_and_confirms(monkeypatch, tmp_path):
     sent = []
     monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))

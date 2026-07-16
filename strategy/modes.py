@@ -22,6 +22,7 @@ class ModeConfig(NamedTuple):
     entry_expiry_minutes: int
     atr_low_percentile: float
     atr_high_percentile: float
+    session_cutoff_enabled: bool = True
 
 
 STANDARD = ModeConfig(
@@ -36,6 +37,7 @@ STANDARD = ModeConfig(
     entry_expiry_minutes=cfg.ENTRY_EXPIRY_HOURS * 60,
     atr_low_percentile=cfg.ATR_LOW_PERCENTILE,
     atr_high_percentile=cfg.ATR_HIGH_PERCENTILE,
+    session_cutoff_enabled=True,
 )
 
 # Same 15-min pacing as standard; only the alert gates move (relative gap
@@ -62,7 +64,23 @@ FAST = STANDARD._replace(
     entry_expiry_minutes=40,
 )
 
-MODES = {"standard": STANDARD, "loose": LOOSE, "fast": FAST}
+# Genuine swing-trading tier (1h entries, holds intentionally across session
+# boundaries -- see the swing-trader definition this implements). Timing
+# fields scaled by the same 60/15 ratio as the timeframe change, preserving
+# the same 16/3/8-candle lifecycle counts as STANDARD. Score thresholds and
+# ATR percentile band are left at STANDARD's (self-normalizing either way),
+# matching FAST's reasoning.
+SWING = STANDARD._replace(
+    name="swing",
+    entry_timeframe="1h",
+    scan_interval_minutes=60,
+    watch_expiry_minutes=960,
+    watch_update_interval_minutes=180,
+    entry_expiry_minutes=480,
+    session_cutoff_enabled=False,
+)
+
+MODES = {"standard": STANDARD, "loose": LOOSE, "fast": FAST, "swing": SWING}
 DEFAULT_MODE = "standard"
 
 
