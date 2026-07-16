@@ -45,6 +45,15 @@ VOLUME_CONFIRM_BONUS = 3
 HIGH_ATR_PENALTY = -10
 CHOPPY_MARKET_PENALTY = -10
 
+NEWS_SPIKE_ATR_MULT = 2.5   # a candle range >= this many ATRs is treated as a news-like spike
+RECENT_SPIKE_LOOKBACK = 3   # bars checked (excluding current) for a recent spike
+RECENT_SPIKE_PENALTY = -8   # applied to non-NEWS_RETEST patterns firing right after a spike
+
+# Reactive (not predictive) news blackout via a public RSS headline feed --
+# no scheduled-event time is known ahead of time, so this only pauses new
+# alerts *after* a matching headline is published, not before.
+NEWS_BLACKOUT_MINUTES_AFTER = 30
+
 # ─────────────────────────────────────────────────────────────────────
 # 1.4  Alert thresholds
 # ─────────────────────────────────────────────────────────────────────
@@ -52,6 +61,9 @@ NO_ALERT_MAX = 61          # score < 62 -> no alert
 WATCH_MIN_SCORE = 62
 WATCH_MAX_SCORE = 74
 APLUS_MIN_SCORE = 75
+
+DAILY_LOSS_LIMIT_USD = 20.0   # self-reported via /loss; new WATCH/A+ alerts pause once hit
+DAILY_LOSS_BREAKER_DURATION_DAYS = 14   # trial window; breaker stops enforcing after this
 
 # ─────────────────────────────────────────────────────────────────────
 # 1.5  Entry & exit logic

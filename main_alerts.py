@@ -15,6 +15,7 @@ import scoring_indicators as ind
 import scoring_strategy as strat
 import strategy_config as cfg
 from strategy import modes
+from strategy import news_calendar
 from strategy import scan_diagnostics
 from strategy.capital_feed import CapitalFeed
 from strategy.watch_tracker import WatchTracker
@@ -22,6 +23,9 @@ from strategy.watch_tracker import WatchTracker
 STATE_DIR = "state"
 MAIN_STATE_PATH = os.path.join(STATE_DIR, "main_state.json")
 ACTIVE_ENTRIES_PATH = os.path.join(STATE_DIR, "active_entries.json")
+OPEN_TRADES_PATH = os.path.join(STATE_DIR, "open_trades.json")
+TRADE_LOG_PATH = os.path.join(STATE_DIR, "trade_log.json")
+TRADE_LOG_MAX_ENTRIES = 500
 MODE_STATE_PATH = os.path.join(STATE_DIR, "mode.json")
 
 
@@ -86,11 +90,15 @@ class ActiveEntryTracker:
         self._data[scored["instrument"]] = {
             "direction": scored["direction"],
             "entry_price": scored["entry_price"],
+            "stop_loss": scored.get("stop_loss"),
+            "tp1": scored.get("tp1"),
+            "tp2": scored.get("tp2"),
+            "pattern": scored.get("pattern"),
             "alert_time": now_utc.isoformat(),
         }
         save_json(self.path, self._data)
 
-    def evaluate_all(self, now_utc, feed, mode=None):
+    def evaluate_all(self, now_utc, feed, mode=None, open_tracker=None):
         m = mode or modes.STANDARD
         for instrument, e in list(self._data.items()):
             alert_time = datetime.fromisoformat(e["alert_time"])
@@ -102,6 +110,8 @@ class ActiveEntryTracker:
             if touched:
                 del self._data[instrument]
                 save_json(self.path, self._data)
+                if open_tracker is not None and e.get("stop_loss") is not None:
+                    open_tracker.add({**e, "instrument": instrument}, now_utc)
                 continue
             if now_utc - alert_time > timedelta(minutes=m.entry_expiry_minutes):
                 send_telegram(
@@ -111,6 +121,120 @@ class ActiveEntryTracker:
                 )
                 del self._data[instrument]
                 save_json(self.path, self._data)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Section 7 — Live TP/stop tracking for filled entries.
+# Alert-only: tells you what to do (close 50%, move stop, etc.), never
+# touches the broker itself.
+# ─────────────────────────────────────────────────────────────────────
+def _r_multiple(direction, entry_price, initial_risk, exit_price):
+    """R-multiple of exit_price relative to entry, sized by the trade's original
+    risk distance (captured before any breakeven-stop adjustment)."""
+    if not initial_risk:
+        return 0.0
+    raw = (exit_price - entry_price) / initial_risk
+    return raw if direction == "BUY" else -raw
+
+
+def _append_trade_log(entry, path=None):
+    path = path or TRADE_LOG_PATH
+    log = load_json(path)
+    entries = log.get("entries", [])
+    entries.append(entry)
+    log["entries"] = entries[-TRADE_LOG_MAX_ENTRIES:]
+    save_json(path, log)
+
+
+class OpenTradeTracker:
+    def __init__(self, path=OPEN_TRADES_PATH, trade_log_path=None):
+        self.path = path
+        self.trade_log_path = trade_log_path or TRADE_LOG_PATH
+        self._data = load_json(path)
+
+    def add(self, scored, now_utc):
+        entry_price = scored["entry_price"]
+        stop_loss = scored["stop_loss"]
+        self._data[scored["instrument"]] = {
+            "direction": scored["direction"],
+            "pattern": scored.get("pattern"),
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "initial_risk": abs(entry_price - stop_loss),
+            "tp1": scored["tp1"],
+            "tp2": scored["tp2"],
+            "tp1_hit": False,
+            "locked_r": 0.0,
+            "opened_at": now_utc.isoformat(),
+        }
+        save_json(self.path, self._data)
+
+    def _close(self, instrument, t, now_utc, outcome, r_multiple):
+        del self._data[instrument]
+        save_json(self.path, self._data)
+        _append_trade_log({
+            "instrument": instrument, "pattern": t.get("pattern"), "direction": t["direction"],
+            "outcome": outcome, "r_multiple": round(r_multiple, 2), "closed_at": now_utc.isoformat(),
+        }, path=self.trade_log_path)
+
+    def evaluate_all(self, now_utc, feed, mode=None):
+        for instrument, t in list(self._data.items()):
+            price = feed.get_current_price(instrument)
+            if price is None:
+                continue
+            is_buy = t["direction"] == "BUY"
+            entry_price, initial_risk = t["entry_price"], t["initial_risk"]
+
+            if not t["tp1_hit"]:
+                hit_tp1 = price >= t["tp1"] if is_buy else price <= t["tp1"]
+                hit_stop = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
+                if hit_tp1:
+                    t["tp1_hit"] = True
+                    t["locked_r"] = 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp1"])
+                    t["stop_loss"] = entry_price
+                    save_json(self.path, self._data)
+                    send_telegram(
+                        f"🎯 {instrument} TP1 hit @ {t['tp1']}.\n"
+                        f"Close 50% of the position now.\n"
+                        f"Stop loss moved to breakeven ({entry_price}) on the rest — let it run to TP2."
+                    )
+                    continue
+                if hit_stop:
+                    r = _r_multiple(t["direction"], entry_price, initial_risk, t["stop_loss"])
+                    self._close(instrument, t, now_utc, "stop_before_tp1", r)
+                    send_telegram(f"🛑 {instrument} stop loss hit @ {t['stop_loss']}. Full position closed.")
+                    continue
+            else:
+                hit_tp2 = price >= t["tp2"] if is_buy else price <= t["tp2"]
+                hit_be = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
+                if hit_tp2:
+                    r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp2"])
+                    self._close(instrument, t, now_utc, "tp2_after_tp1", r)
+                    send_telegram(f"✅ {instrument} TP2 hit @ {t['tp2']}. Close the remaining position — trade complete.")
+                    continue
+                if hit_be:
+                    r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["stop_loss"])
+                    self._close(instrument, t, now_utc, "breakeven_after_tp1", r)
+                    send_telegram(
+                        f"⚖️ {instrument} breakeven stop hit after TP1. "
+                        f"Remainder closed at entry — partial profit locked in."
+                    )
+                    continue
+
+            cls = cfg.INSTRUMENTS.get(instrument, {}).get("class")
+            if hard_flat_active(now_utc, cls, mode=mode):
+                if t["tp1_hit"]:
+                    r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, price)
+                    outcome = "session_cutoff_after_tp1"
+                else:
+                    r = _r_multiple(t["direction"], entry_price, initial_risk, price)
+                    outcome = "session_cutoff_before_tp1"
+                self._close(instrument, t, now_utc, outcome, r)
+                send_telegram(
+                    f"⏰ {instrument} — TP2 not hit before "
+                    f"{cfg.HARD_FLAT_UTC_HOUR:02d}:{cfg.HARD_FLAT_UTC_MINUTE:02d} UTC.\n"
+                    f"Close all remaining position now, per the original A+ plan."
+                )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -173,7 +297,10 @@ def format_health_check(main_state, watch_tracker, now_utc):
 # ─────────────────────────────────────────────────────────────────────
 # Hard flat (Section 1.5 / 9.1) — no new entry alerts after 18:30 UTC, US indices
 # ─────────────────────────────────────────────────────────────────────
-def hard_flat_active(now_utc, instrument_class):
+def hard_flat_active(now_utc, instrument_class, mode=None):
+    m = mode or modes.STANDARD
+    if not m.session_cutoff_enabled:
+        return False  # swing-style modes intentionally hold across session boundaries
     if instrument_class != "US_INDEX":
         return False
     return (now_utc.hour, now_utc.minute) >= (cfg.HARD_FLAT_UTC_HOUR, cfg.HARD_FLAT_UTC_MINUTE)
@@ -293,13 +420,97 @@ def daily_reset_if_needed(main_state, now_utc):
     if main_state.get("aplus_count_date") != today_key:
         main_state["aplus_count_date"] = today_key
         main_state["aplus_count"] = 0
+        main_state["daily_loss_total"] = 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Daily loss circuit-breaker — self-reported, since this alert-only bot has
+# no visibility into the user's real account balance/P&L. Runs as a
+# DAILY_LOSS_BREAKER_DURATION_DAYS trial: the window starts the first time
+# the bot ever sees it (not a hardcoded date, so it isn't thrown off by
+# when this actually goes live), and enforcement quietly stops once it
+# expires — /loss and /win keep logging, they just stop pausing alerts.
+# ─────────────────────────────────────────────────────────────────────
+def ensure_loss_breaker_window(main_state, now_utc):
+    if "loss_breaker_active_until" not in main_state:
+        main_state["loss_breaker_active_until"] = (
+            now_utc + timedelta(days=cfg.DAILY_LOSS_BREAKER_DURATION_DAYS)
+        ).isoformat()
+
+
+def loss_breaker_window_active(main_state, now_utc):
+    until = main_state.get("loss_breaker_active_until")
+    return until is not None and now_utc < datetime.fromisoformat(until)
+
+
+def record_loss(amount, now_utc=None, path=None):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    path = path or MAIN_STATE_PATH
+    main_state = load_json(path)
+    daily_reset_if_needed(main_state, now_utc)
+    ensure_loss_breaker_window(main_state, now_utc)
+    window_active = loss_breaker_window_active(main_state, now_utc)
+    was_tripped = window_active and main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD
+    main_state["daily_loss_total"] = main_state.get("daily_loss_total", 0.0) + amount
+    save_json(path, main_state)
+    now_tripped = window_active and main_state["daily_loss_total"] >= cfg.DAILY_LOSS_LIMIT_USD
+    if now_tripped and not was_tripped:
+        send_telegram(
+            f"🛑 Daily loss limit (${cfg.DAILY_LOSS_LIMIT_USD:.2f}) reached "
+            f"(logged: ${main_state['daily_loss_total']:.2f}).\n"
+            f"No new WATCH/A+ alerts until the reset at UTC midnight."
+        )
+    return main_state["daily_loss_total"]
+
+
+def record_win(amount, now_utc=None, path=None):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    path = path or MAIN_STATE_PATH
+    main_state = load_json(path)
+    daily_reset_if_needed(main_state, now_utc)
+    ensure_loss_breaker_window(main_state, now_utc)
+    main_state["daily_loss_total"] = main_state.get("daily_loss_total", 0.0) - amount
+    save_json(path, main_state)
+    return main_state["daily_loss_total"]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Manual blackout — user-declared "go quiet" window (e.g. ahead of known
+# news), separate from the self-reported loss breaker above.
+# ─────────────────────────────────────────────────────────────────────
+def manual_blackout_active(main_state, now_utc):
+    until = main_state.get("blackout_until")
+    return until is not None and now_utc < datetime.fromisoformat(until)
+
+
+def set_blackout(minutes, now_utc=None, path=None):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    path = path or MAIN_STATE_PATH
+    main_state = load_json(path)
+    main_state["blackout_until"] = (now_utc + timedelta(minutes=minutes)).isoformat()
+    save_json(path, main_state)
+    return main_state["blackout_until"]
+
+
+def clear_blackout(path=None):
+    path = path or MAIN_STATE_PATH
+    main_state = load_json(path)
+    main_state.pop("blackout_until", None)
+    save_json(path, main_state)
 
 
 def run():
     now = datetime.now(timezone.utc)
     main_state = load_json(MAIN_STATE_PATH)
     daily_reset_if_needed(main_state, now)
+    ensure_loss_breaker_window(main_state, now)
     mode = load_active_mode()
+    breaker_tripped = (loss_breaker_window_active(main_state, now)
+                       and main_state.get("daily_loss_total", 0.0) >= cfg.DAILY_LOSS_LIMIT_USD)
+    news_headlines = news_calendar.fetch_recent_headlines(now)
+    news_blackout, news_event_name = news_calendar.is_news_blackout_active(now, news_headlines)
+    main_state["news_blackout_event"] = news_event_name if news_blackout else None
+    suppress_new_alerts = breaker_tripped or manual_blackout_active(main_state, now) or news_blackout
 
     feed = CapitalFeed()
     feed.open_session()
@@ -308,6 +519,7 @@ def run():
     level_store = ind.LevelStore()
     pending_store = strat.PendingAPlusStore()
     entry_tracker = ActiveEntryTracker()
+    open_trade_tracker = OpenTradeTracker()
 
     maybe_record_daily_levels(feed, level_store, now)
     maybe_record_weekly_levels(feed, level_store, now)
@@ -331,7 +543,8 @@ def run():
 
     # START of every 15-min loop, per Section 3.4 — evaluate WATCHes before scanning.
     watch_tracker.evaluate_all(now)
-    entry_tracker.evaluate_all(now, feed, mode=mode)
+    open_trade_tracker.evaluate_all(now, feed, mode=mode)
+    entry_tracker.evaluate_all(now, feed, mode=mode, open_tracker=open_trade_tracker)
     evaluate_pending_confirmations(pending_store, feed, level_store, now, entry_tracker, main_state, mode=mode)
     maybe_send_health_check(main_state, watch_tracker, now)
 
@@ -365,8 +578,11 @@ def run():
     for instrument, scored in candidates:
         cls = cfg.INSTRUMENTS[instrument]["class"]
 
+        if suppress_new_alerts:
+            continue  # daily loss limit, manual /blackout, or news blackout — no new entries
+
         if scored["score"] >= mode.aplus_min_score:
-            if hard_flat_active(now, cls):
+            if hard_flat_active(now, cls, mode=mode):
                 continue  # no new entry alerts after 18:30 UTC, US indices
             if watch_tracker.has_active(instrument) or pending_store.get(instrument):
                 continue

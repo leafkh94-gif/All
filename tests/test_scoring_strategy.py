@@ -293,3 +293,37 @@ def test_pending_aplus_store_roundtrip(tmp_path):
     assert store.get("US500")["score"] == 80
     store.remove("US500")
     assert store.get("US500") is None
+
+
+def _df_with_spike(spike_bars_ago, n=10, atr_value=1.0):
+    """n normal small-range bars, with one bar spike_bars_ago (0 = most recent
+    completed bar before 'current') widened to a large range."""
+    candles = make_candles(n, start_price=100.0, noise=0.05)
+    idx = n - 1 - spike_bars_ago
+    candles[idx]["h"] = candles[idx]["o"] + 10 * atr_value
+    candles[idx]["l"] = candles[idx]["o"] - 10 * atr_value
+    return strat._df(candles)
+
+
+def test_recent_spike_penalty_applies_to_non_news_pattern_after_spike():
+    df = _df_with_spike(spike_bars_ago=1)  # within the 3-bar lookback, excluding current
+    penalty = strat.recent_spike_penalty(df, atr_value=1.0, candidate_pattern="LIQUIDITY_SWEEP_BOS")
+    assert penalty == strat.cfg.RECENT_SPIKE_PENALTY
+
+
+def test_recent_spike_penalty_exempts_news_retest_pattern():
+    df = _df_with_spike(spike_bars_ago=1)
+    penalty = strat.recent_spike_penalty(df, atr_value=1.0, candidate_pattern="NEWS_RETEST")
+    assert penalty == 0
+
+
+def test_recent_spike_penalty_no_penalty_without_recent_spike():
+    df = strat._df(make_candles(10, start_price=100.0, noise=0.05))
+    penalty = strat.recent_spike_penalty(df, atr_value=1.0, candidate_pattern="FLAG")
+    assert penalty == 0
+
+
+def test_recent_spike_penalty_ignores_spike_outside_lookback_window():
+    df = _df_with_spike(spike_bars_ago=5)  # older than RECENT_SPIKE_LOOKBACK=3
+    penalty = strat.recent_spike_penalty(df, atr_value=1.0, candidate_pattern="SD_REJECTION")
+    assert penalty == 0

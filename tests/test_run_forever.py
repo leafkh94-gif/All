@@ -96,6 +96,116 @@ def test_handle_command_mode_rejects_unknown_name(monkeypatch):
     assert any("Unknown mode" in m for m in sent)
 
 
+def test_handle_command_mode_switches_to_swing(monkeypatch):
+    sent, saved = [], []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "save_active_mode_name", lambda name: saved.append(name))
+    rf.handle_command("/mode swing")
+    assert saved == ["swing"]
+    assert any("swing" in m for m in sent)
+
+
+def test_help_text_mentions_swing_mode():
+    assert "swing" in rf.help_text()
+
+
+def test_handle_command_loss_logs_and_confirms(monkeypatch, tmp_path):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "record_loss", lambda amount: 15.0)
+    rf.handle_command("/loss 15")
+    assert any("Logged $15.00 loss" in m for m in sent)
+
+
+def test_handle_command_loss_alone_reports_current_total(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "load_json", lambda path: {"daily_loss_total": 12.0})
+    rf.handle_command("/loss")
+    assert any("$12.00" in m for m in sent)
+
+
+def test_handle_command_loss_rejects_bad_number(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    rf.handle_command("/loss abc")
+    assert any("Usage" in m for m in sent)
+
+
+def test_handle_command_win_reduces_total(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "record_win", lambda amount: -5.0)
+    rf.handle_command("/win 10")
+    assert any("Logged $10.00 win" in m for m in sent)
+
+
+def test_handle_command_blackout_sets_it(monkeypatch):
+    sent, saved = [], []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "set_blackout", lambda minutes: saved.append(minutes))
+    rf.handle_command("/blackout 30")
+    assert saved == [30.0]
+    assert any("30 min" in m for m in sent)
+
+
+def test_handle_command_blackout_off_clears_it(monkeypatch):
+    sent, cleared = [], []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "clear_blackout", lambda: cleared.append(True))
+    rf.handle_command("/blackout off")
+    assert cleared == [True]
+    assert any("cleared" in m for m in sent)
+
+
+def test_handle_command_blackout_alone_reports_inactive(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(ma, "load_json", lambda path: {})
+    rf.handle_command("/blackout")
+    assert any("No blackout active" in m for m in sent)
+
+
+def test_handle_command_blackout_rejects_bad_number(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    rf.handle_command("/blackout abc")
+    assert any("Usage" in m for m in sent)
+
+
+def test_performance_text_reports_no_trades(monkeypatch):
+    monkeypatch.setattr(ma, "load_json", lambda path: {})
+    text = rf.performance_text()
+    assert "No closed trades logged" in text
+
+
+def test_performance_text_groups_by_pattern_with_win_rate_and_avg_r(monkeypatch):
+    entries = [
+        {"pattern": "FLAG", "r_multiple": 2.0},
+        {"pattern": "FLAG", "r_multiple": -1.0},
+        {"pattern": "HEAD_SHOULDERS", "r_multiple": -1.0},
+    ]
+    monkeypatch.setattr(ma, "load_json", lambda path: {"entries": entries})
+    text = rf.performance_text()
+    assert "Overall: 3 trades" in text
+    assert "FLAG: 2 trades, 50% win rate" in text
+    assert "HEAD_SHOULDERS: 1 trades, 0% win rate" in text
+
+
+def test_performance_text_groups_unknown_pattern(monkeypatch):
+    monkeypatch.setattr(ma, "load_json", lambda path: {"entries": [{"pattern": None, "r_multiple": 1.0}]})
+    text = rf.performance_text()
+    assert "unknown: 1 trades" in text
+
+
+def test_handle_command_performance_replies(monkeypatch):
+    sent = []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(rf, "performance_text", lambda: "PERF")
+    rf.handle_command("/performance")
+    assert sent == ["PERF"]
+
+
 def test_diagnostics_text_no_pattern_never_renders_none_none(monkeypatch):
     # Reproduces the exact live-bot output that surfaced the regression: a
     # dynamic "no pattern detected (...)" blocked message (introduced when

@@ -56,12 +56,16 @@ class CapitalFeed:
             self._epics[key] = self.find_epic(meta["search"])
         return dict(self._epics)
 
-    def _cache_path(self, instrument, interval):
-        return os.path.join(self.cache_dir, f"{instrument}_{interval}.json")
+    def _cache_path(self, instrument, interval, n):
+        # n is part of the key: two callers requesting the same
+        # instrument+interval but a different candle count (e.g. a mode whose
+        # entry_timeframe matches the fixed "1h"/"4h" context fetch) must not
+        # silently share -- and truncate -- each other's cached candles.
+        return os.path.join(self.cache_dir, f"{instrument}_{interval}_{n}.json")
 
     def get_candles(self, instrument, interval, n=60):
         ttl = CACHE_TTL.get(interval, 0)
-        p = self._cache_path(instrument, interval)
+        p = self._cache_path(instrument, interval, n)
         if ttl and os.path.exists(p) and time.time() - os.path.getmtime(p) < ttl:
             with open(p) as f:
                 return json.load(f)

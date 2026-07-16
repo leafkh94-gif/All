@@ -7,10 +7,13 @@ scans exactly at :00/:15/:30/:45 UTC, and between scans long-polls Telegram so
 you can talk to the bot in real time.
 
 Commands you can text the bot:
-    /scan    run a full scan right now and get the read
-    /status  active WATCHes, pending A+ confirmations, last scan time
-    /mode    show or switch trading mode (standard/loose/fast)
-    /help    this menu
+    /scan        run a full scan right now and get the read
+    /status      active WATCHes, pending A+ confirmations, last scan time
+    /mode        show or switch trading mode (standard/loose/fast/swing)
+    /loss /win   log realized P&L (feeds the daily loss circuit-breaker)
+    /blackout    pause new alerts for N minutes, or /blackout off
+    /performance win rate and avg R by pattern, from tracked TP/stop outcomes
+    /help        this menu
 
 RUN (must stay running — Render/Railway/VPS worker, NOT a 15-min cron):
     python run_forever.py
@@ -46,7 +49,11 @@ def help_text():
         "Commands:\n"
         "/scan - run a full scan right now\n"
         "/status - active WATCHes and last scan\n"
-        "/mode - show or switch mode (standard/loose/fast)\n"
+        "/mode - show or switch mode (standard/loose/fast/swing)\n"
+        "/loss <amount> - log a realized loss (pauses new alerts at the daily limit)\n"
+        "/win <amount> - log a realized win\n"
+        "/blackout <minutes> - pause new alerts for N minutes (e.g. ahead of known news)\n"
+        "/performance - win rate and avg R by pattern, from tracked TP/stop outcomes\n"
         "/help - this menu\n\n"
         f"Mode: {m.name} — scans every {m.scan_interval_minutes} min "
         f"on a {m.entry_timeframe} entry timeframe."
@@ -62,22 +69,74 @@ def reply(text):
 
 
 def status_text():
+    now = datetime.now(timezone.utc)
     main_state = ma.load_json(ma.MAIN_STATE_PATH)
     watches = ma.load_json(os.path.join(ma.STATE_DIR, "watches.json"))
+    open_trades = ma.load_json(ma.OPEN_TRADES_PATH)
     pending = strat.PendingAPlusStore().all()
     mode_name = main_state.get("last_scan_mode") or ma.load_active_mode().name
-    lines = [f"📊 Bot status — {datetime.now(timezone.utc).strftime('%H:%M')} UTC",
+    daily_loss = main_state.get("daily_loss_total", 0.0)
+    limit = ma.cfg.DAILY_LOSS_LIMIT_USD
+    window_active = ma.loss_breaker_window_active(main_state, now)
+    loss_line = f"Today's P&L: ${daily_loss:.2f} logged (limit ${limit:.2f})"
+    if window_active:
+        if daily_loss >= limit:
+            loss_line += " — 🛑 new alerts paused until UTC midnight"
+        until = datetime.fromisoformat(main_state["loss_breaker_active_until"])
+        days_left = max(0, (until - now).days)
+        loss_line += f"\nLoss-limit trial: {days_left}d left"
+    else:
+        loss_line += "\nLoss-limit trial ended — no longer enforced"
+    if ma.manual_blackout_active(main_state, now):
+        until = datetime.fromisoformat(main_state["blackout_until"])
+        mins_left = max(0, int((until - now).total_seconds() // 60))
+        loss_line += f"\n🔇 Manual blackout active — {mins_left} min left"
+    news_event = main_state.get("news_blackout_event")
+    if news_event:
+        loss_line += f"\n📰 News blackout active — {news_event}"
+    lines = [f"📊 Bot status — {now.strftime('%H:%M')} UTC",
              f"Mode: {mode_name}",
              f"Last scan: {main_state.get('last_scan_time', 'n/a')}",
-             f"Today's A+ signals: {main_state.get('aplus_count', 0)}"]
+             f"Today's A+ signals: {main_state.get('aplus_count', 0)}",
+             loss_line]
     if watches:
         lines.append("Active WATCHes:")
         for inst, w in watches.items():
             lines.append(f"  ⚡ {inst} {w['direction']} — score {w['score']}, entry {w['entry_price']}")
     else:
         lines.append("Active WATCHes: none")
+    if open_trades:
+        lines.append("Open trades:")
+        for inst, t in open_trades.items():
+            stage = "past TP1, trailing to TP2" if t.get("tp1_hit") else "before TP1"
+            lines.append(f"  📌 {inst} {t['direction']} — entry {t['entry_price']} ({stage})")
+    else:
+        lines.append("Open trades: none")
     if pending:
         lines.append("Awaiting A+ confirmation: " + ", ".join(pending))
+    return "\n".join(lines)
+
+
+def _pattern_stats(entries):
+    count = len(entries)
+    wins = sum(1 for e in entries if e["r_multiple"] > 0)
+    avg_r = sum(e["r_multiple"] for e in entries) / count
+    return count, wins / count, avg_r
+
+
+def performance_text():
+    entries = ma.load_json(ma.TRADE_LOG_PATH).get("entries", [])
+    if not entries:
+        return "📉 No closed trades logged yet."
+    lines = ["📉 Strategy performance (from tracked TP/stop outcomes):"]
+    count, win_rate, avg_r = _pattern_stats(entries)
+    lines.append(f"Overall: {count} trades, {win_rate:.0%} win rate, {avg_r:+.2f}R avg")
+    by_pattern = {}
+    for e in entries:
+        by_pattern.setdefault(e.get("pattern") or "unknown", []).append(e)
+    for pattern, group in sorted(by_pattern.items(), key=lambda kv: -len(kv[1])):
+        count, win_rate, avg_r = _pattern_stats(group)
+        lines.append(f"  {pattern}: {count} trades, {win_rate:.0%} win rate, {avg_r:+.2f}R avg")
     return "\n".join(lines)
 
 
@@ -127,17 +186,73 @@ def handle_command(text):
         parts = text.strip().split(maxsplit=1)
         if len(parts) == 1:
             current = ma.load_active_mode().name
-            reply(f"Current mode: {current}\nAvailable: standard, loose, fast\n"
+            reply(f"Current mode: {current}\nAvailable: standard, loose, fast, swing\n"
                   f"Usage: /mode <name> to switch.")
         else:
             requested = parts[1].strip().lower()
             if requested not in modes.MODES:
-                reply(f"Unknown mode '{requested}'. Available: standard, loose, fast")
+                reply(f"Unknown mode '{requested}'. Available: standard, loose, fast, swing")
             else:
                 ma.save_active_mode_name(requested)
                 new_mode = modes.MODES[requested]
                 reply(f"✅ Mode set to '{requested}'. Takes effect on the next scan cycle "
                       f"(every {new_mode.scan_interval_minutes} min).")
+    elif t.startswith("/loss"):
+        parts = text.strip().split(maxsplit=1)
+        limit = ma.cfg.DAILY_LOSS_LIMIT_USD
+        if len(parts) == 1:
+            main_state = ma.load_json(ma.MAIN_STATE_PATH)
+            total = main_state.get("daily_loss_total", 0.0)
+            window_active = ma.loss_breaker_window_active(main_state, datetime.now(timezone.utc))
+            status = " — alerts paused" if window_active and total >= limit else ""
+            trial_note = "" if window_active else " (trial ended — no longer enforced)"
+            reply(f"Today's logged loss: ${total:.2f} / ${limit:.2f} limit{status}{trial_note}.\n"
+                  f"Usage: /loss <amount> to log a realized loss.")
+        else:
+            try:
+                amount = float(parts[1])
+            except ValueError:
+                reply("Usage: /loss <amount>, e.g. /loss 15.50")
+            else:
+                total = ma.record_loss(amount)
+                reply(f"Logged ${amount:.2f} loss. Today's total: ${total:.2f} / ${limit:.2f} limit.")
+    elif t.startswith("/win"):
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) == 1:
+            reply("Usage: /win <amount> to log a realized win.")
+        else:
+            try:
+                amount = float(parts[1])
+            except ValueError:
+                reply("Usage: /win <amount>, e.g. /win 15.50")
+            else:
+                total = ma.record_win(amount)
+                reply(f"Logged ${amount:.2f} win. Today's net: ${total:.2f} "
+                      f"(limit ${ma.cfg.DAILY_LOSS_LIMIT_USD:.2f}).")
+    elif t.startswith("/blackout"):
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) == 1:
+            main_state = ma.load_json(ma.MAIN_STATE_PATH)
+            now = datetime.now(timezone.utc)
+            if ma.manual_blackout_active(main_state, now):
+                until = datetime.fromisoformat(main_state["blackout_until"])
+                mins_left = max(0, int((until - now).total_seconds() // 60))
+                reply(f"🔇 Blackout active — {mins_left} min left. Usage: /blackout off to end it early.")
+            else:
+                reply("No blackout active. Usage: /blackout <minutes> or /blackout off.")
+        elif parts[1].strip().lower() == "off":
+            ma.clear_blackout()
+            reply("✅ Blackout cleared. New alerts can resume.")
+        else:
+            try:
+                minutes = float(parts[1])
+            except ValueError:
+                reply("Usage: /blackout <minutes>, e.g. /blackout 30, or /blackout off.")
+            else:
+                ma.set_blackout(minutes)
+                reply(f"🔇 Blackout set — no new alerts for {int(minutes)} min.")
+    elif t.startswith("/performance"):
+        reply(performance_text())
     elif t.startswith(("/help", "/start")):
         reply(help_text())
 

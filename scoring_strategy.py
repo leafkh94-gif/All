@@ -169,7 +169,7 @@ def detect_flag(df, lookback=15):
     return None
 
 
-def detect_news_retest(df, lookback=15, spike_mult=2.5):
+def detect_news_retest(df, lookback=15, spike_mult=cfg.NEWS_SPIKE_ATR_MULT):
     if len(df) < lookback + 2:
         return None
     a = ind.atr(df).iloc[-1]
@@ -273,6 +273,22 @@ def choppy_market_penalty(df, period=14, threshold=61.8):
     return cfg.CHOPPY_MARKET_PENALTY if chop > threshold else 0
 
 
+def recent_spike_penalty(df, atr_value, candidate_pattern,
+                          lookback=cfg.RECENT_SPIKE_LOOKBACK, mult=cfg.NEWS_SPIKE_ATR_MULT):
+    """A big recent range spike (news-like) makes the other 4 detectors — which
+    assume orderly price action — more likely to be false post-news chop.
+    NEWS_RETEST already explicitly trades that exact spike, so it's exempt."""
+    if candidate_pattern == "NEWS_RETEST" or pd.isna(atr_value) or atr_value <= 0:
+        return 0
+    if len(df) < lookback + 1:
+        return 0
+    recent = df.iloc[-(lookback + 1):-1]
+    ranges = recent["h"] - recent["l"]
+    if (ranges >= mult * atr_value).any():
+        return cfg.RECENT_SPIKE_PENALTY
+    return 0
+
+
 def volume_confirmation_bonus(df, direction, lookback=20):
     if "v" not in df.columns or df["v"].isna().all():
         return 0
@@ -367,6 +383,10 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     total += ind.round_number_bonus(candidate["sweep_price"], instrument_class)
     total += volume_confirmation_bonus(df_entry, direction)
     total += choppy_market_penalty(df_entry)
+
+    spike_penalty = recent_spike_penalty(df_entry, a, candidate["pattern"])
+    total += spike_penalty
+    breakdown["recent_spike"] = spike_penalty != 0
 
     atr_penalty, atr_state = ind.atr_sweet_spot_penalty(df_entry, mode=m)
     total += atr_penalty
