@@ -130,3 +130,64 @@ def test_eqh_eql_bonus_matches_zone():
     zones = [{"type": "EQH", "price": 105.5, "touches": 2}]
     pts, zone = ind.eqh_eql_bonus(105.6, zones, tolerance_pct=0.01)
     assert pts == 10 and zone is not None
+
+
+def test_anchored_vwap_returns_none_without_volume():
+    df = pd.DataFrame(make_candles(10))  # helper always sets v=None
+    assert ind.anchored_vwap(df) is None
+
+
+def test_anchored_vwap_computes_volume_weighted_average():
+    import datetime as dt
+    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
+    candles = [
+        {"t": "2026-07-01T09:00:00", "o": 100, "h": 100, "l": 100, "c": 100, "v": 10},
+        {"t": "2026-07-01T10:00:00", "o": 110, "h": 110, "l": 110, "c": 110, "v": 30},
+    ]
+    df = pd.DataFrame(candles)
+    vwap = ind.anchored_vwap(df, now_utc=now)
+    assert vwap == 107.5  # (100*10 + 110*30) / 40, h=l=c so typical price == close
+
+
+def test_anchored_vwap_ignores_candles_before_todays_anchor():
+    import datetime as dt
+    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
+    candles = [
+        {"t": "2026-06-30T23:00:00", "o": 500, "h": 500, "l": 500, "c": 500, "v": 1000},  # yesterday
+        {"t": "2026-07-01T01:00:00", "o": 100, "h": 100, "l": 100, "c": 100, "v": 10},
+    ]
+    df = pd.DataFrame(candles)
+    vwap = ind.anchored_vwap(df, now_utc=now)
+    assert vwap == 100.0  # only today's candle counted
+
+
+def test_volume_profile_zones_no_volume_returns_none():
+    df = pd.DataFrame(make_candles(10))
+    assert ind.volume_profile_zones(df) == (None, None, None)
+
+
+def test_volume_profile_zones_poc_near_high_volume_price():
+    candles = [
+        {"o": 100, "h": 101, "l": 99, "c": 100, "v": 5},
+        {"o": 100, "h": 101, "l": 99, "c": 100, "v": 100},   # heavy volume at 99-101 -> POC here
+        {"o": 120, "h": 121, "l": 119, "c": 120, "v": 5},
+    ]
+    df = pd.DataFrame(candles)
+    poc, va_low, va_high = ind.volume_profile_zones(df, num_bins=10)
+    assert 99 <= poc <= 101
+    assert va_low <= poc <= va_high
+
+
+def test_volume_profile_bonus_inside_value_area():
+    pts, tag = ind.volume_profile_bonus(100.0, poc=100.0, va_low=99.0, va_high=101.0)
+    assert pts == 3 and tag == "in_value_area"
+
+
+def test_volume_profile_bonus_outside_value_area():
+    pts, tag = ind.volume_profile_bonus(150.0, poc=100.0, va_low=99.0, va_high=101.0)
+    assert pts == 0 and tag is None
+
+
+def test_volume_profile_bonus_no_data():
+    pts, tag = ind.volume_profile_bonus(100.0, None, None, None)
+    assert pts == 0 and tag is None

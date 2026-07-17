@@ -5,6 +5,7 @@ See Bot_Spec_V3 Sections 1.3, 5.1, 5.3, 5.4, 5.5, 5.7.
 """
 import json
 import os
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -74,6 +75,99 @@ def atr_sweet_spot_penalty(df, lookback=cfg.ATR_LOOKBACK_BARS, period=14, mode=N
     if pct > m.atr_high_percentile:
         return cfg.ATR_TOO_VOLATILE_PENALTY, "too_volatile"
     return 0, "normal"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Anchored (session) VWAP and a simplified volume profile.
+# Only OHLCV candles are available (no tick/order-flow data), so "typical
+# price" (h+l+c)/3 stands in for trade price -- the standard approximation
+# when true VWAP inputs aren't available.
+# ─────────────────────────────────────────────────────────────────────
+def anchored_vwap(df, now_utc=None):
+    """Volume-weighted average price anchored to the start of the current UTC
+    day (a session VWAP). Returns None if there's no usable volume data or no
+    candles from today yet -- callers must treat that as "can't judge", not
+    as a directional signal."""
+    if df.empty or "v" not in df.columns or "t" not in df.columns:
+        return None
+    now_utc = now_utc or datetime.now(timezone.utc)
+    anchor = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    cum_pv, cum_v = 0.0, 0.0
+    for _, row in df.iterrows():
+        v = row.get("v")
+        if not v:
+            continue
+        try:
+            t = datetime.fromisoformat(row["t"])
+        except (TypeError, ValueError):
+            continue
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        if t < anchor:
+            continue
+        typical = (row["h"] + row["l"] + row["c"]) / 3
+        cum_pv += typical * v
+        cum_v += v
+    if cum_v <= 0:
+        return None
+    return cum_pv / cum_v
+
+
+def volume_profile_zones(df, num_bins=20, value_area_pct=0.70):
+    """Simplified volume profile: bucket each candle's (l, h) range into
+    `num_bins` price bins spanning the df's full range, splitting the
+    candle's volume evenly across the bins its range touches. Returns
+    (poc_price, value_area_low, value_area_high) -- the point of control
+    (highest-volume bin) and the price band expanded outward from it until
+    `value_area_pct` of total volume is captured. Returns (None, None, None)
+    if there's no usable volume data."""
+    if df.empty or "v" not in df.columns or df["v"].isna().all():
+        return None, None, None
+    lo, hi = float(df["l"].min()), float(df["h"].max())
+    if hi <= lo:
+        return None, None, None
+    bin_width = (hi - lo) / num_bins
+    bins = [0.0] * num_bins
+    for _, row in df.iterrows():
+        v = row.get("v")
+        if not v:
+            continue
+        start_bin = max(0, min(num_bins - 1, int((row["l"] - lo) / bin_width)))
+        end_bin = max(0, min(num_bins - 1, int((row["h"] - lo) / bin_width)))
+        span = end_bin - start_bin + 1
+        for b in range(start_bin, end_bin + 1):
+            bins[b] += v / span
+
+    total_v = sum(bins)
+    if total_v <= 0:
+        return None, None, None
+    poc_bin = max(range(num_bins), key=lambda b: bins[b])
+    poc_price = lo + (poc_bin + 0.5) * bin_width
+
+    target = total_v * value_area_pct
+    lo_b = hi_b = poc_bin
+    acc = bins[poc_bin]
+    while acc < target and (lo_b > 0 or hi_b < num_bins - 1):
+        left_v = bins[lo_b - 1] if lo_b > 0 else -1
+        right_v = bins[hi_b + 1] if hi_b < num_bins - 1 else -1
+        if right_v >= left_v:
+            hi_b += 1
+            acc += bins[hi_b]
+        else:
+            lo_b -= 1
+            acc += bins[lo_b]
+    return poc_price, lo + lo_b * bin_width, lo + (hi_b + 1) * bin_width
+
+
+def volume_profile_bonus(price, poc, va_low, va_high):
+    """+3 (VOLUME_CONFIRM_BONUS) if the sweep level sits inside the value
+    area -- real transacted volume agrees this is a meaningful level, versus
+    the old crude "last bar's volume above its 20-bar average" check."""
+    if poc is None:
+        return 0, None
+    if va_low <= price <= va_high:
+        return cfg.VOLUME_CONFIRM_BONUS, "in_value_area"
+    return 0, None
 
 
 # ─────────────────────────────────────────────────────────────────────
