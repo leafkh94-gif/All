@@ -32,6 +32,25 @@ def test_daily_bias_score_neutral():
     assert (pts, tag) == (5, "neutral")
 
 
+def test_vwap_filter_score_neutral_without_volume_data():
+    """make_candles always sets v=None, so anchored_vwap can't be computed --
+    must fail to neutral, not silently favor either direction."""
+    df = strat._df(make_candles(30, start_price=100.0, noise=0.3))
+    assert strat.vwap_filter_score(df, "BUY") == strat.cfg.VWAP_FILTER_NEUTRAL
+
+
+def test_vwap_filter_score_match_when_price_above_vwap():
+    import datetime as dt
+    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
+    candles = [
+        {"t": "2026-07-01T09:00:00", "o": 100, "h": 100, "l": 100, "c": 100, "v": 10},
+        {"t": "2026-07-01T10:00:00", "o": 120, "h": 120, "l": 120, "c": 120, "v": 10},
+    ]
+    df = strat._df(candles)
+    assert strat.vwap_filter_score(df, "BUY", now_utc=now) == strat.cfg.VWAP_FILTER_MATCH
+    assert strat.vwap_filter_score(df, "SELL", now_utc=now) == strat.cfg.VWAP_FILTER_AGAINST
+
+
 def _fake_level_store():
     class _Store:
         def get_daily_levels(self, instrument):
@@ -52,7 +71,7 @@ def test_counter_trend_hard_block_sell_in_uptrend():
     candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "SELL",
                  "sweep_price": 100.0, "quality": 38}
     with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "ma20_filter_score", return_value=4):
+         patch.object(strat, "vwap_filter_score", return_value=4):
         result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market,
             __import__("datetime").datetime(2026, 1, 1, 12, 45, tzinfo=__import__("datetime").timezone.utc),
@@ -104,7 +123,7 @@ def test_diagnostic_mode_reports_below_threshold_score():
     candidate = {"pattern": "FLAG", "direction": "BUY", "sweep_price": 100.0, "quality": 5}
     import datetime as dt
     with patch.object(strat, "technical_confirm_score", return_value=0), \
-         patch.object(strat, "ma20_filter_score", return_value=0), \
+         patch.object(strat, "vwap_filter_score", return_value=0), \
          patch.object(strat, "choppy_market_penalty", return_value=0), \
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(0, "NONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
@@ -130,7 +149,7 @@ def test_diagnostic_mode_qualifying_setup_has_no_blocked_reason():
                  "sweep_price": 100.0, "quality": 38}
     import datetime as dt
     with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "ma20_filter_score", return_value=4), \
+         patch.object(strat, "vwap_filter_score", return_value=4), \
          patch.object(strat, "choppy_market_penalty", return_value=0), \
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
@@ -161,7 +180,7 @@ def test_diagnostic_mode_qualifying_result_survives_main_alerts_diagnostics_dict
                  "sweep_price": 100.0, "quality": 38}
     import datetime as dt
     with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "ma20_filter_score", return_value=4), \
+         patch.object(strat, "vwap_filter_score", return_value=4), \
          patch.object(strat, "choppy_market_penalty", return_value=0), \
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
@@ -193,9 +212,9 @@ def test_score_candidate_loose_mode_lower_watch_threshold():
     market, candidate = _ranging_market(quality=27)
     now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
     with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "ma20_filter_score", return_value=4), \
+         patch.object(strat, "vwap_filter_score", return_value=4), \
          patch.object(strat, "choppy_market_penalty", return_value=0), \
-         patch.object(strat, "volume_confirmation_bonus", return_value=0), \
+         patch.object(strat.ind, "volume_profile_zones", return_value=(None, None, None)), \
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
          patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
@@ -214,9 +233,9 @@ def test_score_candidate_diagnostic_blocked_message_reflects_mode_threshold():
     market, candidate = _ranging_market(quality=10)
     now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
     with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "ma20_filter_score", return_value=4), \
+         patch.object(strat, "vwap_filter_score", return_value=4), \
          patch.object(strat, "choppy_market_penalty", return_value=0), \
-         patch.object(strat, "volume_confirmation_bonus", return_value=0), \
+         patch.object(strat.ind, "volume_profile_zones", return_value=(None, None, None)), \
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
          patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
@@ -245,7 +264,7 @@ def test_with_trend_signal_is_not_blocked_and_scores():
     # regime / choppiness / FVG / EQH-EQL) so the assertion isolates the
     # counter-trend gate rather than depending on synthetic-data noise.
     with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "ma20_filter_score", return_value=4), \
+         patch.object(strat, "vwap_filter_score", return_value=4), \
          patch.object(strat, "choppy_market_penalty", return_value=0), \
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \

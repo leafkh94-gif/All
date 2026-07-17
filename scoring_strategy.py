@@ -238,20 +238,26 @@ def technical_confirm_score(df, direction):
     return cfg.TECHNICAL_CONFIRM_NONE_ALIGNED
 
 
-def ma20_filter_score(df, direction):
-    ema20 = ind.ema(df["c"], 20).iloc[-1]
+def vwap_filter_score(df, direction, now_utc=None):
+    """Is current price on the correct side of the volume-weighted (not just
+    time-weighted) session reference line -- replaces the old EMA20 filter
+    with a reference that reflects where real transacted volume sits, not
+    just a smoothed close-price average."""
+    vwap = ind.anchored_vwap(df, now_utc)
+    if vwap is None:
+        return cfg.VWAP_FILTER_NEUTRAL
     price = df["c"].iloc[-1]
     if direction == "BUY":
-        if price > ema20:
-            return cfg.MA20_FILTER_MATCH
-        if price < ema20:
-            return cfg.MA20_FILTER_AGAINST
+        if price > vwap:
+            return cfg.VWAP_FILTER_MATCH
+        if price < vwap:
+            return cfg.VWAP_FILTER_AGAINST
     else:
-        if price < ema20:
-            return cfg.MA20_FILTER_MATCH
-        if price > ema20:
-            return cfg.MA20_FILTER_AGAINST
-    return cfg.MA20_FILTER_NEUTRAL
+        if price < vwap:
+            return cfg.VWAP_FILTER_MATCH
+        if price > vwap:
+            return cfg.VWAP_FILTER_AGAINST
+    return cfg.VWAP_FILTER_NEUTRAL
 
 
 def choppiness_index(df, period=14):
@@ -287,14 +293,6 @@ def recent_spike_penalty(df, atr_value, candidate_pattern,
     if (ranges >= mult * atr_value).any():
         return cfg.RECENT_SPIKE_PENALTY
     return 0
-
-
-def volume_confirmation_bonus(df, direction, lookback=20):
-    if "v" not in df.columns or df["v"].isna().all():
-        return 0
-    avg_vol = df["v"].tail(lookback).mean()
-    last_vol = df["v"].iloc[-1]
-    return cfg.VOLUME_CONFIRM_BONUS if last_vol > avg_vol else 0
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -374,14 +372,17 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     bias_pts, bias_tag = daily_bias_score(htf, direction)
     total += bias_pts
     breakdown["daily_bias"] = bias_tag
-    total += ma20_filter_score(df_entry, direction)
+    total += vwap_filter_score(df_entry, direction, now_utc)
 
     kz_pts, kz_name = market_sessions.killzone_bonus(now_utc, instrument_class)
     total += kz_pts
     breakdown["killzone"] = kz_name
 
     total += ind.round_number_bonus(candidate["sweep_price"], instrument_class)
-    total += volume_confirmation_bonus(df_entry, direction)
+    poc, va_low, va_high = ind.volume_profile_zones(df_entry)
+    vp_pts, vp_tag = ind.volume_profile_bonus(candidate["sweep_price"], poc, va_low, va_high)
+    total += vp_pts
+    breakdown["volume_profile"] = vp_tag
     total += choppy_market_penalty(df_entry)
 
     spike_penalty = recent_spike_penalty(df_entry, a, candidate["pattern"])
