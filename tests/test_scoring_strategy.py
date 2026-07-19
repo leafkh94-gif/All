@@ -128,6 +128,7 @@ def test_diagnostic_mode_reports_below_threshold_score():
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(0, "NONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
          patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
          patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
         result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market,
@@ -154,6 +155,7 @@ def test_diagnostic_mode_qualifying_setup_has_no_blocked_reason():
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
          patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
          patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
         result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market,
@@ -185,6 +187,7 @@ def test_diagnostic_mode_qualifying_result_survives_main_alerts_diagnostics_dict
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
          patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
          patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
         scored = strat.score_candidate(
             "US500", "US_INDEX", candidate, market,
@@ -218,6 +221,7 @@ def test_score_candidate_loose_mode_lower_watch_threshold():
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
          patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
          patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
         default_result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market, now, _fake_level_store())
@@ -239,6 +243,7 @@ def test_score_candidate_diagnostic_blocked_message_reflects_mode_threshold():
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
          patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
          patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
         default_result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market, now, _fake_level_store(), diagnostic=True)
@@ -269,6 +274,7 @@ def test_with_trend_signal_is_not_blocked_and_scores():
          patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
          patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
          patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
          patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
         result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market, dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc),

@@ -117,6 +117,49 @@ def test_fvg_bonus_hits_when_entry_inside_zone():
     assert pts == 8 and zone is not None
 
 
+def test_detect_ifvg_zones_flips_bullish_fvg_to_bearish_after_invalidation():
+    candles = [
+        {"o": 100, "h": 101, "l": 99, "c": 100.5},    # c0
+        {"o": 100.5, "h": 108, "l": 100, "c": 107},   # c1
+        {"o": 107, "h": 109, "l": 106, "c": 108},      # c2 -> bullish FVG (bottom=101, top=106)
+        {"o": 108, "h": 108, "l": 95, "c": 96},        # closes below 101 -> invalidates, flips BEARISH
+    ]
+    zones = ind.detect_ifvg_zones(candles, sweep_index=3, max_lookback=4)
+    assert any(z["direction"] == "BEARISH" and z["bottom"] == 101.0 and z["top"] == 106.0 for z in zones)
+
+
+def test_detect_ifvg_zones_empty_when_fvg_never_invalidated():
+    candles = [
+        {"o": 100, "h": 101, "l": 99, "c": 100.5},
+        {"o": 100.5, "h": 108, "l": 100, "c": 107},
+        {"o": 107, "h": 109, "l": 106, "c": 108},
+        {"o": 108, "h": 110, "l": 107, "c": 109},   # stays well above the FVG -- never invalidated
+    ]
+    zones = ind.detect_ifvg_zones(candles, sweep_index=3, max_lookback=4)
+    assert zones == []
+
+
+def test_ifvg_bonus_hits_when_entry_inside_flipped_zone():
+    candles = [
+        {"o": 100, "h": 101, "l": 99, "c": 100.5},
+        {"o": 100.5, "h": 108, "l": 100, "c": 107},
+        {"o": 107, "h": 109, "l": 106, "c": 108},
+        {"o": 108, "h": 108, "l": 95, "c": 96},
+    ]
+    pts, zone = ind.ifvg_bonus(103.0, "SELL", candles, sweep_index=3)
+    assert pts == 8 and zone is not None
+
+
+def test_ifvg_bonus_no_match_without_invalidation():
+    candles = [
+        {"o": 100, "h": 101, "l": 99, "c": 100.5},
+        {"o": 100.5, "h": 108, "l": 100, "c": 107},
+        {"o": 107, "h": 109, "l": 106, "c": 108},
+    ]
+    pts, zone = ind.ifvg_bonus(103.0, "SELL", candles, sweep_index=2)
+    assert pts == 0 and zone is None
+
+
 def test_detect_eqh_eql_zones_finds_equal_highs():
     candles = []
     base = [100, 101, 105, 101, 100, 101, 105.02, 101, 100]

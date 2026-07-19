@@ -410,6 +410,10 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     total += fvg_pts
     breakdown["fvg"] = fvg_zone is not None
 
+    ifvg_pts, ifvg_zone = ind.ifvg_bonus(candidate["sweep_price"], direction, market["h1"])
+    total += ifvg_pts
+    breakdown["ifvg"] = ifvg_zone is not None
+
     eqh_eql_zones = ind.detect_eqh_eql_zones(market["h1"])
     eq_pts, eq_zone = ind.eqh_eql_bonus(candidate["sweep_price"], eqh_eql_zones)
     total += eq_pts
