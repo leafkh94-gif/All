@@ -99,6 +99,7 @@ PDH_PDL_BONUS = 10
 # ─────────────────────────────────────────────────────────────────────
 FVG_LOOKBACK_CANDLES = 10
 FVG_BONUS = 8
+IFVG_BONUS = 8   # a violated FVG that flips polarity; same weight as an untested FVG (no data to justify weighting it higher)
 
 # ─────────────────────────────────────────────────────────────────────
 # 5.4  EQH/EQL

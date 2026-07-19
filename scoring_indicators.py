@@ -275,6 +275,40 @@ def fvg_bonus(entry_price, direction, candles_h1, sweep_index=None):
     return 0, None
 
 
+def detect_ifvg_zones(candles_h1, sweep_index=None, max_lookback=cfg.FVG_LOOKBACK_CANDLES):
+    """Inverse FVG: an FVG that price has since closed fully through in the
+    direction that invalidates it (a full candle close beyond its far side),
+    at which point the same zone can act as support/resistance in the
+    OPPOSITE direction from the original gap. Returns zones in the same
+    {'direction', 'top', 'bottom', 'index'} shape as detect_fvg_zones, with
+    `direction` already flipped to the new (inverse) polarity."""
+    df = candles_to_df(candles_h1)
+    end = sweep_index if sweep_index is not None else len(df) - 2
+    zones = detect_fvg_zones(candles_h1, sweep_index, max_lookback)
+    ifvg_zones = []
+    for z in zones:
+        for i in range(z["index"] + 2, min(end + 1, len(df))):
+            close = df.iloc[i]["c"]
+            if z["direction"] == "BULLISH" and close < z["bottom"]:
+                ifvg_zones.append({"direction": "BEARISH", "bottom": z["bottom"], "top": z["top"], "index": z["index"]})
+                break
+            if z["direction"] == "BEARISH" and close > z["top"]:
+                ifvg_zones.append({"direction": "BULLISH", "bottom": z["bottom"], "top": z["top"], "index": z["index"]})
+                break
+    return ifvg_zones
+
+
+def ifvg_bonus(entry_price, direction, candles_h1, sweep_index=None):
+    """+8 (IFVG_BONUS) if the 50% retrace entry price sits inside a flipped
+    (inverse) FVG zone matching the trade direction."""
+    zones = detect_ifvg_zones(candles_h1, sweep_index)
+    wanted = "BULLISH" if direction == "BUY" else "BEARISH"
+    for z in zones:
+        if z["direction"] == wanted and z["bottom"] <= entry_price <= z["top"]:
+            return cfg.IFVG_BONUS, z
+    return 0, None
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Equal Highs / Equal Lows detector (Section 5.4)
 # ─────────────────────────────────────────────────────────────────────
