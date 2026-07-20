@@ -274,13 +274,14 @@ def format_aplus_alert(scored, now_utc, mode=None):
     expiry = now_utc + timedelta(minutes=expiry_minutes)
     entry_basis = scored.get("entry_basis", "50% retrace")
     stop_basis = scored.get("stop_basis", "structural")
+    tp1_note = "  (capped at nearby liquidity)" if scored.get("tp1_capped") else ""
     tp2_note = "  (capped at nearby liquidity)" if scored.get("tp2_capped") else ""
     return (
         f"🟢 A+ SIGNAL — {scored['instrument']}\n\n"
         f"Direction:  {scored['direction']}\n"
         f"Entry:      {scored['entry_price']}  ({entry_basis})\n"
         f"Stop Loss:  {scored['stop_loss']}  ({stop_basis})\n"
-        f"TP1:        {scored['tp1']}   ← close 50% of position here\n"
+        f"TP1:        {scored['tp1']}{tp1_note}   ← close 50% of position here\n"
         f"TP2:        {scored['tp2']}{tp2_note}   ← trail remaining 50% to breakeven, let run\n\n"
         f"R:R Ratio:  1:{scored['rr_ratio']:g}\n"
         f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(expiry_minutes)})\n\n"
