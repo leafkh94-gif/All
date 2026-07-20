@@ -60,3 +60,33 @@ def test_bars_report_never_raises_on_malformed_candles():
     candles = [{"o": 1, "h": 2, "l": 0, "c": 1} for _ in range(30)]
     report = diag.bars_report("US500", candles, now_utc=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc))
     assert "US500" in report
+
+
+def test_is_data_problem_true_for_missing_bars():
+    assert diag.is_data_problem(diag.bars_report("US500", [])) is True
+
+
+def test_is_data_problem_true_for_too_few_bars():
+    candles = [_candle(f"2026-01-01T00:{i:02d}:00") for i in range(10)]
+    assert diag.is_data_problem(diag.bars_report("US500", candles)) is True
+
+
+def test_is_data_problem_true_for_stale_feed():
+    candles = [_candle(f"2026-01-01T00:{i:02d}:00") for i in range(30)]
+    now = dt.datetime(2026, 1, 1, 5, 0, tzinfo=dt.timezone.utc)
+    assert diag.is_data_problem(diag.bars_report("US500", candles, now_utc=now)) is True
+
+
+def test_is_data_problem_false_for_fresh_data():
+    candles = [_candle(f"2026-01-01T00:{i:02d}:00") for i in range(30)]
+    now = dt.datetime(2026, 1, 1, 0, 30, tzinfo=dt.timezone.utc)
+    assert diag.is_data_problem(diag.bars_report("US500", candles, now_utc=now)) is False
+
+
+def test_is_data_problem_false_for_unverified_freshness():
+    """A weird-but-not-necessarily-wrong timestamp (the inconsistent-age
+    case) still has real bars present -- don't hard-block scoring over it,
+    only genuine data problems."""
+    candles = [_candle(f"2026-01-01T04:{i:02d}:00") for i in range(30)]
+    now = dt.datetime(2026, 1, 1, 0, 30, tzinfo=dt.timezone.utc)
+    assert diag.is_data_problem(diag.bars_report("BTCUSD", candles, now_utc=now)) is False

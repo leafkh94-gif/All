@@ -563,6 +563,14 @@ def run():
             market = build_market(feed, instrument, mode=mode)
             bars_diag = scan_diagnostics.bars_report(instrument, market["entry"], now)
             print(bars_diag)
+            if scan_diagnostics.is_data_problem(bars_diag):
+                # Missing/too-few bars or a genuinely stale feed -- do not
+                # let pattern detection run on data that can't be trusted,
+                # or a "signal" could be built off a candle that's hours
+                # behind where the instrument is actually trading.
+                diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,
+                                            "blocked": bars_diag.split(': ', 1)[1]}
+                continue
             candidate = strat.find_candidate(market["entry"])
             if not candidate:
                 diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,

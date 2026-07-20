@@ -106,3 +106,14 @@ def bars_report(symbol, data, now_utc=None):
 
     age_txt = f", last candle age={age:.0f}min" if age is not None else ""
     return (f"{symbol}: {n} bars OK{age_txt}, fresh — detectors too tight")
+
+
+def is_data_problem(bars_diag_text):
+    """True if bars_report's message means this cycle's data can't be
+    trusted for pattern detection at all (missing bars, too few bars, or a
+    genuinely stale feed) -- as opposed to "freshness unverified" (bars are
+    present, only the age check is inconclusive -- still usable) or the
+    normal "fresh, detectors too tight" no-signal case. Callers should skip
+    scoring entirely rather than risk detecting a pattern on data that's
+    hours behind the market."""
+    return "data problem" in bars_diag_text
