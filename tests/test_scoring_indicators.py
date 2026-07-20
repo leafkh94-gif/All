@@ -234,3 +234,46 @@ def test_volume_profile_bonus_outside_value_area():
 def test_volume_profile_bonus_no_data():
     pts, tag = ind.volume_profile_bonus(100.0, None, None, None)
     assert pts == 0 and tag is None
+
+
+def test_cap_tp2_at_liquidity_caps_buy_when_raw_tp2_exceeds_pdh():
+    capped, was_capped = ind.cap_tp2_at_liquidity("BUY", entry=100.0, tp2=110.0, pdh=105.0, pdl=90.0,
+                                                    pwh=None, pwl=None)
+    assert was_capped is True
+    assert capped == 105.0
+
+
+def test_cap_tp2_at_liquidity_uses_nearest_of_pdh_and_pwh():
+    capped, was_capped = ind.cap_tp2_at_liquidity("BUY", entry=100.0, tp2=110.0, pdh=108.0, pdl=None,
+                                                    pwh=104.0, pwl=None)
+    assert was_capped is True
+    assert capped == 104.0
+
+
+def test_cap_tp2_at_liquidity_no_cap_when_raw_tp2_already_inside_level():
+    capped, was_capped = ind.cap_tp2_at_liquidity("BUY", entry=100.0, tp2=103.0, pdh=105.0, pdl=None,
+                                                    pwh=None, pwl=None)
+    assert was_capped is False
+    assert capped == 103.0
+
+
+def test_cap_tp2_at_liquidity_no_levels_available_returns_uncapped():
+    capped, was_capped = ind.cap_tp2_at_liquidity("BUY", entry=100.0, tp2=110.0, pdh=None, pdl=None,
+                                                    pwh=None, pwl=None)
+    assert was_capped is False
+    assert capped == 110.0
+
+
+def test_cap_tp2_at_liquidity_caps_sell_when_raw_tp2_undershoots_pdl():
+    capped, was_capped = ind.cap_tp2_at_liquidity("SELL", entry=100.0, tp2=88.0, pdh=None, pdl=93.0,
+                                                    pwh=None, pwl=None)
+    assert was_capped is True
+    assert capped == 93.0
+
+
+def test_cap_tp2_at_liquidity_ignores_levels_behind_entry():
+    """A PDH below current entry (already swept) isn't a valid forward target."""
+    capped, was_capped = ind.cap_tp2_at_liquidity("BUY", entry=100.0, tp2=110.0, pdh=99.0, pdl=None,
+                                                    pwh=None, pwl=None)
+    assert was_capped is False
+    assert capped == 110.0

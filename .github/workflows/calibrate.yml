@@ -1,0 +1,37 @@
+name: pullback-calibration
+
+# Manual-trigger only (Bot Spec V4 Section 5) -- offline analysis, never runs
+# as part of the live scan cron. Pulls historical M15 candles, replays the
+# live pattern detectors over them, and prints a recommended retrace_pct per
+# instrument. Recommendations only: nothing here writes to strategy_config.py.
+# Run it from Actions -> pullback-calibration -> Run workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      instruments:
+        description: "Space-separated instruments to calibrate (blank = all in strategy_config.INSTRUMENTS)"
+        required: false
+        default: ""
+      bars:
+        description: "Historical M15 bars to pull per instrument"
+        required: false
+        default: "1500"
+
+permissions:
+  contents: read
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - name: Run calibration
+        run: python -m strategy.pullback_calibration --bars "${{ github.event.inputs.bars }}" --instruments ${{ github.event.inputs.instruments }}
+        env:
+          CAPITAL_API_KEY:  ${{ secrets.CAPITAL_API_KEY }}
+          CAPITAL_EMAIL:    ${{ secrets.CAPITAL_EMAIL }}
+          CAPITAL_PASSWORD: ${{ secrets.CAPITAL_PASSWORD }}

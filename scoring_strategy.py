@@ -83,12 +83,12 @@ def detect_liquidity_sweep_bos(df, lookback=20):
         depth = (last["h"] - swing_high) / a
         quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 20 + min(18, depth * 20)))
         return {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "SELL",
-                "sweep_price": float(swing_high), "quality": quality}
+                "sweep_price": float(swing_high), "leg_extreme": float(last["h"]), "quality": quality}
     if last["l"] < swing_low and last["c"] > swing_low:
         depth = (swing_low - last["l"]) / a
         quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 20 + min(18, depth * 20)))
         return {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
-                "sweep_price": float(swing_low), "quality": quality}
+                "sweep_price": float(swing_low), "leg_extreme": float(last["l"]), "quality": quality}
     return None
 
 
@@ -102,11 +102,11 @@ def detect_sd_rejection(df, lookback=20):
     if lower / rng > 0.6 and last["c"] > last["o"]:
         quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 20 + (lower / rng - 0.6) / 0.4 * 18))
         return {"pattern": "SD_REJECTION", "direction": "BUY",
-                "sweep_price": float(last["l"]), "quality": quality}
+                "sweep_price": float(last["l"]), "leg_extreme": float(last["l"]), "quality": quality}
     if upper / rng > 0.6 and last["c"] < last["o"]:
         quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 20 + (upper / rng - 0.6) / 0.4 * 18))
         return {"pattern": "SD_REJECTION", "direction": "SELL",
-                "sweep_price": float(last["h"]), "quality": quality}
+                "sweep_price": float(last["h"]), "leg_extreme": float(last["h"]), "quality": quality}
     return None
 
 
@@ -123,7 +123,7 @@ def detect_head_shoulders(df, lookback=30, tolerance=0.2):
             if symmetry > (1 - tolerance):
                 quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 25 + symmetry * 13))
                 return {"pattern": "HEAD_SHOULDERS", "direction": "SELL",
-                        "sweep_price": float(head[1]), "quality": quality}
+                        "sweep_price": float(head[1]), "leg_extreme": float(head[1]), "quality": quality}
     ls = _swings(window, "low")
     if len(ls) >= 3:
         l_sh, head, r_sh = ls[-3], ls[-2], ls[-1]
@@ -132,7 +132,7 @@ def detect_head_shoulders(df, lookback=30, tolerance=0.2):
             if symmetry > (1 - tolerance):
                 quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 25 + symmetry * 13))
                 return {"pattern": "HEAD_SHOULDERS", "direction": "BUY",
-                        "sweep_price": float(head[1]), "quality": quality}
+                        "sweep_price": float(head[1]), "leg_extreme": float(head[1]), "quality": quality}
     return None
 
 
@@ -163,9 +163,11 @@ def detect_flag(df, lookback=15):
     cons_high, cons_low = consolidation.max() + consolidation.std(), consolidation.min() - consolidation.std()
     quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 22 + (0.5 - tightness) / 0.5 * 16))
     if last["c"] > cons_high:
-        return {"pattern": "FLAG", "direction": "BUY", "sweep_price": float(cons_high), "quality": quality}
+        return {"pattern": "FLAG", "direction": "BUY", "sweep_price": float(cons_high),
+                "leg_extreme": float(cons_high), "quality": quality}
     if last["c"] < cons_low:
-        return {"pattern": "FLAG", "direction": "SELL", "sweep_price": float(cons_low), "quality": quality}
+        return {"pattern": "FLAG", "direction": "SELL", "sweep_price": float(cons_low),
+                "leg_extreme": float(cons_low), "quality": quality}
     return None
 
 
@@ -190,7 +192,9 @@ def detect_news_retest(df, lookback=15, spike_mult=cfg.NEWS_SPIKE_ATR_MULT):
         return None
     quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 24 + (0.5 - proximity) / 0.5 * 14))
     direction = "BUY" if spike["c"] > spike["o"] else "SELL"
-    return {"pattern": "NEWS_RETEST", "direction": direction, "sweep_price": float(midpoint), "quality": quality}
+    leg_extreme = float(spike["l"]) if direction == "BUY" else float(spike["h"])
+    return {"pattern": "NEWS_RETEST", "direction": direction, "sweep_price": float(midpoint),
+            "leg_extreme": leg_extreme, "quality": quality}
 
 
 PATTERN_DETECTORS = [
@@ -296,30 +300,67 @@ def recent_spike_penalty(df, atr_value, candidate_pattern,
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Entry / stop / target calculation (Section 1.5)
+# Entry / stop / target calculation (Bot Spec V4 Sections 1-3)
 # ─────────────────────────────────────────────────────────────────────
-def compute_entry_exit(candidate, breakout_candle, atr_value, rng=random):
+def compute_entry_exit(candidate, breakout_candle, atr_value, retrace_pct, fvg_zones=None, rng=random):
+    """Leg-based entry: retrace_pct of the real (wick-inclusive) impulse leg,
+    anchored at candidate['leg_extreme'] through the breakout candle's close.
+    A same-direction FVG fully inside the leg overrides the retrace level
+    entirely (enter at its near edge -- FVGs fill faster and more reliably
+    than an arbitrary retrace percentage). Stop is structural, anchored just
+    behind the leg extreme rather than an arbitrary ATR distance from entry.
+
+    Returns None (caller must skip the setup, not degrade it) if the leg is
+    degenerate, the computed entry doesn't land strictly inside the leg, or
+    the resulting risk is non-positive.
+    """
     direction = candidate["direction"]
-    sweep_price = candidate["sweep_price"]
-    o, c = breakout_candle["o"], breakout_candle["c"]
-    entry = o + (c - o) * cfg.RETRACE_FRACTION
-    if atr_value > 0 and abs(entry - sweep_price) / atr_value > cfg.RETRACE_DEEPEN_ATR_MULT:
-        entry = sweep_price  # deepen to S/R level retest
+    leg_extreme = candidate["leg_extreme"]
+    close = breakout_candle["c"]
+
+    if direction == "BUY":
+        leg_low, leg_high = leg_extreme, close
+    else:
+        leg_low, leg_high = close, leg_extreme
+    if leg_high <= leg_low:
+        return None  # degenerate leg -- breakout close never cleared the extreme
+
+    leg_size = leg_high - leg_low
+    entry = close - leg_size * retrace_pct if direction == "BUY" else close + leg_size * retrace_pct
+    entry_basis = f"{retrace_pct:.0%} leg retrace"
+
+    if fvg_zones:
+        contained = [z for z in fvg_zones if z["bottom"] >= leg_low and z["top"] <= leg_high]
+        if contained:
+            near_edge = (lambda z: z["top"]) if direction == "BUY" else (lambda z: z["bottom"])
+            nearest = min(contained, key=lambda z: abs(close - near_edge(z)))
+            entry = near_edge(nearest)
+            entry_basis = "FVG edge"
+
+    if not (leg_low < entry < leg_high):
+        return None  # sanity clamp -- entry must lie strictly inside the leg
 
     jitter = rng.uniform(-0.05, 0.05) * atr_value
     if direction == "BUY":
-        stop = entry - atr_value + jitter
+        stop = leg_extreme - 0.25 * atr_value + jitter
         risk = entry - stop
+    else:
+        stop = leg_extreme + 0.25 * atr_value + jitter
+        risk = stop - entry
+    if risk <= 0:
+        return None
+
+    if direction == "BUY":
         tp1 = entry + risk * cfg.MIN_RR_RATIO
         tp2 = entry + risk * (cfg.MIN_RR_RATIO + 1)
     else:
-        stop = entry + atr_value + jitter
-        risk = stop - entry
         tp1 = entry - risk * cfg.MIN_RR_RATIO
         tp2 = entry - risk * (cfg.MIN_RR_RATIO + 1)
+
     return {
         "entry_price": round(entry, 5), "stop_loss": round(stop, 5),
         "tp1": round(tp1, 5), "tp2": round(tp2, 5), "rr_ratio": cfg.MIN_RR_RATIO,
+        "entry_basis": entry_basis, "stop_basis": "structural (behind leg extreme)",
     }
 
 
@@ -429,7 +470,35 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
                      "blocked": f"below WATCH threshold ({m.watch_min_score})"}
         return None
 
-    exits = compute_entry_exit(candidate, df_entry.iloc[-1], a)
+    retrace_pct = cfg.INSTRUMENT_PROFILES.get(instrument, {}).get("retrace_pct", 0.5)
+    wanted_fvg_dir = "BULLISH" if direction == "BUY" else "BEARISH"
+    entry_fvg_zones = [z for z in ind.detect_fvg_zones(market["entry"]) if z["direction"] == wanted_fvg_dir]
+    exits = compute_entry_exit(candidate, df_entry.iloc[-1], a, retrace_pct, fvg_zones=entry_fvg_zones)
+    if exits is None:
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": int(round(total)), "htf_bias": htf,
+                     "blocked": "degenerate leg (entry construction failed)"}
+        return None
+
+    pdh = daily.get("high") if daily else None
+    pdl = daily.get("low") if daily else None
+    pwh = weekly.get("high") if weekly else None
+    pwl = weekly.get("low") if weekly else None
+    capped_tp2, was_capped = ind.cap_tp2_at_liquidity(
+        direction, exits["entry_price"], exits["tp2"], pdh, pdl, pwh, pwl)
+    exits["tp2_capped"] = was_capped
+    if was_capped:
+        exits["tp2"] = round(capped_tp2, 5)
+        risk = abs(exits["entry_price"] - exits["stop_loss"])
+        capped_rr = abs(exits["tp2"] - exits["entry_price"]) / risk if risk else 0
+        if capped_rr < cfg.MIN_RR_AFTER_CAP:
+            if diagnostic:
+                return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                         "score": int(round(total)), "htf_bias": htf,
+                         "blocked": "RR_BELOW_MIN_AFTER_LIQUIDITY_CAP"}
+            return None
+
     result = {
         "instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
         "score": int(round(total)), "breakdown": breakdown, "htf_bias": htf, **exits,

@@ -11,6 +11,7 @@ INSTRUMENTS = {
     "US100": {"name": "Nasdaq 100", "search": "NASDAQ 100",    "class": "US_INDEX"},
     "US30":  {"name": "Dow Jones",  "search": "Wall Street 30", "class": "US_INDEX"},
     "BTCUSD": {"name": "Bitcoin",   "search": "bitcoin",        "class": "CRYPTO"},
+    "EURUSD": {"name": "Euro/Dollar", "search": "EUR/USD",      "class": "FOREX"},
 }
 
 US_INDEX_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "US_INDEX"]
@@ -66,14 +67,29 @@ DAILY_LOSS_LIMIT_USD = 20.0   # self-reported via /loss; new WATCH/A+ alerts pau
 DAILY_LOSS_BREAKER_DURATION_DAYS = 14   # trial window; breaker stops enforcing after this
 
 # ─────────────────────────────────────────────────────────────────────
-# 1.5  Entry & exit logic
+# 1.5  Entry & exit logic (Bot Spec V4 Sections 1-3 — leg-based entry,
+# structural stop, liquidity-capped TP2)
 # ─────────────────────────────────────────────────────────────────────
-RETRACE_FRACTION = 0.5              # limit entry at 50% retrace of breakout candle
-RETRACE_DEEPEN_ATR_MULT = 1.5       # if 50% retrace > 1.5x ATR from level -> deepen to S/R retest
 MIN_RR_RATIO = 2.0                  # TP1/TP2 minimum R:R = 1:2
+MIN_RR_AFTER_CAP = 1.5              # if TP2 liquidity-capping drops R:R below this, skip the alert
 HARD_FLAT_UTC_HOUR = 18
-HARD_FLAT_UTC_MINUTE = 30           # no new entry alerts after 18:30 UTC (US indices)
+HARD_FLAT_UTC_MINUTE = 30           # no new entry alerts after 18:30 UTC (instruments with session_cutoff on)
 BTC_EXEMPT_FROM_US_INDEX_DEDUP = True
+
+# Per-instrument calibration -- these values are provisional/placeholder,
+# pending the offline calibration tool (strategy/pullback_calibration.py).
+# retrace_pct: fraction of the impulse leg the entry retraces back into.
+# entry_expiry_mult: multiplies ActiveEntryTracker's base entry-expiry window.
+# session_cutoff: whether HARD_FLAT_UTC_HOUR/MINUTE applies to this instrument.
+INSTRUMENT_PROFILES = {
+    "US100":  {"retrace_pct": 0.40, "entry_expiry_mult": 0.75, "session_cutoff": True},
+    "US500":  {"retrace_pct": 0.50, "entry_expiry_mult": 1.00, "session_cutoff": True},
+    "US30":   {"retrace_pct": 0.60, "entry_expiry_mult": 1.25, "session_cutoff": True},
+    "BTCUSD": {"retrace_pct": 0.50, "entry_expiry_mult": 1.50, "session_cutoff": False},
+    "EURUSD": {"retrace_pct": 0.50, "entry_expiry_mult": 1.00, "session_cutoff": True},
+}
+# Deferred by decision: GBPJPY (violent wicks, BoJ intervention risk).
+# Removed and staying removed: XAUUSD.
 
 # ─────────────────────────────────────────────────────────────────────
 # 3.  WATCH tracker timing
