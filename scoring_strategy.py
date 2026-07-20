@@ -11,7 +11,6 @@ Section 5.6, handled by the Pending-A+ store below).
 """
 import json
 import os
-import random
 
 import pandas as pd
 
@@ -300,86 +299,168 @@ def recent_spike_penalty(df, atr_value, candidate_pattern,
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Entry / stop / target calculation (Bot Spec V4 Sections 1-3)
+# Entry / SL / TP construction (Entry/SL/TP Selection Rules v1.3)
+#
+# Pure point-selection over an already-qualifying candidate -- pattern
+# detection/scoring above this point is untouched. Everything below derives
+# entry/SL/TP purely from the entry-timeframe candles + direction, via its
+# own BOS/fractal discovery, independent of which of the 5 detectors fired.
 # ─────────────────────────────────────────────────────────────────────
-def compute_entry_exit(candidate, breakout_candle, atr_value, retrace_pct, fvg_zones=None, rng=random):
-    """Leg-based entry: retrace_pct of the real (wick-inclusive) impulse leg,
-    anchored at candidate['leg_extreme'] through the breakout candle's close.
-    A same-direction FVG fully inside the leg overrides the retrace level
-    entirely (enter at its near edge -- FVGs fill faster and more reliably
-    than an arbitrary retrace percentage). Stop is structural, anchored just
-    behind the leg extreme rather than an arbitrary ATR distance from entry.
+def find_leg(candles, direction, max_lookback=cfg.BOS_SEARCH_LOOKBACK_BARS):
+    """Locate the most recent confirmed BOS (Break of Structure) in
+    `direction`: a candle CLOSE beyond the nearest prior minor-swing fractal
+    (2-2 window) of the opposite kind. Scans backward from the newest candle
+    so the result is always the freshest qualifying leg.
 
-    Returns None (caller must skip the setup, not degrade it) if the leg is
-    degenerate, the computed entry doesn't land strictly inside the leg, or
-    the resulting risk is non-positive.
+    leg_origin = extreme of the sweep wick (the low that got swept, for a
+    long) and leg_end = extreme of the move as of the BOS candle's close --
+    frozen there even if price has moved further since; recomputing on a
+    later candle would make entry/SL/TP non-reproducible.
+
+    Returns {"leg_origin", "leg_end", "bos_index"} or None if no BOS is
+    confirmed anywhere in the searchable window.
     """
-    direction = candidate["direction"]
-    leg_extreme = candidate["leg_extreme"]
-    close = breakout_candle["c"]
+    df = _df(candles)
+    n = len(df)
+    if n < 6:
+        return None
+    fractal_highs = _swings(df, "high")
+    fractal_lows = _swings(df, "low")
+    floor_idx = max(0, n - max_lookback)
 
+    for bos_idx in range(n - 1, floor_idx - 1, -1):
+        close = df["c"].iloc[bos_idx]
+        if direction == "BUY":
+            prior_highs = [p for i, p in fractal_highs if i < bos_idx]
+            if not prior_highs or close <= prior_highs[-1]:
+                continue
+            prior_lows = [i for i, p in fractal_lows if i < bos_idx]
+            if not prior_lows:
+                continue
+            origin_idx = prior_lows[-1]
+            leg_origin = float(df["l"].iloc[origin_idx: bos_idx + 1].min())
+            leg_end = float(df["h"].iloc[origin_idx: bos_idx + 1].max())
+        else:
+            prior_lows = [p for i, p in fractal_lows if i < bos_idx]
+            if not prior_lows or close >= prior_lows[-1]:
+                continue
+            prior_highs = [i for i, p in fractal_highs if i < bos_idx]
+            if not prior_highs:
+                continue
+            origin_idx = prior_highs[-1]
+            leg_origin = float(df["h"].iloc[origin_idx: bos_idx + 1].max())
+            leg_end = float(df["l"].iloc[origin_idx: bos_idx + 1].min())
+
+        if leg_end == leg_origin:
+            continue
+        return {"leg_origin": leg_origin, "leg_end": leg_end, "bos_index": bos_idx}
+    return None
+
+
+def _retrace_price(leg_origin, leg_end, direction, pct):
+    """Price at `pct` retracement back from leg_end toward leg_origin."""
     if direction == "BUY":
-        leg_low, leg_high = leg_extreme, close
-    else:
-        leg_low, leg_high = close, leg_extreme
-    if leg_high <= leg_low:
-        return None  # degenerate leg -- breakout close never cleared the extreme
+        return leg_end - pct * (leg_end - leg_origin)
+    return leg_end + pct * (leg_origin - leg_end)
 
-    raw_leg_size = leg_high - leg_low
-    # Some patterns' leg_extreme sits on the same candle as the breakout
-    # close (e.g. a sweep-and-reject candle), so the raw leg is really just
-    # that one candle's own range -- far smaller than the actual move behind
-    # the setup. Floor the size used to SCALE the retrace/stop math (not the
-    # sanity-clamp bounds below, which stay tied to the real close/extreme)
-    # so a same-candle leg still produces a realistic pullback distance and
-    # stop buffer instead of an entry that barely differs from market price.
-    leg_size = max(raw_leg_size, cfg.MIN_LEG_ATR_MULT * atr_value) if atr_value > 0 else raw_leg_size
 
-    entry = close - leg_size * retrace_pct if direction == "BUY" else close + leg_size * retrace_pct
-    entry_basis = f"{retrace_pct:.0%} leg retrace"
+def compute_entry(leg_origin, leg_end, direction, fvg_zones=None):
+    """§1 -- 50% retrace entry, overridden by an FVG's midpoint if a
+    same-direction FVG sits fully inside the leg with its midpoint landing
+    in the 40-62% retrace zone. Among qualifying FVGs, the one whose
+    midpoint is nearest the raw 50% level wins (deterministic tie-break)."""
+    entry = _retrace_price(leg_origin, leg_end, direction, cfg.ENTRY_RETRACE_PCT)
+    entry_basis = "50% leg retrace"
+
+    zone_a = _retrace_price(leg_origin, leg_end, direction, cfg.ENTRY_FVG_ZONE_MIN_PCT)
+    zone_b = _retrace_price(leg_origin, leg_end, direction, cfg.ENTRY_FVG_ZONE_MAX_PCT)
+    zone_lo, zone_hi = min(zone_a, zone_b), max(zone_a, zone_b)
+    leg_lo, leg_hi = min(leg_origin, leg_end), max(leg_origin, leg_end)
 
     if fvg_zones:
-        contained = [
-            z for z in fvg_zones
-            if z["bottom"] >= leg_low and z["top"] <= leg_high
-            and (z["top"] - z["bottom"]) >= cfg.MIN_FVG_SIZE_ATR_MULT * atr_value
-        ]
-        if contained:
-            near_edge = (lambda z: z["top"]) if direction == "BUY" else (lambda z: z["bottom"])
-            nearest = min(contained, key=lambda z: abs(close - near_edge(z)))
-            entry = near_edge(nearest)
-            entry_basis = "FVG edge"
+        qualifying = []
+        for z in fvg_zones:
+            if z["bottom"] < leg_lo or z["top"] > leg_hi:
+                continue  # not fully inside the leg
+            mid = (z["top"] + z["bottom"]) / 2
+            if zone_lo <= mid <= zone_hi:
+                qualifying.append(mid)
+        if qualifying:
+            entry = min(qualifying, key=lambda mid: abs(mid - entry))
+            entry_basis = "FVG midpoint"
 
-    if not (leg_low < entry < leg_high):
-        return None  # sanity clamp -- entry must lie strictly inside the REAL leg
+    return entry, entry_basis
 
-    jitter = rng.uniform(-0.05, 0.05) * atr_value
-    # Stop buffer: floored at a flat ATR fraction (raised from the old flat
-    # 0.25x) AND scaled to a fraction of the (floored) leg size, so bigger
-    # moves get proportionally more room the way an experienced trader would
-    # size a stop, rather than every setup getting the same thin pad.
-    stop_buffer = max(cfg.STOP_BUFFER_MIN_ATR_MULT * atr_value, cfg.STOP_BUFFER_LEG_FRACTION * leg_size)
+
+def compute_stop(leg_origin, direction, atr_value, spread, instrument):
+    """§3 -- buffer = max(0.5xATR, 2xspread) behind leg_origin, then an
+    anti-stop-hunt push of an extra 0.15xATR if that lands within the
+    instrument's round-number proximity threshold."""
+    buffer = max(cfg.SL_BUFFER_ATR_MULT * atr_value, cfg.SL_BUFFER_SPREAD_MULT * spread)
+    stop = leg_origin - buffer if direction == "BUY" else leg_origin + buffer
+
+    round_mult, proximity = cfg.ROUND_NUMBER_OFFSET_TABLE.get(instrument, (None, None))
+    if round_mult:
+        nearest = round(stop / round_mult) * round_mult
+        if abs(stop - nearest) <= proximity:
+            extra = cfg.ROUND_NUMBER_OFFSET_ATR_MULT * atr_value
+            stop = stop - extra if direction == "BUY" else stop + extra
+    return stop
+
+
+def _tp1_exception_level(direction, entry, risk, fvg_zones, swing_prices):
+    """§4 TP1 exception -- an unfilled FVG (near edge) or a minor swing price
+    sitting in [entry + 0.8R, entry + 1.0R) (mirrored for shorts) overrides
+    the raw 1.0R target. Nearest-to-entry wins among qualifying candidates
+    (the most conservative partial-profit level)."""
     if direction == "BUY":
-        stop = leg_extreme - stop_buffer + jitter
-        risk = entry - stop
+        lo, hi = entry + cfg.TP1_EXCEPTION_MIN_R * risk, entry + cfg.TP1_EXCEPTION_MAX_R * risk
     else:
-        stop = leg_extreme + stop_buffer + jitter
-        risk = stop - entry
-    if risk <= 0:
+        lo, hi = entry - cfg.TP1_EXCEPTION_MAX_R * risk, entry - cfg.TP1_EXCEPTION_MIN_R * risk
+
+    candidates = []
+    for z in (fvg_zones or []):
+        near_edge = z["bottom"] if direction == "BUY" else z["top"]
+        if lo <= near_edge < hi:
+            candidates.append(near_edge)
+    for price in swing_prices:
+        if lo <= price < hi:
+            candidates.append(price)
+    if not candidates:
         return None
+    return min(candidates, key=lambda p: abs(p - entry))
 
-    if direction == "BUY":
-        tp1 = entry + risk * cfg.MIN_RR_RATIO
-        tp2 = entry + risk * (cfg.MIN_RR_RATIO + 1)
-    else:
-        tp1 = entry - risk * cfg.MIN_RR_RATIO
-        tp2 = entry - risk * (cfg.MIN_RR_RATIO + 1)
 
-    return {
-        "entry_price": round(entry, 5), "stop_loss": round(stop, 5),
-        "tp1": round(tp1, 5), "tp2": round(tp2, 5), "rr_ratio": cfg.MIN_RR_RATIO,
-        "entry_basis": entry_basis, "stop_basis": "structural (behind leg extreme)",
-    }
+def compute_tp1(direction, entry, risk, fvg_zones, swing_prices):
+    raw = entry + cfg.TP1_R_MULT * risk if direction == "BUY" else entry - cfg.TP1_R_MULT * risk
+    level = _tp1_exception_level(direction, entry, risk, fvg_zones, swing_prices)
+    if level is not None:
+        return level, "FVG/swing exception"
+    return raw, "1.0R"
+
+
+def compute_tp2(direction, entry, risk, levels):
+    """§4 TP2 -- nearest pooled liquidity level beyond entry in the trade
+    direction; falls back to entry + 1.8R if none exists."""
+    raw = entry + cfg.TP2_R_MULT * risk if direction == "BUY" else entry - cfg.TP2_R_MULT * risk
+    ahead = [lvl for lvl in levels if (lvl > entry if direction == "BUY" else lvl < entry)]
+    if not ahead:
+        return raw, False
+    return (min(ahead), True) if direction == "BUY" else (max(ahead), True)
+
+
+def compute_tp3(direction, entry, risk, tp2_price, levels):
+    """§4 TP3 -- whichever is CLOSER to entry between the raw 2.8R target and
+    the next external level beyond TP2 (prior-week H/L or nearest H4 swing);
+    falls back to the raw target alone if no such external level exists."""
+    raw = entry + cfg.TP3_R_MULT * risk if direction == "BUY" else entry - cfg.TP3_R_MULT * risk
+    ahead = [lvl for lvl in levels if (lvl > tp2_price if direction == "BUY" else lvl < tp2_price)]
+    if not ahead:
+        return raw, False
+    external = min(ahead) if direction == "BUY" else max(ahead)
+    if abs(external - entry) < abs(raw - entry):
+        return external, True
+    return raw, False
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -488,57 +569,68 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
                      "blocked": f"below WATCH threshold ({m.watch_min_score})"}
         return None
 
-    retrace_pct = cfg.INSTRUMENT_PROFILES.get(instrument, {}).get("retrace_pct", 0.5)
-    wanted_fvg_dir = "BULLISH" if direction == "BUY" else "BEARISH"
-    entry_fvg_zones = [z for z in ind.detect_fvg_zones(market["entry"]) if z["direction"] == wanted_fvg_dir]
-    exits = compute_entry_exit(candidate, df_entry.iloc[-1], a, retrace_pct, fvg_zones=entry_fvg_zones)
-    if exits is None:
-        if diagnostic:
-            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
-                     "score": int(round(total)), "htf_bias": htf,
-                     "blocked": "degenerate leg (entry construction failed)"}
-        return None
-
     pdh = daily.get("high") if daily else None
     pdl = daily.get("low") if daily else None
     pwh = weekly.get("high") if weekly else None
     pwl = weekly.get("low") if weekly else None
-    liquidity_levels = ind.collect_liquidity_levels(
-        direction, exits["entry_price"], pdh, pdl, pwh, pwl, eqh_eql_zones, poc, va_low, va_high)
-    risk = abs(exits["entry_price"] - exits["stop_loss"])
 
-    # TP1 also gets liquidity awareness now, not just TP2 -- but only cap it
-    # if the capped level still clears a sane partial-profit floor. No real
-    # nearby structure justifies exiting earlier than that just because it
-    # happens to be the first thing in the pooled level list.
-    capped_tp1, tp1_capped = ind.cap_target_at_liquidity(direction, exits["entry_price"], exits["tp1"], liquidity_levels)
-    exits["tp1_capped"] = False
-    if tp1_capped:
-        tp1_rr = abs(capped_tp1 - exits["entry_price"]) / risk if risk else 0
-        if tp1_rr >= cfg.MIN_RR_TP1_AFTER_CAP:
-            exits["tp1"] = round(capped_tp1, 5)
-            exits["tp1_capped"] = True
+    leg = find_leg(market["entry"], direction)
+    if leg is None:
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": int(round(total)), "htf_bias": htf,
+                     "blocked": "no confirmed BOS in recent history"}
+        return None
+    leg_origin, leg_end = leg["leg_origin"], leg["leg_end"]
 
-    # TP2 targets the next liquidity level beyond wherever TP1 actually
-    # landed, not the same pool TP1 already used -- otherwise a single
-    # nearby level would cap both to the identical price, a confusing and
-    # redundant partial-close instruction. If TP1 wasn't capped (no level
-    # cleared its own floor), measure "beyond" from entry instead, same as
-    # if TP1 had never been touched.
-    tp2_boundary = exits["tp1"] if exits["tp1_capped"] else exits["entry_price"]
-    tp2_levels = [lvl for lvl in liquidity_levels
-                  if (lvl > tp2_boundary if direction == "BUY" else lvl < tp2_boundary)]
-    capped_tp2, tp2_capped = ind.cap_target_at_liquidity(direction, exits["entry_price"], exits["tp2"], tp2_levels)
-    exits["tp2_capped"] = tp2_capped
-    if tp2_capped:
-        exits["tp2"] = round(capped_tp2, 5)
-        capped_rr = abs(exits["tp2"] - exits["entry_price"]) / risk if risk else 0
-        if capped_rr < cfg.MIN_RR_AFTER_CAP:
-            if diagnostic:
-                return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
-                         "score": int(round(total)), "htf_bias": htf,
-                         "blocked": "RR_BELOW_MIN_AFTER_LIQUIDITY_CAP"}
-            return None
+    wanted_fvg_dir = "BULLISH" if direction == "BUY" else "BEARISH"
+    m15_fvg_zones = [z for z in ind.detect_fvg_zones(market["entry"]) if z["direction"] == wanted_fvg_dir]
+    entry, entry_basis = compute_entry(leg_origin, leg_end, direction, fvg_zones=m15_fvg_zones)
+
+    # Capital.com's price objects can carry both bid and ask closes; use the
+    # spread implied by the latest candle if present, else the SL buffer
+    # relies solely on its ATR term (spread unavailable is treated as 0, not
+    # an error -- this degrades gracefully rather than blocking the setup).
+    spread = market["entry"][-1].get("spread") or 0.0
+    stop = compute_stop(leg_origin, direction, a, spread, instrument)
+    risk = abs(entry - stop)
+    if risk <= 0:
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": int(round(total)), "htf_bias": htf,
+                     "blocked": "non-positive risk (entry/stop construction failed)"}
+        return None
+
+    m15_swing_prices = [p for _, p in _swings(df_entry, "high" if direction == "BUY" else "low")]
+    tp1, tp1_basis = compute_tp1(direction, entry, risk, m15_fvg_zones, m15_swing_prices)
+
+    if instrument == "BTCUSD":
+        # No session structure for a 24/7 market -- PDH/PDL, Daily Open,
+        # Weekly Open, prior-week H/L instead of Asian/London/NY ranges.
+        d_open = market_sessions.daily_open(market["entry"], now_utc)
+        w_open = market_sessions.weekly_open(market["entry"], now_utc)
+        tp2_pool = [lvl for lvl in (pdh, pdl, d_open, w_open) if lvl is not None]
+    else:
+        asian_h, asian_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.ASIAN_SESSION)
+        london_h, london_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.LONDON_SESSION)
+        ny_h, ny_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.NY_SESSION)
+        tp2_pool = [lvl for lvl in (pdh, pdl, asian_h, asian_l, london_h, london_l, ny_h, ny_l) if lvl is not None]
+        tp2_pool += [z["price"] for z in eqh_eql_zones]
+    tp2, tp2_from_level = compute_tp2(direction, entry, risk, tp2_pool)
+
+    # TP3's "next external level" is universal (prior-week H/L + nearest H4
+    # swing), regardless of instrument class.
+    h4_swings = [p for _, p in _swings(_df(market["h4"]), "high" if direction == "BUY" else "low")]
+    tp3_pool = [lvl for lvl in (pwh, pwl) if lvl is not None] + h4_swings
+    tp3, tp3_from_level = compute_tp3(direction, entry, risk, tp2, tp3_pool)
+
+    exits = {
+        "entry_price": round(entry, 5), "stop_loss": round(stop, 5),
+        "tp1": round(tp1, 5), "tp2": round(tp2, 5), "tp3": round(tp3, 5),
+        "entry_basis": entry_basis, "tp1_basis": tp1_basis,
+        "tp2_capped": tp2_from_level, "tp3_capped": tp3_from_level,
+        "leg_origin": round(leg_origin, 5), "leg_end": round(leg_end, 5),
+    }
 
     result = {
         "instrument": instrument, "direction": direction, "pattern": candidate["pattern"],

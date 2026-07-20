@@ -140,6 +140,34 @@ def test_diagnostic_mode_reports_below_threshold_score():
     assert "below WATCH threshold" in result["blocked"]
 
 
+_FAKE_LEG = {"leg_origin": 95.0, "leg_end": 100.5, "bos_index": 79}
+
+
+_UNSET = object()
+
+
+def _patch_qualifying_stack(stack, find_leg_return=_UNSET):
+    """Common patch set for score_candidate tests that need a deterministic,
+    qualifying result: pins every scoring sub-factor to a known value and
+    stubs find_leg (BOS discovery has its own dedicated tests against real
+    candle geometry -- these tests are about score_candidate's own control
+    flow, not about find_leg's correctness) and the session-level helpers
+    (so TP2/TP3 pool composition doesn't depend on synthetic-candle noise)."""
+    stack.enter_context(patch.object(strat, "technical_confirm_score", return_value=10))
+    stack.enter_context(patch.object(strat, "vwap_filter_score", return_value=4))
+    stack.enter_context(patch.object(strat, "choppy_market_penalty", return_value=0))
+    stack.enter_context(patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")))
+    stack.enter_context(patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")))
+    stack.enter_context(patch.object(strat.ind, "fvg_bonus", return_value=(0, None)))
+    stack.enter_context(patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)))
+    stack.enter_context(patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]))
+    leg = dict(_FAKE_LEG) if find_leg_return is _UNSET else find_leg_return
+    stack.enter_context(patch.object(strat, "find_leg", return_value=leg))
+    stack.enter_context(patch.object(strat.market_sessions, "session_range", return_value=(None, None)))
+    stack.enter_context(patch.object(strat.market_sessions, "daily_open", return_value=None))
+    stack.enter_context(patch.object(strat.market_sessions, "weekly_open", return_value=None))
+
+
 def test_diagnostic_mode_qualifying_setup_has_no_blocked_reason():
     market = {
         "entry": make_candles(80, start_price=100.0, noise=0.3),
@@ -147,16 +175,11 @@ def test_diagnostic_mode_qualifying_setup_has_no_blocked_reason():
         "h4": trending_h4_candles(up=True),
     }
     candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
-                 "sweep_price": 100.0, "leg_extreme": 95.0, "quality": 38}
+                 "sweep_price": 100.0, "quality": 38}
+    import contextlib
     import datetime as dt
-    with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "vwap_filter_score", return_value=4), \
-         patch.object(strat, "choppy_market_penalty", return_value=0), \
-         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
-         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
-         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+    with contextlib.ExitStack() as stack:
+        _patch_qualifying_stack(stack)
         result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market,
             dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc),
@@ -166,26 +189,20 @@ def test_diagnostic_mode_qualifying_setup_has_no_blocked_reason():
     assert result["pattern"] == "LIQUIDITY_SWEEP_BOS"
 
 
-def test_score_candidate_degenerate_leg_is_skipped_not_degraded():
-    """A qualifying score whose leg_extreme sits on the wrong side of the
-    breakout close (an invalid/degenerate leg) must be skipped entirely, not
-    sent with a nonsensical entry."""
+def test_score_candidate_skipped_when_no_bos_confirmed():
+    """If find_leg can't confirm a BOS anywhere in the recent window, the
+    setup is skipped entirely (not sent with a nonsensical entry)."""
     market = {
         "entry": make_candles(80, start_price=100.0, noise=0.3),
         "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
         "h4": trending_h4_candles(up=True),
     }
     candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
-                 "sweep_price": 100.0, "leg_extreme": 999.0, "quality": 38}
+                 "sweep_price": 100.0, "quality": 38}
+    import contextlib
     import datetime as dt
-    with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "vwap_filter_score", return_value=4), \
-         patch.object(strat, "choppy_market_penalty", return_value=0), \
-         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
-         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
-         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+    with contextlib.ExitStack() as stack:
+        _patch_qualifying_stack(stack, find_leg_return=None)
         result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market,
             dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc),
@@ -195,98 +212,40 @@ def test_score_candidate_degenerate_leg_is_skipped_not_degraded():
             dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc),
             _fake_level_store(), diagnostic=True)
     assert result is None
-    assert diag["blocked"] == "degenerate leg (entry construction failed)"
+    assert diag["blocked"] == "no confirmed BOS in recent history"
 
 
-def _level_store_with_near_pdh(high):
+def test_score_candidate_wires_pooled_tp2_level():
+    """Integration check: score_candidate threads a real level-store PDH
+    into the TP2 pool and caps TP2 there, ahead of the raw 1.8R fallback."""
+    market = {
+        "entry": make_candles(80, start_price=100.0, noise=0.3),
+        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
+        "h4": trending_h4_candles(up=True),
+    }
+    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
+                 "sweep_price": 100.0, "quality": 38}
+    import contextlib
+    import datetime as dt
+
     class _Store:
         def get_daily_levels(self, instrument):
-            return {"high": high, "low": 50.0}
+            return {"high": 108.0, "low": 90.0}
 
         def get_weekly_levels(self, instrument):
             return None
-    return _Store()
 
-
-def test_score_candidate_skipped_when_rr_falls_below_min_after_liquidity_cap():
-    """A raw TP2 that would clear the R:R minimum, but sits well past a nearby
-    PDH, must be capped at the PDH -- and if that capped R:R then falls below
-    MIN_RR_AFTER_CAP, the alert is skipped outright (not sent with a degraded
-    target)."""
-    market = {
-        "entry": make_candles(80, start_price=100.0, noise=0.3),
-        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
-        "h4": trending_h4_candles(up=True),
-    }
-    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
-                 "sweep_price": 100.0, "leg_extreme": 95.0, "quality": 38}
-    import datetime as dt
-    # PDH sits just above the expected ~97.5 entry -- close enough that capping
-    # TP2 there collapses the R:R well under the 1.5 floor.
-    level_store = _level_store_with_near_pdh(98.5)
-    with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "vwap_filter_score", return_value=4), \
-         patch.object(strat, "choppy_market_penalty", return_value=0), \
-         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
-         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
-         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+    with contextlib.ExitStack() as stack:
+        _patch_qualifying_stack(stack)
         result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market,
-            dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc), level_store)
-        diag = strat.score_candidate(
-            "US500", "US_INDEX", candidate, market,
-            dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc), level_store, diagnostic=True)
-    assert result is None
-    assert diag["blocked"] == "RR_BELOW_MIN_AFTER_LIQUIDITY_CAP"
-
-
-def _level_store_with_pdh_and_pwh(pdh, pwh):
-    class _Store:
-        def get_daily_levels(self, instrument):
-            return {"high": pdh, "low": 50.0}
-
-        def get_weekly_levels(self, instrument):
-            return {"high": pwh, "low": 40.0}
-    return _Store()
-
-
-def test_score_candidate_caps_tp1_and_walks_tp2_to_next_level_beyond_it():
-    """TP1 now gets liquidity awareness too (trader-review fix), and TP2 must
-    target the NEXT level beyond wherever TP1 landed rather than the same
-    nearest level -- otherwise both would cap to an identical, redundant
-    price."""
-    market = {
-        "entry": make_candles(80, start_price=100.0, noise=0.3),
-        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
-        "h4": trending_h4_candles(up=True),
-    }
-    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
-                 "sweep_price": 100.0, "leg_extreme": 95.0, "quality": 38}
-    import datetime as dt
-    # ~97.5 entry, ~104.0 raw TP1, ~107.25 raw TP2 (see the RR-after-cap test
-    # above for the same setup's math). pdh sits between entry+1R and raw
-    # TP1 -- close enough to cap TP1 but still clear MIN_RR_TP1_AFTER_CAP;
-    # pwh sits beyond that capped TP1 and well under raw TP2.
-    level_store = _level_store_with_pdh_and_pwh(pdh=101.5, pwh=105.0)
-    with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "vwap_filter_score", return_value=4), \
-         patch.object(strat, "choppy_market_penalty", return_value=0), \
-         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
-         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
-         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
-        result = strat.score_candidate(
-            "US500", "US_INDEX", candidate, market,
-            dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc), level_store)
+            dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc), _Store())
     assert result is not None
-    assert result["tp1_capped"] is True
-    assert result["tp1"] == 101.5
+    # leg_origin=95, leg_end=100.5 (mocked) -> entry=97.75, well below PDH=108,
+    # and the raw 1.8R target from that entry/risk is nowhere near 108 either
+    # -- PDH still ends up nearest and caps TP2.
     assert result["tp2_capped"] is True
-    assert result["tp2"] == 105.0
-    assert result["tp1"] < result["tp2"]
+    assert result["tp2"] == 108.0
 
 
 def test_diagnostic_mode_qualifying_result_survives_main_alerts_diagnostics_dict():
@@ -302,16 +261,11 @@ def test_diagnostic_mode_qualifying_result_survives_main_alerts_diagnostics_dict
         "h4": trending_h4_candles(up=True),
     }
     candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
-                 "sweep_price": 100.0, "leg_extreme": 95.0, "quality": 38}
+                 "sweep_price": 100.0, "quality": 38}
+    import contextlib
     import datetime as dt
-    with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "vwap_filter_score", return_value=4), \
-         patch.object(strat, "choppy_market_penalty", return_value=0), \
-         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
-         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
-         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+    with contextlib.ExitStack() as stack:
+        _patch_qualifying_stack(stack)
         scored = strat.score_candidate(
             "US500", "US_INDEX", candidate, market,
             dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc),
@@ -327,26 +281,20 @@ def _ranging_market(quality):
         "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
         "h4": make_candles(260, start_price=100.0, step=0.0, noise=0.5, interval_minutes=240),
     }
-    candidate = {"pattern": "FLAG", "direction": "BUY", "sweep_price": 100.0,
-                 "leg_extreme": 95.0, "quality": quality}
+    candidate = {"pattern": "FLAG", "direction": "BUY", "sweep_price": 100.0, "quality": quality}
     return market, candidate
 
 
 def test_score_candidate_loose_mode_lower_watch_threshold():
     """A setup scoring ~58 (RANGING bias +5, quality 27) must be blocked under
     the default 62 threshold but pass under loose mode's 55 threshold."""
+    import contextlib
     import datetime as dt
     market, candidate = _ranging_market(quality=27)
     now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
-    with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "vwap_filter_score", return_value=4), \
-         patch.object(strat, "choppy_market_penalty", return_value=0), \
-         patch.object(strat.ind, "volume_profile_zones", return_value=(None, None, None)), \
-         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
-         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
-         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+    with contextlib.ExitStack() as stack:
+        _patch_qualifying_stack(stack)
+        stack.enter_context(patch.object(strat.ind, "volume_profile_zones", return_value=(None, None, None)))
         default_result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market, now, _fake_level_store())
         loose_result = strat.score_candidate(
@@ -357,18 +305,13 @@ def test_score_candidate_loose_mode_lower_watch_threshold():
 
 
 def test_score_candidate_diagnostic_blocked_message_reflects_mode_threshold():
+    import contextlib
     import datetime as dt
     market, candidate = _ranging_market(quality=10)
     now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
-    with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "vwap_filter_score", return_value=4), \
-         patch.object(strat, "choppy_market_penalty", return_value=0), \
-         patch.object(strat.ind, "volume_profile_zones", return_value=(None, None, None)), \
-         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
-         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
-         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+    with contextlib.ExitStack() as stack:
+        _patch_qualifying_stack(stack)
+        stack.enter_context(patch.object(strat.ind, "volume_profile_zones", return_value=(None, None, None)))
         default_result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market, now, _fake_level_store(), diagnostic=True)
         loose_result = strat.score_candidate(
@@ -387,19 +330,11 @@ def test_with_trend_signal_is_not_blocked_and_scores():
         "h4": trending_h4_candles(up=True),
     }
     candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
-                 "sweep_price": 100.0, "leg_extreme": 95.0, "quality": 38}
+                 "sweep_price": 100.0, "quality": 38}
+    import contextlib
     import datetime as dt
-    # Pin every upgrade-module factor that isn't the subject of this test (ATR
-    # regime / choppiness / FVG / EQH-EQL) so the assertion isolates the
-    # counter-trend gate rather than depending on synthetic-data noise.
-    with patch.object(strat, "technical_confirm_score", return_value=10), \
-         patch.object(strat, "vwap_filter_score", return_value=4), \
-         patch.object(strat, "choppy_market_penalty", return_value=0), \
-         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
-         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
-         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
-         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+    with contextlib.ExitStack() as stack:
+        _patch_qualifying_stack(stack)
         result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market, dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc),
             _fake_level_store())
@@ -408,80 +343,244 @@ def test_with_trend_signal_is_not_blocked_and_scores():
     assert result["score"] >= 75
 
 
-def test_compute_entry_exit_buy_invariants():
-    candidate = {"direction": "BUY", "leg_extreme": 99.0}
-    breakout = {"o": 100.0, "h": 103.0, "l": 99.5, "c": 102.0}
-    exits = strat.compute_entry_exit(candidate, breakout, atr_value=1.0, retrace_pct=0.5, rng=_zero_rng())
-    assert exits["stop_loss"] < exits["entry_price"] < exits["tp1"] < exits["tp2"]
+def _c(o, h, l, cl):
+    return {"o": o, "h": h, "l": l, "c": cl, "v": None}
 
 
-def test_compute_entry_exit_sell_invariants():
-    candidate = {"direction": "SELL", "leg_extreme": 101.0}
-    breakout = {"o": 100.0, "h": 100.5, "l": 97.0, "c": 98.0}
-    exits = strat.compute_entry_exit(candidate, breakout, atr_value=1.0, retrace_pct=0.5, rng=_zero_rng())
-    assert exits["tp2"] < exits["tp1"] < exits["entry_price"] < exits["stop_loss"]
+def _buy_bos_candles():
+    """A clean, isolated BUY setup: swing low fractal at idx3 (94), swing
+    high fractal at idx6 (108), a sweep to a new low (90) at idx10, and a
+    BOS candle at idx11 closing (110) above the swing high."""
+    return [
+        _c(100, 100.2, 99.8, 100), _c(100, 100.3, 99.7, 100), _c(100, 100.4, 99.6, 100),
+        _c(100, 100.2, 94.0, 100),
+        _c(100, 100.3, 99.5, 100), _c(100, 100.1, 99.4, 100),
+        _c(100, 108.0, 99.6, 100),
+        _c(100, 100.2, 99.3, 100), _c(100, 100.4, 99.9, 100), _c(100, 100.1, 99.2, 100),
+        _c(100, 101.0, 90.0, 95),
+        _c(95, 112.0, 94.0, 110),
+    ]
 
 
-def test_compute_entry_exit_degenerate_leg_returns_none():
-    """BUY leg requires close > leg_extreme -- if the breakout candle never
-    cleared the leg extreme, there's no valid leg to retrace, skip the setup."""
-    candidate = {"direction": "BUY", "leg_extreme": 100.0}
-    breakout = {"o": 100.0, "h": 100.5, "l": 99.5, "c": 99.8}
-    exits = strat.compute_entry_exit(candidate, breakout, atr_value=1.0, retrace_pct=0.5, rng=_zero_rng())
-    assert exits is None
+def _sell_bos_candles():
+    """Mirror of _buy_bos_candles: swing high fractal at idx3 (106), swing
+    low fractal at idx6 (92), a sweep to a new high (110) at idx10, and a
+    BOS candle at idx11 closing (90) below the swing low."""
+    return [
+        _c(100, 100.2, 99.8, 100), _c(100, 100.3, 99.7, 100), _c(100, 100.4, 99.6, 100),
+        _c(100, 106.0, 99.8, 100),
+        _c(100, 100.3, 99.5, 100), _c(100, 100.1, 99.4, 100),
+        _c(100, 100.2, 92.0, 100),
+        _c(100, 100.2, 99.3, 100), _c(100, 100.4, 99.9, 100), _c(100, 100.1, 99.2, 100),
+        _c(100, 110.0, 99.0, 105),
+        _c(105, 106.0, 88.0, 90),
+    ]
 
 
-def test_compute_entry_exit_fvg_inside_leg_overrides_retrace_entry():
-    candidate = {"direction": "BUY", "leg_extreme": 90.0}
-    breakout = {"o": 100.0, "h": 103.0, "l": 99.5, "c": 100.0}
+def test_find_leg_buy_locates_sweep_and_bos():
+    leg = strat.find_leg(_buy_bos_candles(), "BUY")
+    assert leg == {"leg_origin": 90.0, "leg_end": 112.0, "bos_index": 11}
+
+
+def test_find_leg_sell_locates_sweep_and_bos():
+    leg = strat.find_leg(_sell_bos_candles(), "SELL")
+    assert leg == {"leg_origin": 110.0, "leg_end": 88.0, "bos_index": 11}
+
+
+def test_find_leg_returns_none_without_a_confirmed_bos():
+    flat = [_c(100, 101, 99, 100)] * 10
+    assert strat.find_leg(flat, "BUY") is None
+
+
+def test_find_leg_returns_the_most_recent_bos():
+    """Two independent BOS events in the same window -- find_leg must return
+    the later (more recent) one, not the first it happens to encounter."""
+    first = _buy_bos_candles()
+    # Append a second, later sweep+BOS sequence further above the first.
+    second = [
+        _c(110, 110.2, 109.8, 110), _c(110, 110.3, 109.7, 110), _c(110, 110.4, 109.6, 110),
+        _c(110, 118.0, 109.8, 110),
+        _c(110, 110.3, 109.5, 110), _c(110, 110.1, 109.4, 110),
+        _c(110, 110.2, 102.0, 110),
+        _c(110, 110.2, 109.3, 110), _c(110, 110.4, 109.9, 110), _c(110, 110.1, 109.2, 110),
+        _c(110, 111.0, 100.0, 105),
+        _c(105, 122.0, 104.0, 120),
+    ]
+    leg = strat.find_leg(first + second, "BUY")
+    assert leg["bos_index"] == len(first) + 11
+    assert leg["leg_origin"] == 100.0
+    assert leg["leg_end"] == 122.0
+
+
+def test_compute_entry_default_50_pct_retrace():
+    entry, basis = strat.compute_entry(90.0, 100.0, "BUY")
+    assert entry == 95.0
+    assert basis == "50% leg retrace"
+
+
+def test_compute_entry_sell_mirrors_buy():
+    entry, basis = strat.compute_entry(110.0, 100.0, "SELL")
+    assert entry == 105.0
+    assert basis == "50% leg retrace"
+
+
+def test_compute_entry_fvg_midpoint_override_inside_zone():
+    """FVG fully inside the leg with its midpoint in the 40-62% retrace zone
+    (here 95.0 = exactly 50%) must override the raw retrace entry."""
     fvg_zones = [{"direction": "BULLISH", "bottom": 94.0, "top": 96.0, "index": 0}]
-    exits = strat.compute_entry_exit(
-        candidate, breakout, atr_value=1.0, retrace_pct=0.5, fvg_zones=fvg_zones, rng=_zero_rng())
-    assert exits is not None
-    assert exits["entry_price"] == 96.0
-    assert exits["entry_basis"] == "FVG edge"
+    entry, basis = strat.compute_entry(90.0, 100.0, "BUY", fvg_zones=fvg_zones)
+    assert entry == 95.0
+    assert basis == "FVG midpoint"
 
 
-def test_compute_entry_exit_ignores_fvg_zone_below_min_size():
-    """A gap smaller than MIN_FVG_SIZE_ATR_MULT x ATR must not override the
-    retrace entry -- a negligible gap isn't meaningfully different from noise."""
-    candidate = {"direction": "BUY", "leg_extreme": 90.0}
-    breakout = {"o": 100.0, "h": 103.0, "l": 99.5, "c": 100.0}
-    fvg_zones = [{"direction": "BULLISH", "bottom": 94.99, "top": 95.0, "index": 0}]  # 0.01-wide, atr=1.0
-    exits = strat.compute_entry_exit(
-        candidate, breakout, atr_value=1.0, retrace_pct=0.5, fvg_zones=fvg_zones, rng=_zero_rng())
-    assert exits is not None
-    assert exits["entry_basis"] == "50% leg retrace"  # FVG override never applied
+def test_compute_entry_ignores_fvg_outside_the_40_62_zone():
+    """An FVG fully inside the leg but whose midpoint sits outside the
+    40-62% retrace band (here near 90%) must NOT override the entry."""
+    fvg_zones = [{"direction": "BULLISH", "bottom": 90.5, "top": 91.5, "index": 0}]
+    entry, basis = strat.compute_entry(90.0, 100.0, "BUY", fvg_zones=fvg_zones)
+    assert entry == 95.0
+    assert basis == "50% leg retrace"
 
 
-def test_compute_entry_exit_leg_size_floored_for_thin_same_candle_leg():
-    """A thin same-candle leg (raw size 0.3) must still produce a realistic
-    pullback distance once floored to MIN_LEG_ATR_MULT x ATR, not an entry
-    that barely differs from the breakout candle's own close."""
-    candidate = {"direction": "BUY", "leg_extreme": 99.7}
-    breakout = {"o": 100.0, "h": 100.1, "l": 99.6, "c": 100.0}
-    exits = strat.compute_entry_exit(candidate, breakout, atr_value=1.0, retrace_pct=0.2, rng=_zero_rng())
-    assert exits is not None
-    assert exits["entry_price"] == 99.8  # floored leg_size (1.0) x 0.2, not raw (0.3) x 0.2 = 99.94
+def test_compute_entry_ignores_fvg_not_fully_inside_the_leg():
+    fvg_zones = [{"direction": "BULLISH", "bottom": 85.0, "top": 96.0, "index": 0}]  # bottom is outside [90,100]
+    entry, basis = strat.compute_entry(90.0, 100.0, "BUY", fvg_zones=fvg_zones)
+    assert entry == 95.0
+    assert basis == "50% leg retrace"
 
 
-def test_compute_entry_exit_stop_buffer_scales_with_leg_size():
-    """A large leg must widen the stop buffer beyond the flat ATR floor,
-    proportional to the size of the actual move, not a fixed thin pad."""
-    candidate = {"direction": "BUY", "leg_extreme": 90.0}
-    breakout = {"o": 100.0, "h": 100.5, "l": 99.5, "c": 100.0}
-    exits = strat.compute_entry_exit(candidate, breakout, atr_value=1.0, retrace_pct=0.5, rng=_zero_rng())
-    assert exits is not None
-    # leg_size=10 (well above the 1x ATR floor); buffer = max(0.35*1, 0.15*10=1.5) = 1.5
-    assert exits["stop_loss"] == 88.5
+def test_compute_stop_us100_worked_example():
+    """Spec v1.3 worked example: sweep low 26,850, ATR=20, spread=2 ->
+    buffer=max(10,4)=10 -> SL=26,840 (no round-number collision)."""
+    stop = strat.compute_stop(26850.0, "BUY", atr_value=20.0, spread=2.0, instrument="US100")
+    assert stop == 26840.0
 
 
-def _zero_rng():
-    class _Rng:
-        @staticmethod
-        def uniform(a, b):
-            return 0.0
-    return _Rng()
+def test_compute_stop_eurusd_worked_example():
+    """ATR=0.00120, spread=0.00006 -> buffer=max(0.00060,0.00012)=0.00060 ->
+    SL=1.17440; round check vs 1.17500 (6 pips) clears the 3-pip threshold."""
+    stop = strat.compute_stop(1.17500, "BUY", atr_value=0.00120, spread=0.00006, instrument="EURUSD")
+    assert round(stop, 5) == 1.17440
+
+
+def test_compute_stop_applies_round_number_offset_when_too_close():
+    """US500: round multiple 50, proximity 3. A raw SL landing within 3 pts
+    of a 50-multiple must get pushed an extra 0.15xATR further away."""
+    # leg_origin=5103, buffer=max(0.5*10,0)=5 -> raw stop=5098, only 2pts from
+    # the nearest 50-multiple (5100) -- inside the 3pt threshold.
+    raw = 5103.0 - 5.0
+    assert raw == 5098.0
+    nearest = round(raw / 50) * 50
+    assert nearest == 5100
+    assert abs(raw - nearest) <= 3  # confirms this scenario actually triggers the offset
+
+    stop = strat.compute_stop(5103.0, "BUY", atr_value=10.0, spread=0.0, instrument="US500")
+    assert stop == raw - strat.cfg.ROUND_NUMBER_OFFSET_ATR_MULT * 10.0
+
+
+def test_compute_tp1_raw_one_r_without_exception_candidates():
+    tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=[])
+    assert tp1 == 110.0
+    assert basis == "1.0R"
+
+
+def test_compute_tp1_swing_exception_inside_08_10_r_window():
+    swing_prices = [108.5]  # 0.85R from entry -- inside [0.8R, 1.0R)
+    tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=swing_prices)
+    assert tp1 == 108.5
+    assert basis == "FVG/swing exception"
+
+
+def test_compute_tp1_fvg_exception_uses_near_edge():
+    fvg_zones = [{"direction": "BULLISH", "bottom": 109.0, "top": 111.0, "index": 0}]
+    tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=fvg_zones, swing_prices=[])
+    assert tp1 == 109.0  # near edge (bottom) for a BUY
+    assert basis == "FVG/swing exception"
+
+
+def test_compute_tp1_ignores_candidates_outside_the_window():
+    swing_prices = [107.0]  # 0.7R -- below the 0.8R floor
+    tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=swing_prices)
+    assert tp1 == 110.0
+    assert basis == "1.0R"
+
+
+def test_compute_tp2_uses_nearest_level_ahead():
+    tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[108.0, 115.0])
+    assert tp2 == 108.0
+    assert from_level is True
+
+
+def test_compute_tp2_falls_back_to_1_8r_without_a_level():
+    tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[])
+    assert tp2 == 118.0
+    assert from_level is False
+
+
+def test_compute_tp3_prefers_whichever_is_nearer_entry():
+    # raw 2.8R = 128; an external level at 150 is farther than raw -> raw wins.
+    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=108.0, levels=[150.0])
+    assert tp3 == 128.0
+    assert from_level is False
+    # an external level at 120 is nearer than raw -> external wins.
+    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=108.0, levels=[120.0])
+    assert tp3 == 120.0
+    assert from_level is True
+
+
+def test_compute_tp3_falls_back_to_2_8r_without_an_external_level():
+    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=108.0, levels=[])
+    assert tp3 == 128.0
+    assert from_level is False
+
+
+def test_worked_example_us100_long():
+    """Entry/SL/TP Selection Rules v1.3 acceptance test: US100 long."""
+    leg_origin, leg_end = 26850.0, 26950.0
+    atr_value, spread = 20.0, 2.0
+
+    entry, entry_basis = strat.compute_entry(leg_origin, leg_end, "BUY")
+    assert entry == 26900.0
+    assert entry_basis == "50% leg retrace"
+
+    stop = strat.compute_stop(leg_origin, "BUY", atr_value, spread, "US100")
+    assert stop == 26840.0
+    risk = entry - stop
+    assert risk == 60.0
+
+    tp1, _ = strat.compute_tp1("BUY", entry, risk, fvg_zones=[], swing_prices=[])
+    assert tp1 == 26960.0
+
+    tp2_with_pdh, from_level = strat.compute_tp2("BUY", entry, risk, levels=[27010.0])
+    assert tp2_with_pdh == 27010.0 and from_level is True
+    tp2_fallback, from_level = strat.compute_tp2("BUY", entry, risk, levels=[])
+    assert tp2_fallback == 27008.0 and from_level is False
+
+    # "nearer than external level" -- no external level beyond TP2 in this example.
+    tp3, from_level = strat.compute_tp3("BUY", entry, risk, tp2_price=tp2_with_pdh, levels=[])
+    assert tp3 == 27068.0
+    assert from_level is False
+
+
+def test_worked_example_eurusd_long():
+    """Entry/SL/TP Selection Rules v1.3 acceptance test: EURUSD long."""
+    leg_origin, leg_end = 1.17500, 1.17900
+    atr_value, spread = 0.00120, 0.00006
+
+    entry, _ = strat.compute_entry(leg_origin, leg_end, "BUY")
+    assert round(entry, 5) == 1.17700
+
+    stop = strat.compute_stop(leg_origin, "BUY", atr_value, spread, "EURUSD")
+    assert round(stop, 5) == 1.17440
+    risk = entry - stop
+    assert round(risk, 5) == 0.00260
+
+    tp1, _ = strat.compute_tp1("BUY", entry, risk, fvg_zones=[], swing_prices=[])
+    assert round(tp1, 5) == 1.17960
+
+    tp3, from_level = strat.compute_tp3("BUY", entry, risk, tp2_price=entry, levels=[])
+    assert round(tp3, 5) == 1.18428
+    assert from_level is False
 
 
 def test_confirmation_closed_in_direction():

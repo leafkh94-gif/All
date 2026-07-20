@@ -8,6 +8,7 @@ import os
 import traceback
 from datetime import datetime, timedelta, timezone
 
+import pandas as pd
 import requests
 
 import market_sessions
@@ -79,8 +80,19 @@ def _format_duration(minutes):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Section 6 — Entry expiry timer for issued A+ alerts
+# Entry/SL/TP Selection Rules v1.3 §2 — pending-order lifecycle.
+# Three cancellation reasons, checked in this order: touched (filled) takes
+# priority over everything; then the two invalidation conditions; then the
+# flat time-based expiry.
 # ─────────────────────────────────────────────────────────────────────
+_CANCEL_MESSAGES = {
+    "SWEEP_VIOLATED": "A candle closed back beyond the sweep wick (leg_origin) before the order filled — the "
+                       "setup's premise failed.",
+    "LEFT_WITHOUT_US": "Price extended more than 1x the leg size beyond the move without ever filling — do not "
+                        "chase, the trade is missed.",
+}
+
+
 class ActiveEntryTracker:
     def __init__(self, path=ACTIVE_ENTRIES_PATH):
         self.path = path
@@ -93,32 +105,64 @@ class ActiveEntryTracker:
             "stop_loss": scored.get("stop_loss"),
             "tp1": scored.get("tp1"),
             "tp2": scored.get("tp2"),
+            "tp3": scored.get("tp3"),
+            "leg_origin": scored.get("leg_origin"),
+            "leg_end": scored.get("leg_end"),
             "pattern": scored.get("pattern"),
             "alert_time": now_utc.isoformat(),
         }
         save_json(self.path, self._data)
 
+    def _cancel(self, instrument, reason):
+        del self._data[instrument]
+        save_json(self.path, self._data)
+        send_telegram(
+            f"⌛ {instrument} entry cancelled ({reason}).\n"
+            f"{_CANCEL_MESSAGES.get(reason, '')}\n"
+            f"No action needed."
+        )
+
     def evaluate_all(self, now_utc, feed, mode=None, open_tracker=None):
-        m = mode or modes.STANDARD
+        # mode is accepted for call-site compatibility but no longer scales
+        # the pending-order timer -- v1.3's 90-minute expiry is flat across
+        # every instrument, not mode/instrument-scaled like the old system.
         for instrument, e in list(self._data.items()):
             alert_time = datetime.fromisoformat(e["alert_time"])
             price = feed.get_current_price(instrument)
             if price is None:
                 continue
-            touched = (e["direction"] == "BUY" and price <= e["entry_price"]) or (
-                e["direction"] == "SELL" and price >= e["entry_price"])
+            direction = e["direction"]
+
+            touched = (direction == "BUY" and price <= e["entry_price"]) or (
+                direction == "SELL" and price >= e["entry_price"])
             if touched:
                 del self._data[instrument]
                 save_json(self.path, self._data)
                 if open_tracker is not None and e.get("stop_loss") is not None:
                     open_tracker.add({**e, "instrument": instrument}, now_utc)
                 continue
-            expiry_minutes = m.entry_expiry_minutes * cfg.INSTRUMENT_PROFILES.get(
-                instrument, {}).get("entry_expiry_mult", 1.0)
-            if now_utc - alert_time > timedelta(minutes=expiry_minutes):
+
+            leg_origin, leg_end = e.get("leg_origin"), e.get("leg_end")
+            if leg_origin is not None:
+                sweep_violated = (direction == "BUY" and price < leg_origin) or (
+                    direction == "SELL" and price > leg_origin)
+                if sweep_violated:
+                    self._cancel(instrument, "SWEEP_VIOLATED")
+                    continue
+
+            if leg_origin is not None and leg_end is not None:
+                leg_size = abs(leg_end - leg_origin)
+                left_without_us = (direction == "BUY" and price > leg_end + leg_size) or (
+                    direction == "SELL" and price < leg_end - leg_size)
+                if left_without_us:
+                    self._cancel(instrument, "LEFT_WITHOUT_US")
+                    continue
+
+            if now_utc - alert_time > timedelta(minutes=cfg.PENDING_ORDER_MAX_MINUTES):
                 send_telegram(
-                    f"⌛ {instrument} entry expired.\n"
-                    f"Price did not reach entry zone within {_format_duration(expiry_minutes)}.\n"
+                    f"⌛ {instrument} entry expired (EXPIRED).\n"
+                    f"Price did not reach entry zone within "
+                    f"{_format_duration(cfg.PENDING_ORDER_MAX_MINUTES)}.\n"
                     f"Setup cancelled. No action needed."
                 )
                 del self._data[instrument]
@@ -149,6 +193,12 @@ def _append_trade_log(entry, path=None):
 
 
 class OpenTradeTracker:
+    """v1.3 §5 post-fill management: TP1 (50%, SL->breakeven), TP2 (30%,
+    SL->TP1), runner (20%, targets TP3, SL trails behind new confirmed M15
+    minor swings after TP2). A one-time 18:00 UTC heads-up alert precedes
+    the existing 18:30 UTC hard flat (which now applies to every instrument,
+    BTCUSD included)."""
+
     def __init__(self, path=OPEN_TRADES_PATH, trade_log_path=None):
         self.path = path
         self.trade_log_path = trade_log_path or TRADE_LOG_PATH
@@ -165,8 +215,11 @@ class OpenTradeTracker:
             "initial_risk": abs(entry_price - stop_loss),
             "tp1": scored["tp1"],
             "tp2": scored["tp2"],
+            "tp3": scored["tp3"],
             "tp1_hit": False,
+            "tp2_hit": False,
             "locked_r": 0.0,
+            "warned_1800": False,
             "opened_at": now_utc.isoformat(),
         }
         save_json(self.path, self._data)
@@ -179,6 +232,24 @@ class OpenTradeTracker:
             "outcome": outcome, "r_multiple": round(r_multiple, 2), "closed_at": now_utc.isoformat(),
         }, path=self.trade_log_path)
 
+    def _maybe_trail_runner_stop(self, instrument, t, feed):
+        """Runner-phase (post-TP2) optional trail: move SL to the most
+        recent confirmed M15 minor swing in the trade's favor, but only
+        ever toward price, never away from it."""
+        candles = feed.get_candles(instrument, "15min", n=30)
+        if not candles or len(candles) < 6:
+            return
+        df = pd.DataFrame(candles)
+        is_buy = t["direction"] == "BUY"
+        swings = strat._swings(df, "low" if is_buy else "high", window=2)
+        if not swings:
+            return
+        _, latest_swing_price = swings[-1]
+        better = (latest_swing_price > t["stop_loss"]) if is_buy else (latest_swing_price < t["stop_loss"])
+        if better:
+            t["stop_loss"] = float(latest_swing_price)
+            save_json(self.path, self._data)
+
     def evaluate_all(self, now_utc, feed, mode=None):
         for instrument, t in list(self._data.items()):
             price = feed.get_current_price(instrument)
@@ -186,6 +257,7 @@ class OpenTradeTracker:
                 continue
             is_buy = t["direction"] == "BUY"
             entry_price, initial_risk = t["entry_price"], t["initial_risk"]
+            closed_this_cycle = False
 
             if not t["tp1_hit"]:
                 hit_tp1 = price >= t["tp1"] if is_buy else price <= t["tp1"]
@@ -198,21 +270,27 @@ class OpenTradeTracker:
                     send_telegram(
                         f"🎯 {instrument} TP1 hit @ {t['tp1']}.\n"
                         f"Close 50% of the position now.\n"
-                        f"Stop loss moved to breakeven ({entry_price}) on the rest — let it run to TP2."
+                        f"Stop loss moved to breakeven ({entry_price}) on the rest — targeting TP2 ({t['tp2']})."
                     )
                     continue
                 if hit_stop:
                     r = _r_multiple(t["direction"], entry_price, initial_risk, t["stop_loss"])
                     self._close(instrument, t, now_utc, "stop_before_tp1", r)
                     send_telegram(f"🛑 {instrument} stop loss hit @ {t['stop_loss']}. Full position closed.")
-                    continue
-            else:
+                    closed_this_cycle = True
+            elif not t["tp2_hit"]:
                 hit_tp2 = price >= t["tp2"] if is_buy else price <= t["tp2"]
                 hit_be = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
                 if hit_tp2:
-                    r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp2"])
-                    self._close(instrument, t, now_utc, "tp2_after_tp1", r)
-                    send_telegram(f"✅ {instrument} TP2 hit @ {t['tp2']}. Close the remaining position — trade complete.")
+                    t["tp2_hit"] = True
+                    t["locked_r"] += 0.3 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp2"])
+                    t["stop_loss"] = t["tp1"]
+                    save_json(self.path, self._data)
+                    send_telegram(
+                        f"🎯 {instrument} TP2 hit @ {t['tp2']}.\n"
+                        f"Close 30% of the position now.\n"
+                        f"Stop loss moved to TP1 ({t['tp1']}) on the runner (20%) — targeting TP3 ({t['tp3']})."
+                    )
                     continue
                 if hit_be:
                     r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["stop_loss"])
@@ -221,10 +299,42 @@ class OpenTradeTracker:
                         f"⚖️ {instrument} breakeven stop hit after TP1. "
                         f"Remainder closed at entry — partial profit locked in."
                     )
-                    continue
+                    closed_this_cycle = True
+            else:
+                hit_tp3 = price >= t["tp3"] if is_buy else price <= t["tp3"]
+                hit_runner_stop = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
+                if hit_tp3:
+                    r = t["locked_r"] + 0.2 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp3"])
+                    self._close(instrument, t, now_utc, "tp3_runner_complete", r)
+                    send_telegram(f"✅ {instrument} TP3 hit @ {t['tp3']}. Close the runner — trade complete.")
+                    closed_this_cycle = True
+                elif hit_runner_stop:
+                    r = t["locked_r"] + 0.2 * _r_multiple(t["direction"], entry_price, initial_risk, t["stop_loss"])
+                    self._close(instrument, t, now_utc, "runner_stopped", r)
+                    send_telegram(f"🏁 {instrument} runner stopped @ {t['stop_loss']}. Trade complete.")
+                    closed_this_cycle = True
+                else:
+                    self._maybe_trail_runner_stop(instrument, t, feed)
+
+            if closed_this_cycle:
+                continue
+
+            if not t["warned_1800"] and (now_utc.hour, now_utc.minute) >= (
+                    cfg.WARNING_UTC_HOUR, cfg.WARNING_UTC_MINUTE) and (now_utc.hour, now_utc.minute) < (
+                    cfg.HARD_FLAT_UTC_HOUR, cfg.HARD_FLAT_UTC_MINUTE):
+                t["warned_1800"] = True
+                save_json(self.path, self._data)
+                send_telegram(
+                    f"⏰ {instrument} — {cfg.WARNING_UTC_HOUR:02d}:{cfg.WARNING_UTC_MINUTE:02d} UTC.\n"
+                    f"Get ready to close all remaining position manually by the "
+                    f"{cfg.HARD_FLAT_UTC_HOUR:02d}:{cfg.HARD_FLAT_UTC_MINUTE:02d} UTC hard flat if not closed by then."
+                )
 
             if hard_flat_active(now_utc, instrument, mode=mode):
-                if t["tp1_hit"]:
+                if t["tp2_hit"]:
+                    r = t["locked_r"] + 0.2 * _r_multiple(t["direction"], entry_price, initial_risk, price)
+                    outcome = "session_cutoff_runner"
+                elif t["tp1_hit"]:
                     r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, price)
                     outcome = "session_cutoff_after_tp1"
                 else:
@@ -232,9 +342,9 @@ class OpenTradeTracker:
                     outcome = "session_cutoff_before_tp1"
                 self._close(instrument, t, now_utc, outcome, r)
                 send_telegram(
-                    f"⏰ {instrument} — TP2 not hit before "
+                    f"⏰ {instrument} — hard flat at "
                     f"{cfg.HARD_FLAT_UTC_HOUR:02d}:{cfg.HARD_FLAT_UTC_MINUTE:02d} UTC.\n"
-                    f"Close all remaining position now, per the original A+ plan."
+                    f"Close all remaining position now."
                 )
 
 
@@ -256,7 +366,7 @@ def _level_description(scored):
 
 def format_watch_alert(scored, expires_at, mode=None):
     m = mode or modes.STANDARD
-    entry_basis = scored.get("entry_basis", "50% retrace")
+    entry_basis = scored.get("entry_basis", "50% leg retrace")
     return (
         f"⚡ WATCH — {scored['instrument']}\n"
         f"Potential setup forming.\n"
@@ -268,28 +378,26 @@ def format_watch_alert(scored, expires_at, mode=None):
 
 
 def format_aplus_alert(scored, now_utc, mode=None):
-    m = mode or modes.STANDARD
-    expiry_minutes = m.entry_expiry_minutes * cfg.INSTRUMENT_PROFILES.get(
-        scored["instrument"], {}).get("entry_expiry_mult", 1.0)
-    expiry = now_utc + timedelta(minutes=expiry_minutes)
-    entry_basis = scored.get("entry_basis", "50% retrace")
-    stop_basis = scored.get("stop_basis", "structural")
-    tp1_note = "  (capped at nearby liquidity)" if scored.get("tp1_capped") else ""
-    tp2_note = "  (capped at nearby liquidity)" if scored.get("tp2_capped") else ""
+    expiry = now_utc + timedelta(minutes=cfg.PENDING_ORDER_MAX_MINUTES)
+    entry_basis = scored.get("entry_basis", "50% leg retrace")
+    tp1_basis = scored.get("tp1_basis", "1.0R")
+    tp2_note = "  (session/PDH-PDL level)" if scored.get("tp2_capped") else "  (1.8R fallback)"
+    tp3_note = "  (external level)" if scored.get("tp3_capped") else "  (2.8R fallback)"
+    risk = abs(scored["entry_price"] - scored["stop_loss"])
     return (
         f"🟢 A+ SIGNAL — {scored['instrument']}\n\n"
         f"Direction:  {scored['direction']}\n"
         f"Entry:      {scored['entry_price']}  ({entry_basis})\n"
-        f"Stop Loss:  {scored['stop_loss']}  ({stop_basis})\n"
-        f"TP1:        {scored['tp1']}{tp1_note}   ← close 50% of position here\n"
-        f"TP2:        {scored['tp2']}{tp2_note}   ← trail remaining 50% to breakeven, let run\n\n"
-        f"R:R Ratio:  1:{scored['rr_ratio']:g}\n"
-        f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(expiry_minutes)})\n\n"
+        f"Stop Loss:  {scored['stop_loss']}  (behind sweep wick + buffer)\n"
+        f"Risk (R):   {risk:g}\n"
+        f"TP1:        {scored['tp1']}  ({tp1_basis})   ← close 50%, SL to breakeven\n"
+        f"TP2:        {scored['tp2']}{tp2_note}   ← close 30%, SL to TP1\n"
+        f"TP3:        {scored['tp3']}{tp3_note}   ← runner 20%, trail after TP2\n\n"
+        f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(cfg.PENDING_ORDER_MAX_MINUTES)})\n\n"
         f"📋 Reason: {scored['breakdown']['pattern']} at {_level_description(scored)}\n"
         f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}\n\n"
-        f"After TP1 is hit → move stop loss to breakeven (entry price).\n"
-        f"Let remaining 50% run to TP2.\n"
-        f"If TP2 not hit before 18:30 UTC → close all remaining position."
+        f"After TP1 → SL to breakeven. After TP2 → SL to TP1, runner (20%) targets TP3.\n"
+        f"18:00 UTC → get ready to close manually. 18:30 UTC hard flat → close all remaining."
     )
 
 
