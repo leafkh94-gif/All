@@ -42,6 +42,13 @@ def test_round_number_bonus_btc():
     assert ind.round_number_bonus(100010.0, "CRYPTO") == 5
 
 
+def test_round_number_bonus_gbpjpy_uses_jpy_pip_scale():
+    """GBPJPY quotes at ~2 decimals -- EURUSD's 0.0050 step would be
+    meaningless at this price scale, so FOREX_JPY needs its own step."""
+    assert ind.round_number_bonus(205.503, "FOREX_JPY") == 5
+    assert ind.round_number_bonus(205.25, "FOREX_JPY") == 0  # exact midpoint between 205.0/205.5
+
+
 def test_atr_sweet_spot_penalty_uses_mode_percentiles():
     """A percentile between standard's 80th and loose's 85th high bound must be
     'too_volatile' under standard mode but 'normal' under loose mode."""

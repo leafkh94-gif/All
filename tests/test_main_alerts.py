@@ -25,6 +25,11 @@ def test_hard_flat_applies_to_eurusd():
     assert ma.hard_flat_active(t, "EURUSD") is True
 
 
+def test_hard_flat_applies_to_gbpjpy():
+    t = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
+    assert ma.hard_flat_active(t, "GBPJPY") is True
+
+
 def test_hard_flat_disabled_for_swing_mode_even_past_1830():
     t = dt.datetime(2026, 7, 1, 20, 0, tzinfo=dt.timezone.utc)
     assert ma.hard_flat_active(t, "US500", mode=modes.SWING) is False

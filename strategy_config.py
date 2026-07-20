@@ -12,6 +12,7 @@ INSTRUMENTS = {
     "US30":  {"name": "Dow Jones",  "search": "Wall Street 30", "class": "US_INDEX"},
     "BTCUSD": {"name": "Bitcoin",   "search": "bitcoin",        "class": "CRYPTO"},
     "EURUSD": {"name": "Euro/Dollar", "search": "EUR/USD",      "class": "FOREX"},
+    "GBPJPY": {"name": "GBP/JPY",   "search": "GBP/JPY",        "class": "FOREX_JPY"},
 }
 
 US_INDEX_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "US_INDEX"]
@@ -87,8 +88,13 @@ INSTRUMENT_PROFILES = {
     "US30":   {"retrace_pct": 0.60, "entry_expiry_mult": 1.25, "session_cutoff": True},
     "BTCUSD": {"retrace_pct": 0.50, "entry_expiry_mult": 1.50, "session_cutoff": False},
     "EURUSD": {"retrace_pct": 0.50, "entry_expiry_mult": 1.00, "session_cutoff": True},
+    # "The Dragon" -- large, fast intraday ranges (BoJ intervention risk included).
+    # No calibration data yet; the structural stop already scales with this
+    # instrument's own ATR, so it isn't defenseless against the bigger wicks,
+    # but treat these numbers as even less settled than the others until
+    # pullback_calibration.py has actually run against it.
+    "GBPJPY": {"retrace_pct": 0.50, "entry_expiry_mult": 0.75, "session_cutoff": True},
 }
-# Deferred by decision: GBPJPY (violent wicks, BoJ intervention risk).
 # Removed and staying removed: XAUUSD.
 
 # ─────────────────────────────────────────────────────────────────────

@@ -15,7 +15,10 @@ from strategy import modes
 STATE_DIR = "state"
 LEVELS_PATH = os.path.join(STATE_DIR, "levels.json")
 
-ROUND_NUMBER_STEP = {"US_INDEX": 500, "CRYPTO": 5000, "FOREX": 0.0050}
+# FOREX_JPY gets its own step since JPY pairs quote at ~2 decimals (pip=0.01)
+# rather than EURUSD-style ~4-5 decimals (pip=0.0001) -- 0.50 here is the same
+# "50 pips" round-level concept as FOREX's 0.0050, just rescaled to JPY pips.
+ROUND_NUMBER_STEP = {"US_INDEX": 500, "CRYPTO": 5000, "FOREX": 0.0050, "FOREX_JPY": 0.50}
 ROUND_NUMBER_PROXIMITY_PCT = 0.001  # within 0.1% of the nearest round level
 
 
