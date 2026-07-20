@@ -242,6 +242,53 @@ def test_score_candidate_skipped_when_rr_falls_below_min_after_liquidity_cap():
     assert diag["blocked"] == "RR_BELOW_MIN_AFTER_LIQUIDITY_CAP"
 
 
+def _level_store_with_pdh_and_pwh(pdh, pwh):
+    class _Store:
+        def get_daily_levels(self, instrument):
+            return {"high": pdh, "low": 50.0}
+
+        def get_weekly_levels(self, instrument):
+            return {"high": pwh, "low": 40.0}
+    return _Store()
+
+
+def test_score_candidate_caps_tp1_and_walks_tp2_to_next_level_beyond_it():
+    """TP1 now gets liquidity awareness too (trader-review fix), and TP2 must
+    target the NEXT level beyond wherever TP1 landed rather than the same
+    nearest level -- otherwise both would cap to an identical, redundant
+    price."""
+    market = {
+        "entry": make_candles(80, start_price=100.0, noise=0.3),
+        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
+        "h4": trending_h4_candles(up=True),
+    }
+    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
+                 "sweep_price": 100.0, "leg_extreme": 95.0, "quality": 38}
+    import datetime as dt
+    # ~97.5 entry, ~104.0 raw TP1, ~107.25 raw TP2 (see the RR-after-cap test
+    # above for the same setup's math). pdh sits between entry+1R and raw
+    # TP1 -- close enough to cap TP1 but still clear MIN_RR_TP1_AFTER_CAP;
+    # pwh sits beyond that capped TP1 and well under raw TP2.
+    level_store = _level_store_with_pdh_and_pwh(pdh=101.5, pwh=105.0)
+    with patch.object(strat, "technical_confirm_score", return_value=10), \
+         patch.object(strat, "vwap_filter_score", return_value=4), \
+         patch.object(strat, "choppy_market_penalty", return_value=0), \
+         patch.object(strat.market_sessions, "killzone_bonus", return_value=(12, "NY_KILLZONE")), \
+         patch.object(strat.ind, "atr_sweet_spot_penalty", return_value=(0, "normal")), \
+         patch.object(strat.ind, "fvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "ifvg_bonus", return_value=(0, None)), \
+         patch.object(strat.ind, "detect_eqh_eql_zones", return_value=[]):
+        result = strat.score_candidate(
+            "US500", "US_INDEX", candidate, market,
+            dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc), level_store)
+    assert result is not None
+    assert result["tp1_capped"] is True
+    assert result["tp1"] == 101.5
+    assert result["tp2_capped"] is True
+    assert result["tp2"] == 105.0
+    assert result["tp1"] < result["tp2"]
+
+
 def test_diagnostic_mode_qualifying_result_survives_main_alerts_diagnostics_dict():
     """Regression test: main_alerts.run() builds a diagnostics dict via
     scored["pattern"]/["direction"]/["score"]/["blocked"] for every candidate,
@@ -393,6 +440,40 @@ def test_compute_entry_exit_fvg_inside_leg_overrides_retrace_entry():
     assert exits is not None
     assert exits["entry_price"] == 96.0
     assert exits["entry_basis"] == "FVG edge"
+
+
+def test_compute_entry_exit_ignores_fvg_zone_below_min_size():
+    """A gap smaller than MIN_FVG_SIZE_ATR_MULT x ATR must not override the
+    retrace entry -- a negligible gap isn't meaningfully different from noise."""
+    candidate = {"direction": "BUY", "leg_extreme": 90.0}
+    breakout = {"o": 100.0, "h": 103.0, "l": 99.5, "c": 100.0}
+    fvg_zones = [{"direction": "BULLISH", "bottom": 94.99, "top": 95.0, "index": 0}]  # 0.01-wide, atr=1.0
+    exits = strat.compute_entry_exit(
+        candidate, breakout, atr_value=1.0, retrace_pct=0.5, fvg_zones=fvg_zones, rng=_zero_rng())
+    assert exits is not None
+    assert exits["entry_basis"] == "50% leg retrace"  # FVG override never applied
+
+
+def test_compute_entry_exit_leg_size_floored_for_thin_same_candle_leg():
+    """A thin same-candle leg (raw size 0.3) must still produce a realistic
+    pullback distance once floored to MIN_LEG_ATR_MULT x ATR, not an entry
+    that barely differs from the breakout candle's own close."""
+    candidate = {"direction": "BUY", "leg_extreme": 99.7}
+    breakout = {"o": 100.0, "h": 100.1, "l": 99.6, "c": 100.0}
+    exits = strat.compute_entry_exit(candidate, breakout, atr_value=1.0, retrace_pct=0.2, rng=_zero_rng())
+    assert exits is not None
+    assert exits["entry_price"] == 99.8  # floored leg_size (1.0) x 0.2, not raw (0.3) x 0.2 = 99.94
+
+
+def test_compute_entry_exit_stop_buffer_scales_with_leg_size():
+    """A large leg must widen the stop buffer beyond the flat ATR floor,
+    proportional to the size of the actual move, not a fixed thin pad."""
+    candidate = {"direction": "BUY", "leg_extreme": 90.0}
+    breakout = {"o": 100.0, "h": 100.5, "l": 99.5, "c": 100.0}
+    exits = strat.compute_entry_exit(candidate, breakout, atr_value=1.0, retrace_pct=0.5, rng=_zero_rng())
+    assert exits is not None
+    # leg_size=10 (well above the 1x ATR floor); buffer = max(0.35*1, 0.15*10=1.5) = 1.5
+    assert exits["stop_loss"] == 88.5
 
 
 def _zero_rng():

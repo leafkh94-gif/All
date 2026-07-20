@@ -73,6 +73,19 @@ DAILY_LOSS_BREAKER_DURATION_DAYS = 14   # trial window; breaker stops enforcing 
 # ─────────────────────────────────────────────────────────────────────
 MIN_RR_RATIO = 2.0                  # TP1/TP2 minimum R:R = 1:2
 MIN_RR_AFTER_CAP = 1.5              # if TP2 liquidity-capping drops R:R below this, skip the alert
+MIN_RR_TP1_AFTER_CAP = 1.0          # don't cap TP1 below this R:R -- not worth an early partial otherwise
+
+# Trader-review fixes (post-Spec-V4): some patterns' leg_extreme sits on the
+# same candle as the breakout close, giving a "leg" that's really just that
+# candle's own range -- far smaller than the real move behind the setup, and
+# small enough to produce entries that barely differ from market price and
+# stops with almost no real breathing room. These floors/scales correct for
+# that without touching pattern detection itself.
+MIN_LEG_ATR_MULT = 1.0              # floor for the leg size used to scale the retrace entry
+STOP_BUFFER_MIN_ATR_MULT = 0.35     # was a flat 0.25x ATR; raised, and now also leg-scaled below
+STOP_BUFFER_LEG_FRACTION = 0.15     # extra buffer proportional to the (floored) leg size
+MIN_FVG_SIZE_ATR_MULT = 0.15        # ignore FVG zones smaller than this fraction of ATR for entry override
+
 HARD_FLAT_UTC_HOUR = 18
 HARD_FLAT_UTC_MINUTE = 30           # no new entry alerts after 18:30 UTC (instruments with session_cutoff on)
 BTC_EXEMPT_FROM_US_INDEX_DEDUP = True

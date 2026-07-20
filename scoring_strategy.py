@@ -325,12 +325,25 @@ def compute_entry_exit(candidate, breakout_candle, atr_value, retrace_pct, fvg_z
     if leg_high <= leg_low:
         return None  # degenerate leg -- breakout close never cleared the extreme
 
-    leg_size = leg_high - leg_low
+    raw_leg_size = leg_high - leg_low
+    # Some patterns' leg_extreme sits on the same candle as the breakout
+    # close (e.g. a sweep-and-reject candle), so the raw leg is really just
+    # that one candle's own range -- far smaller than the actual move behind
+    # the setup. Floor the size used to SCALE the retrace/stop math (not the
+    # sanity-clamp bounds below, which stay tied to the real close/extreme)
+    # so a same-candle leg still produces a realistic pullback distance and
+    # stop buffer instead of an entry that barely differs from market price.
+    leg_size = max(raw_leg_size, cfg.MIN_LEG_ATR_MULT * atr_value) if atr_value > 0 else raw_leg_size
+
     entry = close - leg_size * retrace_pct if direction == "BUY" else close + leg_size * retrace_pct
     entry_basis = f"{retrace_pct:.0%} leg retrace"
 
     if fvg_zones:
-        contained = [z for z in fvg_zones if z["bottom"] >= leg_low and z["top"] <= leg_high]
+        contained = [
+            z for z in fvg_zones
+            if z["bottom"] >= leg_low and z["top"] <= leg_high
+            and (z["top"] - z["bottom"]) >= cfg.MIN_FVG_SIZE_ATR_MULT * atr_value
+        ]
         if contained:
             near_edge = (lambda z: z["top"]) if direction == "BUY" else (lambda z: z["bottom"])
             nearest = min(contained, key=lambda z: abs(close - near_edge(z)))
@@ -338,14 +351,19 @@ def compute_entry_exit(candidate, breakout_candle, atr_value, retrace_pct, fvg_z
             entry_basis = "FVG edge"
 
     if not (leg_low < entry < leg_high):
-        return None  # sanity clamp -- entry must lie strictly inside the leg
+        return None  # sanity clamp -- entry must lie strictly inside the REAL leg
 
     jitter = rng.uniform(-0.05, 0.05) * atr_value
+    # Stop buffer: floored at a flat ATR fraction (raised from the old flat
+    # 0.25x) AND scaled to a fraction of the (floored) leg size, so bigger
+    # moves get proportionally more room the way an experienced trader would
+    # size a stop, rather than every setup getting the same thin pad.
+    stop_buffer = max(cfg.STOP_BUFFER_MIN_ATR_MULT * atr_value, cfg.STOP_BUFFER_LEG_FRACTION * leg_size)
     if direction == "BUY":
-        stop = leg_extreme - 0.25 * atr_value + jitter
+        stop = leg_extreme - stop_buffer + jitter
         risk = entry - stop
     else:
-        stop = leg_extreme + 0.25 * atr_value + jitter
+        stop = leg_extreme + stop_buffer + jitter
         risk = stop - entry
     if risk <= 0:
         return None
@@ -485,12 +503,35 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     pdl = daily.get("low") if daily else None
     pwh = weekly.get("high") if weekly else None
     pwl = weekly.get("low") if weekly else None
-    capped_tp2, was_capped = ind.cap_tp2_at_liquidity(
-        direction, exits["entry_price"], exits["tp2"], pdh, pdl, pwh, pwl)
-    exits["tp2_capped"] = was_capped
-    if was_capped:
+    liquidity_levels = ind.collect_liquidity_levels(
+        direction, exits["entry_price"], pdh, pdl, pwh, pwl, eqh_eql_zones, poc, va_low, va_high)
+    risk = abs(exits["entry_price"] - exits["stop_loss"])
+
+    # TP1 also gets liquidity awareness now, not just TP2 -- but only cap it
+    # if the capped level still clears a sane partial-profit floor. No real
+    # nearby structure justifies exiting earlier than that just because it
+    # happens to be the first thing in the pooled level list.
+    capped_tp1, tp1_capped = ind.cap_target_at_liquidity(direction, exits["entry_price"], exits["tp1"], liquidity_levels)
+    exits["tp1_capped"] = False
+    if tp1_capped:
+        tp1_rr = abs(capped_tp1 - exits["entry_price"]) / risk if risk else 0
+        if tp1_rr >= cfg.MIN_RR_TP1_AFTER_CAP:
+            exits["tp1"] = round(capped_tp1, 5)
+            exits["tp1_capped"] = True
+
+    # TP2 targets the next liquidity level beyond wherever TP1 actually
+    # landed, not the same pool TP1 already used -- otherwise a single
+    # nearby level would cap both to the identical price, a confusing and
+    # redundant partial-close instruction. If TP1 wasn't capped (no level
+    # cleared its own floor), measure "beyond" from entry instead, same as
+    # if TP1 had never been touched.
+    tp2_boundary = exits["tp1"] if exits["tp1_capped"] else exits["entry_price"]
+    tp2_levels = [lvl for lvl in liquidity_levels
+                  if (lvl > tp2_boundary if direction == "BUY" else lvl < tp2_boundary)]
+    capped_tp2, tp2_capped = ind.cap_target_at_liquidity(direction, exits["entry_price"], exits["tp2"], tp2_levels)
+    exits["tp2_capped"] = tp2_capped
+    if tp2_capped:
         exits["tp2"] = round(capped_tp2, 5)
-        risk = abs(exits["entry_price"] - exits["stop_loss"])
         capped_rr = abs(exits["tp2"] - exits["entry_price"]) / risk if risk else 0
         if capped_rr < cfg.MIN_RR_AFTER_CAP:
             if diagnostic:

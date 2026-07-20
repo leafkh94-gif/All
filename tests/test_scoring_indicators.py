@@ -243,44 +243,51 @@ def test_volume_profile_bonus_no_data():
     assert pts == 0 and tag is None
 
 
-def test_cap_tp2_at_liquidity_caps_buy_when_raw_tp2_exceeds_pdh():
-    capped, was_capped = ind.cap_tp2_at_liquidity("BUY", entry=100.0, tp2=110.0, pdh=105.0, pdl=90.0,
-                                                    pwh=None, pwl=None)
+def test_collect_liquidity_levels_pools_pdh_pwh_poc_va_and_eqh_for_buy():
+    eqh_eql_zones = [{"type": "EQH", "price": 106.0, "touches": 2},
+                      {"type": "EQL", "price": 90.0, "touches": 2}]  # EQL must be excluded for a BUY target
+    levels = ind.collect_liquidity_levels(
+        "BUY", entry=100.0, pdh=105.0, pdl=None, pwh=108.0, pwl=None,
+        eqh_eql_zones=eqh_eql_zones, poc=103.0, va_low=None, va_high=104.0)
+    assert set(levels) == {105.0, 108.0, 103.0, 104.0, 106.0}
+
+
+def test_collect_liquidity_levels_ignores_levels_behind_entry():
+    """A PDH below current entry (already swept) isn't a valid forward target."""
+    levels = ind.collect_liquidity_levels(
+        "BUY", entry=100.0, pdh=99.0, pdl=None, pwh=None, pwl=None,
+        eqh_eql_zones=[], poc=None, va_low=None, va_high=None)
+    assert levels == []
+
+
+def test_collect_liquidity_levels_pools_pdl_pwl_poc_va_and_eql_for_sell():
+    eqh_eql_zones = [{"type": "EQL", "price": 94.0, "touches": 2},
+                      {"type": "EQH", "price": 110.0, "touches": 2}]  # EQH must be excluded for a SELL target
+    levels = ind.collect_liquidity_levels(
+        "SELL", entry=100.0, pdh=None, pdl=93.0, pwh=None, pwl=91.0,
+        eqh_eql_zones=eqh_eql_zones, poc=97.0, va_low=96.0, va_high=None)
+    assert set(levels) == {93.0, 91.0, 97.0, 96.0, 94.0}
+
+
+def test_cap_target_at_liquidity_caps_when_raw_target_exceeds_nearest_level():
+    capped, was_capped = ind.cap_target_at_liquidity("BUY", entry=100.0, raw_target=110.0, levels=[105.0, 108.0])
     assert was_capped is True
     assert capped == 105.0
 
 
-def test_cap_tp2_at_liquidity_uses_nearest_of_pdh_and_pwh():
-    capped, was_capped = ind.cap_tp2_at_liquidity("BUY", entry=100.0, tp2=110.0, pdh=108.0, pdl=None,
-                                                    pwh=104.0, pwl=None)
-    assert was_capped is True
-    assert capped == 104.0
-
-
-def test_cap_tp2_at_liquidity_no_cap_when_raw_tp2_already_inside_level():
-    capped, was_capped = ind.cap_tp2_at_liquidity("BUY", entry=100.0, tp2=103.0, pdh=105.0, pdl=None,
-                                                    pwh=None, pwl=None)
+def test_cap_target_at_liquidity_no_cap_when_raw_target_already_inside_nearest_level():
+    capped, was_capped = ind.cap_target_at_liquidity("BUY", entry=100.0, raw_target=103.0, levels=[105.0])
     assert was_capped is False
     assert capped == 103.0
 
 
-def test_cap_tp2_at_liquidity_no_levels_available_returns_uncapped():
-    capped, was_capped = ind.cap_tp2_at_liquidity("BUY", entry=100.0, tp2=110.0, pdh=None, pdl=None,
-                                                    pwh=None, pwl=None)
+def test_cap_target_at_liquidity_no_levels_returns_uncapped():
+    capped, was_capped = ind.cap_target_at_liquidity("BUY", entry=100.0, raw_target=110.0, levels=[])
     assert was_capped is False
     assert capped == 110.0
 
 
-def test_cap_tp2_at_liquidity_caps_sell_when_raw_tp2_undershoots_pdl():
-    capped, was_capped = ind.cap_tp2_at_liquidity("SELL", entry=100.0, tp2=88.0, pdh=None, pdl=93.0,
-                                                    pwh=None, pwl=None)
+def test_cap_target_at_liquidity_sell_uses_nearest_level_above_entry_in_price():
+    capped, was_capped = ind.cap_target_at_liquidity("SELL", entry=100.0, raw_target=88.0, levels=[93.0, 91.0])
     assert was_capped is True
-    assert capped == 93.0
-
-
-def test_cap_tp2_at_liquidity_ignores_levels_behind_entry():
-    """A PDH below current entry (already swept) isn't a valid forward target."""
-    capped, was_capped = ind.cap_tp2_at_liquidity("BUY", entry=100.0, tp2=110.0, pdh=99.0, pdl=None,
-                                                    pwh=None, pwl=None)
-    assert was_capped is False
-    assert capped == 110.0
+    assert capped == 93.0  # nearest to entry going down = the max of the pooled levels

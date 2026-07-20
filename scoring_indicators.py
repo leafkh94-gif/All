@@ -362,23 +362,43 @@ def eqh_eql_bonus(price, zones, tolerance_pct=cfg.EQH_EQL_TOLERANCE_PCT):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# TP2 liquidity cap (Bot Spec V4 Section 3)
+# Liquidity-aware profit targets (Bot Spec V4 Section 3, extended)
 # ─────────────────────────────────────────────────────────────────────
-def cap_tp2_at_liquidity(direction, entry, tp2, pdh, pdl, pwh, pwl):
-    """Cap TP2 at the nearest resting-liquidity level ahead of entry (prior-day
-    or prior-week high for BUY, low for SELL) if the raw R-multiple target
-    would overshoot it. Returns (capped_tp2, was_capped) -- callers apply the
-    minimum-R:R-after-cap check on top of this, this function only clamps
-    the level itself."""
+def collect_liquidity_levels(direction, entry, pdh, pdl, pwh, pwl, eqh_eql_zones, poc, va_low, va_high):
+    """Pool every structural level the bot already computes for scoring
+    (prior-day/week high-low, equal highs/lows, volume-profile POC and value
+    area) into a flat list of candidate levels ahead of entry, in the trade
+    direction. Originally TP2-capping only looked at PDH/PWH/PDL/PWL; this
+    also lets take-profit placement respect the same liquidity zones the
+    confluence scoring already treats as meaningful."""
+    levels = []
     if direction == "BUY":
-        levels = [lvl for lvl in (pdh, pwh) if lvl is not None and lvl > entry]
-        if not levels:
-            return tp2, False
-        cap = min(levels)
-        return (cap, True) if tp2 > cap else (tp2, False)
+        for lvl in (pdh, pwh, poc, va_high):
+            if lvl is not None and lvl > entry:
+                levels.append(lvl)
+        for z in eqh_eql_zones:
+            if z["type"] == "EQH" and z["price"] > entry:
+                levels.append(z["price"])
     else:
-        levels = [lvl for lvl in (pdl, pwl) if lvl is not None and lvl < entry]
-        if not levels:
-            return tp2, False
+        for lvl in (pdl, pwl, poc, va_low):
+            if lvl is not None and lvl < entry:
+                levels.append(lvl)
+        for z in eqh_eql_zones:
+            if z["type"] == "EQL" and z["price"] < entry:
+                levels.append(z["price"])
+    return levels
+
+
+def cap_target_at_liquidity(direction, entry, raw_target, levels):
+    """Cap a profit target (TP1 or TP2) at the nearest pooled structural
+    level ahead of entry, if the raw R-multiple target would overshoot it.
+    Returns (capped_target, was_capped) -- callers decide whether the capped
+    result still clears their own minimum R:R floor."""
+    if not levels:
+        return raw_target, False
+    if direction == "BUY":
+        cap = min(levels)
+        return (cap, True) if raw_target > cap else (raw_target, False)
+    else:
         cap = max(levels)
-        return (cap, True) if tp2 < cap else (tp2, False)
+        return (cap, True) if raw_target < cap else (raw_target, False)
