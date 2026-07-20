@@ -48,3 +48,36 @@ def test_get_candles_different_n_same_interval_do_not_collide(tmp_path, monkeypa
     cached_small = feed.get_candles("US500", "1h", n=80)
     assert len(cached_small) == 80
     assert calls == [80, 160]  # no third network call
+
+
+def test_get_candles_prefers_snapshot_time_utc_when_present(tmp_path, monkeypatch):
+    """snapshotTime isn't guaranteed to be UTC for every instrument class;
+    snapshotTimeUTC is explicit when Capital.com provides it and must win."""
+    feed = CapitalFeed(api_key="k", email="e", password="p", cache_dir=str(tmp_path))
+    feed._cst, feed._token = "cst", "token"
+    feed._epics["US500"] = "EPIC"
+
+    price = _price(0)
+    price["snapshotTimeUTC"] = "2026-01-01T04:00:00"
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        return FakeResponse([price])
+
+    monkeypatch.setattr("strategy.capital_feed.requests.get", fake_get)
+
+    candles = feed.get_candles("US500", "1h", n=1)
+    assert candles[0]["t"] == "2026-01-01T04:00:00"
+
+
+def test_get_candles_falls_back_to_snapshot_time_without_utc_field(tmp_path, monkeypatch):
+    feed = CapitalFeed(api_key="k", email="e", password="p", cache_dir=str(tmp_path))
+    feed._cst, feed._token = "cst", "token"
+    feed._epics["BTCUSD"] = "EPIC"
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        return FakeResponse([_price(0)])
+
+    monkeypatch.setattr("strategy.capital_feed.requests.get", fake_get)
+
+    candles = feed.get_candles("BTCUSD", "1h", n=1)
+    assert candles[0]["t"] == "2026-01-01T00:00:00"
