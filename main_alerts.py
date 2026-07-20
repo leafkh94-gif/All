@@ -113,10 +113,12 @@ class ActiveEntryTracker:
                 if open_tracker is not None and e.get("stop_loss") is not None:
                     open_tracker.add({**e, "instrument": instrument}, now_utc)
                 continue
-            if now_utc - alert_time > timedelta(minutes=m.entry_expiry_minutes):
+            expiry_minutes = m.entry_expiry_minutes * cfg.INSTRUMENT_PROFILES.get(
+                instrument, {}).get("entry_expiry_mult", 1.0)
+            if now_utc - alert_time > timedelta(minutes=expiry_minutes):
                 send_telegram(
                     f"⌛ {instrument} entry expired.\n"
-                    f"Price did not reach entry zone within {_format_duration(m.entry_expiry_minutes)}.\n"
+                    f"Price did not reach entry zone within {_format_duration(expiry_minutes)}.\n"
                     f"Setup cancelled. No action needed."
                 )
                 del self._data[instrument]
@@ -221,8 +223,7 @@ class OpenTradeTracker:
                     )
                     continue
 
-            cls = cfg.INSTRUMENTS.get(instrument, {}).get("class")
-            if hard_flat_active(now_utc, cls, mode=mode):
+            if hard_flat_active(now_utc, instrument, mode=mode):
                 if t["tp1_hit"]:
                     r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, price)
                     outcome = "session_cutoff_after_tp1"
@@ -255,11 +256,12 @@ def _level_description(scored):
 
 def format_watch_alert(scored, expires_at, mode=None):
     m = mode or modes.STANDARD
+    entry_basis = scored.get("entry_basis", "50% retrace")
     return (
         f"⚡ WATCH — {scored['instrument']}\n"
         f"Potential setup forming.\n"
         f"Direction: {scored['direction']}\n"
-        f"Entry zone: {scored['entry_price']}\n"
+        f"Entry zone: {scored['entry_price']}  ({entry_basis})\n"
         f"Score: {scored['score']}/100\n"
         f"Expires: {expires_at.strftime('%H:%M')} UTC ({_format_duration(m.watch_expiry_minutes)})"
     )
@@ -267,16 +269,21 @@ def format_watch_alert(scored, expires_at, mode=None):
 
 def format_aplus_alert(scored, now_utc, mode=None):
     m = mode or modes.STANDARD
-    expiry = now_utc + timedelta(minutes=m.entry_expiry_minutes)
+    expiry_minutes = m.entry_expiry_minutes * cfg.INSTRUMENT_PROFILES.get(
+        scored["instrument"], {}).get("entry_expiry_mult", 1.0)
+    expiry = now_utc + timedelta(minutes=expiry_minutes)
+    entry_basis = scored.get("entry_basis", "50% retrace")
+    stop_basis = scored.get("stop_basis", "structural")
+    tp2_note = "  (capped at nearby liquidity)" if scored.get("tp2_capped") else ""
     return (
         f"🟢 A+ SIGNAL — {scored['instrument']}\n\n"
         f"Direction:  {scored['direction']}\n"
-        f"Entry:      {scored['entry_price']}  (limit at 50% retrace)\n"
-        f"Stop Loss:  {scored['stop_loss']}\n"
+        f"Entry:      {scored['entry_price']}  ({entry_basis})\n"
+        f"Stop Loss:  {scored['stop_loss']}  ({stop_basis})\n"
         f"TP1:        {scored['tp1']}   ← close 50% of position here\n"
-        f"TP2:        {scored['tp2']}   ← trail remaining 50% to breakeven, let run\n\n"
+        f"TP2:        {scored['tp2']}{tp2_note}   ← trail remaining 50% to breakeven, let run\n\n"
         f"R:R Ratio:  1:{scored['rr_ratio']:g}\n"
-        f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(m.entry_expiry_minutes)})\n\n"
+        f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(expiry_minutes)})\n\n"
         f"📋 Reason: {scored['breakdown']['pattern']} at {_level_description(scored)}\n"
         f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}\n\n"
         f"After TP1 is hit → move stop loss to breakeven (entry price).\n"
@@ -297,11 +304,11 @@ def format_health_check(main_state, watch_tracker, now_utc):
 # ─────────────────────────────────────────────────────────────────────
 # Hard flat (Section 1.5 / 9.1) — no new entry alerts after 18:30 UTC, US indices
 # ─────────────────────────────────────────────────────────────────────
-def hard_flat_active(now_utc, instrument_class, mode=None):
+def hard_flat_active(now_utc, instrument, mode=None):
     m = mode or modes.STANDARD
     if not m.session_cutoff_enabled:
         return False  # swing-style modes intentionally hold across session boundaries
-    if instrument_class != "US_INDEX":
+    if not cfg.INSTRUMENT_PROFILES.get(instrument, {}).get("session_cutoff", False):
         return False
     return (now_utc.hour, now_utc.minute) >= (cfg.HARD_FLAT_UTC_HOUR, cfg.HARD_FLAT_UTC_MINUTE)
 
@@ -576,13 +583,11 @@ def run():
     candidates = dedup_us_index_candidates(candidates)
 
     for instrument, scored in candidates:
-        cls = cfg.INSTRUMENTS[instrument]["class"]
-
         if suppress_new_alerts:
             continue  # daily loss limit, manual /blackout, or news blackout — no new entries
 
         if scored["score"] >= mode.aplus_min_score:
-            if hard_flat_active(now, cls, mode=mode):
+            if hard_flat_active(now, instrument, mode=mode):
                 continue  # no new entry alerts after 18:30 UTC, US indices
             if watch_tracker.has_active(instrument) or pending_store.get(instrument):
                 continue

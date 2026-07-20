@@ -15,7 +15,7 @@ from strategy import modes
 STATE_DIR = "state"
 LEVELS_PATH = os.path.join(STATE_DIR, "levels.json")
 
-ROUND_NUMBER_STEP = {"US_INDEX": 500, "CRYPTO": 5000}
+ROUND_NUMBER_STEP = {"US_INDEX": 500, "CRYPTO": 5000, "FOREX": 0.0050}
 ROUND_NUMBER_PROXIMITY_PCT = 0.001  # within 0.1% of the nearest round level
 
 
@@ -356,3 +356,26 @@ def eqh_eql_bonus(price, zones, tolerance_pct=cfg.EQH_EQL_TOLERANCE_PCT):
         if abs(price - z["price"]) / z["price"] <= tolerance_pct:
             return cfg.EQH_EQL_BONUS, z
     return 0, None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# TP2 liquidity cap (Bot Spec V4 Section 3)
+# ─────────────────────────────────────────────────────────────────────
+def cap_tp2_at_liquidity(direction, entry, tp2, pdh, pdl, pwh, pwl):
+    """Cap TP2 at the nearest resting-liquidity level ahead of entry (prior-day
+    or prior-week high for BUY, low for SELL) if the raw R-multiple target
+    would overshoot it. Returns (capped_tp2, was_capped) -- callers apply the
+    minimum-R:R-after-cap check on top of this, this function only clamps
+    the level itself."""
+    if direction == "BUY":
+        levels = [lvl for lvl in (pdh, pwh) if lvl is not None and lvl > entry]
+        if not levels:
+            return tp2, False
+        cap = min(levels)
+        return (cap, True) if tp2 > cap else (tp2, False)
+    else:
+        levels = [lvl for lvl in (pdl, pwl) if lvl is not None and lvl < entry]
+        if not levels:
+            return tp2, False
+        cap = max(levels)
+        return (cap, True) if tp2 < cap else (tp2, False)

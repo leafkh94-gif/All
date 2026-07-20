@@ -7,27 +7,32 @@ from strategy import scan_diagnostics
 
 def test_hard_flat_active_after_1830_us_index():
     t = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
-    assert ma.hard_flat_active(t, "US_INDEX") is True
+    assert ma.hard_flat_active(t, "US500") is True
 
 
 def test_hard_flat_inactive_before_1830_us_index():
     t = dt.datetime(2026, 7, 1, 18, 29, tzinfo=dt.timezone.utc)
-    assert ma.hard_flat_active(t, "US_INDEX") is False
+    assert ma.hard_flat_active(t, "US500") is False
 
 
 def test_hard_flat_never_applies_to_crypto():
     t = dt.datetime(2026, 7, 1, 23, 0, tzinfo=dt.timezone.utc)
-    assert ma.hard_flat_active(t, "CRYPTO") is False
+    assert ma.hard_flat_active(t, "BTCUSD") is False
+
+
+def test_hard_flat_applies_to_eurusd():
+    t = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
+    assert ma.hard_flat_active(t, "EURUSD") is True
 
 
 def test_hard_flat_disabled_for_swing_mode_even_past_1830():
     t = dt.datetime(2026, 7, 1, 20, 0, tzinfo=dt.timezone.utc)
-    assert ma.hard_flat_active(t, "US_INDEX", mode=modes.SWING) is False
+    assert ma.hard_flat_active(t, "US500", mode=modes.SWING) is False
 
 
 def test_hard_flat_still_applies_for_standard_mode_explicitly_passed():
     t = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
-    assert ma.hard_flat_active(t, "US_INDEX", mode=modes.STANDARD) is True
+    assert ma.hard_flat_active(t, "US500", mode=modes.STANDARD) is True
 
 
 def test_dedup_us_index_keeps_best_score_same_direction():
