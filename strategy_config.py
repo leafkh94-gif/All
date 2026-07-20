@@ -68,45 +68,54 @@ DAILY_LOSS_LIMIT_USD = 20.0   # self-reported via /loss; new WATCH/A+ alerts pau
 DAILY_LOSS_BREAKER_DURATION_DAYS = 14   # trial window; breaker stops enforcing after this
 
 # ─────────────────────────────────────────────────────────────────────
-# 1.5  Entry & exit logic (Bot Spec V4 Sections 1-3 — leg-based entry,
-# structural stop, liquidity-capped TP2)
+# 1.5  Entry & exit logic (Entry/SL/TP Selection Rules v1.3 — BOS-based leg
+# discovery, 50% retrace entry, structural stop w/ round-number anti-hunt
+# offset, 3-tier liquidity-aware take-profit)
 # ─────────────────────────────────────────────────────────────────────
-MIN_RR_RATIO = 2.0                  # TP1/TP2 minimum R:R = 1:2
-MIN_RR_AFTER_CAP = 1.5              # if TP2 liquidity-capping drops R:R below this, skip the alert
-MIN_RR_TP1_AFTER_CAP = 1.0          # don't cap TP1 below this R:R -- not worth an early partial otherwise
+BOS_SEARCH_LOOKBACK_BARS = 60        # how far back (in entry-timeframe bars) to search for the most recent BOS
 
-# Trader-review fixes (post-Spec-V4): some patterns' leg_extreme sits on the
-# same candle as the breakout close, giving a "leg" that's really just that
-# candle's own range -- far smaller than the real move behind the setup, and
-# small enough to produce entries that barely differ from market price and
-# stops with almost no real breathing room. These floors/scales correct for
-# that without touching pattern detection itself.
-MIN_LEG_ATR_MULT = 1.0              # floor for the leg size used to scale the retrace entry
-STOP_BUFFER_MIN_ATR_MULT = 0.35     # was a flat 0.25x ATR; raised, and now also leg-scaled below
-STOP_BUFFER_LEG_FRACTION = 0.15     # extra buffer proportional to the (floored) leg size
-MIN_FVG_SIZE_ATR_MULT = 0.15        # ignore FVG zones smaller than this fraction of ATR for entry override
+ENTRY_RETRACE_PCT = 0.50             # limit entry at 50% of the leg
+ENTRY_FVG_ZONE_MIN_PCT = 0.40        # FVG-midpoint entry override zone (fraction retraced from leg_end)
+ENTRY_FVG_ZONE_MAX_PCT = 0.62
+
+SL_BUFFER_ATR_MULT = 0.5             # buffer = max(SL_BUFFER_ATR_MULT x ATR, SL_BUFFER_SPREAD_MULT x spread)
+SL_BUFFER_SPREAD_MULT = 2.0
+ROUND_NUMBER_OFFSET_ATR_MULT = 0.15  # extra push beyond a round-number collision
+# Per-instrument (round_multiple, proximity_threshold) for the SL anti-stop-hunt check.
+ROUND_NUMBER_OFFSET_TABLE = {
+    "US500":  (50, 3),
+    "US30":   (50, 5),
+    "US100":  (100, 5),
+    "BTCUSD": (500, 30),
+    "EURUSD": (0.0050, 0.0003),   # 50-pip levels, 3-pip proximity
+    "GBPJPY": (0.500, 0.100),     # 50-pip levels (JPY pip=0.01), 10-pip proximity
+}
+
+TP1_R_MULT = 1.0
+TP1_EXCEPTION_MIN_R = 0.8            # an unfilled FVG/minor swing in [0.8R, 1.0R) overrides raw TP1
+TP1_EXCEPTION_MAX_R = 1.0
+TP2_R_MULT = 1.8                     # fallback when no liquidity level sits beyond TP1
+TP3_R_MULT = 2.8                     # fallback (also the ceiling vs. any external level beyond TP2)
+
+PENDING_ORDER_MAX_MINUTES = 90       # 6 x M15 bars unfilled -> cancel (EXPIRED)
 
 HARD_FLAT_UTC_HOUR = 18
 HARD_FLAT_UTC_MINUTE = 30           # no new entry alerts after 18:30 UTC (instruments with session_cutoff on)
+WARNING_UTC_HOUR = 18
+WARNING_UTC_MINUTE = 0              # heads-up alert to manually close before the 18:30 hard flat
 BTC_EXEMPT_FROM_US_INDEX_DEDUP = True
 
-# Per-instrument calibration -- these values are provisional/placeholder,
-# pending the offline calibration tool (strategy/pullback_calibration.py).
-# retrace_pct: fraction of the impulse leg the entry retraces back into.
-# entry_expiry_mult: multiplies ActiveEntryTracker's base entry-expiry window.
 # session_cutoff: whether HARD_FLAT_UTC_HOUR/MINUTE applies to this instrument.
+# All six now included -- v1.3 explicitly applies the same session discipline
+# to BTCUSD too ("no session structure" for liquidity levels doesn't mean no
+# session discipline for exiting).
 INSTRUMENT_PROFILES = {
-    "US100":  {"retrace_pct": 0.40, "entry_expiry_mult": 0.75, "session_cutoff": True},
-    "US500":  {"retrace_pct": 0.50, "entry_expiry_mult": 1.00, "session_cutoff": True},
-    "US30":   {"retrace_pct": 0.60, "entry_expiry_mult": 1.25, "session_cutoff": True},
-    "BTCUSD": {"retrace_pct": 0.50, "entry_expiry_mult": 1.50, "session_cutoff": False},
-    "EURUSD": {"retrace_pct": 0.50, "entry_expiry_mult": 1.00, "session_cutoff": True},
-    # "The Dragon" -- large, fast intraday ranges (BoJ intervention risk included).
-    # No calibration data yet; the structural stop already scales with this
-    # instrument's own ATR, so it isn't defenseless against the bigger wicks,
-    # but treat these numbers as even less settled than the others until
-    # pullback_calibration.py has actually run against it.
-    "GBPJPY": {"retrace_pct": 0.50, "entry_expiry_mult": 0.75, "session_cutoff": True},
+    "US100":  {"session_cutoff": True},
+    "US500":  {"session_cutoff": True},
+    "US30":   {"session_cutoff": True},
+    "BTCUSD": {"session_cutoff": True},
+    "EURUSD": {"session_cutoff": True},
+    "GBPJPY": {"session_cutoff": True},
 }
 # Removed and staying removed: XAUUSD.
 

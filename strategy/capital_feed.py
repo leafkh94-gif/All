@@ -19,6 +19,18 @@ CACHE_TTL = {"15min": 0, "5min": 0, "1h": 3600, "4h": 14400, "daily": 3600}
 CACHE_DIR = ".cache"
 
 
+def _implied_spread(c):
+    """Best-effort bid/ask spread from a Capital.com price object's close.
+    Not verified against a live account from this environment -- if the
+    "ask" key isn't present in the shape we expect, this quietly returns
+    None rather than raising, and callers already treat a missing spread as
+    0 (the SL buffer then relies solely on its ATR term)."""
+    try:
+        return float(c["closePrice"]["ask"]) - float(c["closePrice"]["bid"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 class CapitalFeed:
     def __init__(self, api_key=None, email=None, password=None, cache_dir=CACHE_DIR):
         self.api_key = api_key or os.environ["CAPITAL_API_KEY"]
@@ -98,6 +110,8 @@ class CapitalFeed:
             "l": float(c["lowPrice"]["bid"]),
             "c": float(c["closePrice"]["bid"]),
             "v": float(c.get("lastTradedVolume") or 0) or None,
+            # Capital.com's price objects may also carry an "ask" alongside
+            "spread": _implied_spread(c),
         } for c in data]
         if candles:
             with open(p, "w") as f:
