@@ -85,7 +85,14 @@ class CapitalFeed:
         r.raise_for_status()
         data = r.json().get("prices", [])
         candles = [{
-            "t": c["snapshotTime"],
+            # Capital.com's price objects can carry both "snapshotTime"
+            # (broker/exchange-local, not guaranteed UTC) and
+            # "snapshotTimeUTC" (explicit UTC) -- prefer the explicit one
+            # when present. Index instruments have shown a consistent
+            # multi-hour "candle from the future" anomaly in bars_report
+            # that forex/crypto never do, which is exactly what a
+            # non-UTC snapshotTime naively parsed as UTC would produce.
+            "t": c.get("snapshotTimeUTC") or c["snapshotTime"],
             "o": float(c["openPrice"]["bid"]),
             "h": float(c["highPrice"]["bid"]),
             "l": float(c["lowPrice"]["bid"]),
