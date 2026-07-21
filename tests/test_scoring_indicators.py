@@ -49,6 +49,13 @@ def test_round_number_bonus_gbpjpy_uses_jpy_pip_scale():
     assert ind.round_number_bonus(205.25, "FOREX_JPY") == 0  # exact midpoint between 205.0/205.5
 
 
+def test_round_number_bonus_asia_index_reuses_us_index_step():
+    """JP225/HK50/A50 span a wide range of absolute price levels, same as
+    US_INDEX already does across US500/US100/US30 -- same 500-point step."""
+    assert ind.round_number_bonus(38000.5, "ASIA_INDEX") == 5
+    assert ind.round_number_bonus(38250.0, "ASIA_INDEX") == 0
+
+
 def test_atr_sweet_spot_penalty_uses_mode_percentiles():
     """A percentile between standard's 80th and loose's 85th high bound must be
     'too_volatile' under standard mode but 'normal' under loose mode."""

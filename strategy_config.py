@@ -13,7 +13,33 @@ INSTRUMENTS = {
     "BTCUSD": {"name": "Bitcoin",   "search": "bitcoin",        "class": "CRYPTO"},
     "EURUSD": {"name": "Euro/Dollar", "search": "EUR/USD",      "class": "FOREX"},
     "GBPJPY": {"name": "GBP/JPY",   "search": "GBP/JPY",        "class": "FOREX_JPY"},
+    # Added for the AUD/JPY-USD risk-on/off correlation cluster + Asia-Pacific
+    # index coverage. Search terms below are best-guess, matching the exact
+    # naming convention already used for EURUSD/GBPJPY -- NOT verified
+    # against a live Capital.com account from this sandbox (no network
+    # access here). Confirm each resolves via /scan once merged; if a
+    # search term returns no/the wrong market, fix the string here, no
+    # other code needs to change (CapitalFeed.resolve_epics() does a live
+    # /markets search per instrument, nothing is hardcoded beyond this).
+    "AUDJPY": {"name": "AUD/JPY",   "search": "AUD/JPY",        "class": "FOREX_JPY"},
+    "AUDUSD": {"name": "AUD/USD",   "search": "AUD/USD",        "class": "FOREX"},
+    "USDJPY": {"name": "USD/JPY",   "search": "USD/JPY",        "class": "FOREX_JPY"},
+    "JP225":  {"name": "Nikkei 225", "search": "Japan 225",     "class": "ASIA_INDEX"},
+    "HK50":   {"name": "Hang Seng", "search": "Hong Kong 50",   "class": "ASIA_INDEX"},
+    "A50":    {"name": "China A50", "search": "China A50",      "class": "ASIA_INDEX"},
 }
+
+# AUDJPY/AUDUSD/USDJPY/JP225 move together as one risk-on/off cluster (AUD
+# and JPY-JPY-crosses + the correlated Japanese equity index) -- flagged in
+# alert text only (see main_alerts.py's format_watch_alert/format_aplus_alert),
+# never deduped/suppressed like US_INDEX_INSTRUMENTS below. A trader seeing
+# two of these fire in the same cycle should read it as one macro move, not
+# two independent confirmations.
+CORRELATION_CLUSTER = {"AUDJPY", "AUDUSD", "USDJPY", "JP225"}
+CORRELATION_CLUSTER_WARNING = (
+    "⚠️ Correlated cluster (AUD/JPY-USD risk-on/off + JP225) — treat as ONE move, "
+    "not an independent signal. Check the other instruments in this cluster first."
+)
 
 US_INDEX_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "US_INDEX"]
 CRYPTO_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "CRYPTO"]
@@ -110,6 +136,16 @@ ROUND_NUMBER_OFFSET_TABLE = {
     "BTCUSD": (500, 30),
     "EURUSD": (0.0050, 0.0003),   # 50-pip levels, 3-pip proximity
     "GBPJPY": (0.500, 0.100),     # 50-pip levels (JPY pip=0.01), 10-pip proximity
+    # First-pass values for the 6 new instruments -- same reasoning as
+    # GBPJPY/EURUSD (JPY pairs use a 0.01 pip so 0.50/0.10 = 50/10 pips;
+    # non-JPY FX mirrors EURUSD's 0.0050/0.0003), tune once live data shows
+    # where round-number stop hunts actually cluster for each.
+    "AUDJPY": (0.500, 0.100),
+    "USDJPY": (0.500, 0.100),
+    "AUDUSD": (0.0050, 0.0003),
+    "JP225":  (100, 10),
+    "HK50":   (100, 10),
+    "A50":    (50, 5),
 }
 
 TP1_R_MULT = 1.0
@@ -137,6 +173,12 @@ INSTRUMENT_PROFILES = {
     "BTCUSD": {"session_cutoff": True},
     "EURUSD": {"session_cutoff": True},
     "GBPJPY": {"session_cutoff": True},
+    "AUDJPY": {"session_cutoff": True},
+    "AUDUSD": {"session_cutoff": True},
+    "USDJPY": {"session_cutoff": True},
+    "JP225":  {"session_cutoff": True},
+    "HK50":   {"session_cutoff": True},
+    "A50":    {"session_cutoff": True},
 }
 # Removed and staying removed: XAUUSD.
 

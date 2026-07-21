@@ -366,6 +366,10 @@ def _level_description(scored):
     return "key level"
 
 
+def _correlation_tag(instrument):
+    return f"\n{cfg.CORRELATION_CLUSTER_WARNING}" if instrument in cfg.CORRELATION_CLUSTER else ""
+
+
 def format_watch_alert(scored, expires_at, mode=None):
     m = mode or modes.STANDARD
     entry_basis = scored.get("entry_basis", "50% leg retrace")
@@ -376,6 +380,7 @@ def format_watch_alert(scored, expires_at, mode=None):
         f"Entry zone: {scored['entry_price']}  ({entry_basis})\n"
         f"Score: {scored['score']}/100\n"
         f"Expires: {expires_at.strftime('%H:%M')} UTC ({_format_duration(m.watch_expiry_minutes)})"
+        f"{_correlation_tag(scored['instrument'])}"
     )
 
 
@@ -400,6 +405,7 @@ def format_aplus_alert(scored, now_utc, mode=None):
         f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}\n\n"
         f"After TP1 → SL to breakeven. After TP2 → SL to TP1, runner (20%) targets TP3.\n"
         f"18:00 UTC → get ready to close manually. 18:30 UTC hard flat → close all remaining."
+        f"{_correlation_tag(scored['instrument'])}"
     )
 
 

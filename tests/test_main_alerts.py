@@ -415,6 +415,46 @@ def test_format_aplus_alert_contains_partial_tp_guidance():
     assert "18:30" in body
 
 
+def test_format_aplus_alert_adds_correlation_tag_for_cluster_member():
+    scored = {
+        "instrument": "AUDJPY", "direction": "BUY", "entry_price": 100.0,
+        "stop_loss": 99.0, "tp1": 101.0, "tp2": 102.0, "tp3": 103.0,
+        "score": 82, "htf_bias": "TRENDING_UP",
+        "breakdown": {"pattern": "LIQUIDITY_SWEEP_BOS"},
+    }
+    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
+    body = ma.format_aplus_alert(scored, now)
+    assert "Correlated cluster" in body
+
+
+def test_format_aplus_alert_no_correlation_tag_outside_cluster():
+    scored = {
+        "instrument": "US500", "direction": "BUY", "entry_price": 5420.0,
+        "stop_loss": 5398.0, "tp1": 5464.0, "tp2": 5508.0, "tp3": 5552.0,
+        "score": 82, "htf_bias": "TRENDING_UP",
+        "breakdown": {"pattern": "LIQUIDITY_SWEEP_BOS"},
+    }
+    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
+    body = ma.format_aplus_alert(scored, now)
+    assert "Correlated cluster" not in body
+
+
+def test_format_watch_alert_adds_correlation_tag_for_cluster_member():
+    scored = {"instrument": "JP225", "direction": "SELL", "entry_price": 38000.0, "score": 65}
+    expires = dt.datetime(2026, 7, 1, 16, 0, tzinfo=dt.timezone.utc)
+    body = ma.format_watch_alert(scored, expires)
+    assert "Correlated cluster" in body
+
+
+def test_format_watch_alert_no_correlation_tag_for_hk50():
+    # HK50/A50 are flagged for diagnostics purposes, not part of the FX
+    # risk-on/off correlation cluster.
+    scored = {"instrument": "HK50", "direction": "SELL", "entry_price": 18000.0, "score": 65}
+    expires = dt.datetime(2026, 7, 1, 16, 0, tzinfo=dt.timezone.utc)
+    body = ma.format_watch_alert(scored, expires)
+    assert "Correlated cluster" not in body
+
+
 def test_daily_reset_if_needed_resets_new_day():
     state = {"aplus_count_date": "2026-06-30", "aplus_count": 5}
     ma.daily_reset_if_needed(state, dt.datetime(2026, 7, 1, 0, 0, tzinfo=dt.timezone.utc))
