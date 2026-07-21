@@ -56,6 +56,18 @@ RECENT_SPIKE_PENALTY = -8   # applied to non-NEWS_RETEST patterns firing right a
 # alerts *after* a matching headline is published, not before.
 NEWS_BLACKOUT_MINUTES_AFTER = 30
 
+# Whale-flow confirmation bonus (BTCUSD only -- the only on-chain instrument
+# tracked). Uses Whale Alert's large-transaction feed to approximate both
+# "exchange netflow" and "whale/smart-money" tracking in a single signal:
+# large transactions into exchanges = distribution (bearish), large
+# transactions out of exchanges = accumulation (bullish). A confirmation
+# bonus only -- never a hard block or penalty, consistent with every other
+# scoring bonus in scoring_strategy.py ("detect generously, score strictly").
+WHALE_MIN_TX_USD = 500_000        # Whale Alert's own "large transaction" floor
+WHALE_FLOW_LOOKBACK_MINUTES = 60  # rolling window for the netflow calculation
+WHALE_FLOW_SIGNIFICANT_USD = 3_000_000  # netflow must clear this to count as a real signal
+WHALE_FLOW_BONUS = 8
+
 # ─────────────────────────────────────────────────────────────────────
 # 1.4  Alert thresholds
 # ─────────────────────────────────────────────────────────────────────

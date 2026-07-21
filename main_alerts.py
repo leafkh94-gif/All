@@ -17,6 +17,7 @@ import scoring_strategy as strat
 import strategy_config as cfg
 from strategy import modes
 from strategy import news_calendar
+from strategy import whale_tracker
 from strategy import scan_diagnostics
 from strategy.capital_feed import CapitalFeed
 from strategy.watch_tracker import WatchTracker
@@ -473,7 +474,7 @@ def build_market(feed, instrument, mode=None):
 # Section 5.6 — 3-candle confirmation for pending A+ setups
 # ─────────────────────────────────────────────────────────────────────
 def evaluate_pending_confirmations(pending_store, feed, level_store, now_utc, entry_tracker, main_state,
-                                    mode=None):
+                                    mode=None, whale_transactions=None):
     m = mode or modes.STANDARD
     for instrument, scored in list(pending_store.all().items()):
         market = build_market(feed, instrument, mode=m)
@@ -490,7 +491,8 @@ def evaluate_pending_confirmations(pending_store, feed, level_store, now_utc, en
             cls = cfg.INSTRUMENTS[instrument]["class"]
             rescored = strat.score_candidate(
                 instrument, cls, candidate, market, now_utc, level_store,
-                confirmation_bonus=cfg.CONFIRMATION_CANDLE_BONUS, mode=m)
+                confirmation_bonus=cfg.CONFIRMATION_CANDLE_BONUS, mode=m,
+                whale_transactions=whale_transactions)
 
         if rescored and rescored["score"] >= m.aplus_min_score:
             send_telegram(format_aplus_alert(rescored, now_utc, mode=m))
@@ -628,6 +630,10 @@ def run():
     main_state["news_blackout_event"] = news_event_name if news_blackout else None
     suppress_new_alerts = breaker_tripped or manual_blackout_active(main_state, now) or news_blackout
 
+    # BTCUSD-only whale-flow confirmation bonus (see strategy/whale_tracker.py).
+    # Returns [] when WHALE_ALERT_API_KEY is unset -- a pure no-op until then.
+    whale_transactions = whale_tracker.fetch_recent_whale_transactions(now)
+
     feed = CapitalFeed()
     feed.open_session()
     feed.resolve_epics()
@@ -646,7 +652,8 @@ def run():
         if not candidate or candidate["direction"] != direction:
             return None
         cls = cfg.INSTRUMENTS[instrument]["class"]
-        return strat.score_candidate(instrument, cls, candidate, market, now_utc, level_store, mode=mode)
+        return strat.score_candidate(instrument, cls, candidate, market, now_utc, level_store, mode=mode,
+                                      whale_transactions=whale_transactions)
 
     def on_upgrade(scored, now_utc):
         entry_tracker.add(scored, now_utc)
@@ -661,7 +668,8 @@ def run():
     watch_tracker.evaluate_all(now)
     open_trade_tracker.evaluate_all(now, feed, mode=mode)
     entry_tracker.evaluate_all(now, feed, mode=mode, open_tracker=open_trade_tracker)
-    evaluate_pending_confirmations(pending_store, feed, level_store, now, entry_tracker, main_state, mode=mode)
+    evaluate_pending_confirmations(pending_store, feed, level_store, now, entry_tracker, main_state, mode=mode,
+                                    whale_transactions=whale_transactions)
     maybe_send_health_check(main_state, watch_tracker, now)
 
     candidates = []
@@ -685,7 +693,7 @@ def run():
                                             "blocked": f"no pattern detected ({bars_diag.split(': ', 1)[1]})"}
                 continue
             scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store,
-                                            diagnostic=True, mode=mode)
+                                            diagnostic=True, mode=mode, whale_transactions=whale_transactions)
             diagnostics[instrument] = {"pattern": scored["pattern"], "direction": scored["direction"],
                                         "score": scored["score"], "blocked": scored["blocked"]}
             if scored["blocked"] is None:
