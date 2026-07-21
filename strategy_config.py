@@ -67,12 +67,14 @@ ECON_CALENDAR_RELEVANT_CURRENCIES = {"USD", "EUR", "GBP", "JPY"}
 
 # Whale-flow confirmation bonus (BTCUSD only -- the only on-chain instrument
 # tracked). Tracks a user-supplied list of BTC addresses (see
-# strategy/whale_tracker.py -- WHALE_MONITORED_ADDRESSES) and computes net
-# inflow/outflow to them: deposits = distribution (bearish), withdrawals =
-# accumulation (bullish). A confirmation bonus only -- never a hard block
-# or penalty, consistent with every other scoring bonus in
-# scoring_strategy.py ("detect generously, score strictly").
-WHALE_FLOW_SIGNIFICANT_USD = 3_000_000  # netflow must clear this to count as a real signal
+# strategy/whale_tracker.py -- WHALE_MONITORED_ADDRESSES) via Blockstream's
+# free Esplora API and computes net inflow/outflow to them: deposits =
+# distribution (bearish), withdrawals = accumulation (bullish). Amounts are
+# native BTC (Esplora has no USD conversion). A confirmation bonus only --
+# never a hard block or penalty, consistent with every other scoring bonus
+# in scoring_strategy.py ("detect generously, score strictly").
+WHALE_FLOW_LOOKBACK_MINUTES = 60      # only transactions confirmed within this window count
+WHALE_FLOW_SIGNIFICANT_BTC = 50.0     # netflow must clear this (in BTC) to count as a real signal
 WHALE_FLOW_BONUS = 8
 
 # ─────────────────────────────────────────────────────────────────────

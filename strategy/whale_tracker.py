@@ -1,44 +1,36 @@
 """
 strategy/whale_tracker.py
 --------------------------
-BTCUSD-only whale-flow confirmation signal, sourced from Whale Alert's
-per-address transaction endpoint -- confirmed by the user's own account as
-GET {base}/bitcoin/address/{address}/transactions?api_key=... . This is
-different from an earlier draft of this module, which assumed a global
-"all whale transactions above $X" feed; that assumption could not be
-verified (no live network access from this sandbox) and turned out not to
-match what this account actually has. This version only relies on the
-confirmed per-address endpoint.
+BTCUSD-only whale/exchange-flow confirmation signal, sourced from
+Blockstream's Esplora block explorer API (https://blockstream.info/api) --
+a genuinely free, no-signup, open-source Bitcoin block explorer API. This
+replaces an earlier design built around Whale Alert, which turned out to
+need a paid subscription rather than the free tier originally assumed --
+confirmed by the user's own account, not guessed.
 
-Because this endpoint returns one address's history at a time rather than
-a market-wide feed, this module tracks a small, user-supplied list of BTC
-addresses (WHALE_MONITORED_ADDRESSES) and computes net inflow/outflow
-*to those specific addresses* as a netflow proxy: a deposit into a
-monitored address = distribution/selling pressure (bearish); a withdrawal
-out of one = accumulation (bullish). This stands in for both "exchange
-netflow" and "whale/smart-money tracking" -- the same combined-signal
-approach as before, just computed bottom-up from known addresses instead
-of top-down from a global feed.
+Esplora's /address/{address}/txs endpoint returns one specific address's
+recent confirmed transaction history -- there is no market-wide "all whale
+transactions" feed here either, so exactly as before, this tracks net
+inflow/outflow to a small, user-supplied list of BTC addresses
+(WHALE_MONITORED_ADDRESSES): a deposit into a monitored address is
+distribution/selling pressure (bearish); a withdrawal out of one is
+accumulation (bullish).
 
-DISCLOSED LIMITATIONS (not hidden):
-  - No address list is hardcoded here. I have no way to verify from this
-    sandbox which BTC addresses currently belong to which exchange --
-    cold/hot wallets rotate over time without notice, and a stale or wrong
-    guess would silently produce a misleading trading signal, which is
-    worse than no signal at all. WHALE_MONITORED_ADDRESSES must be
-    supplied by you (comma-separated BTC addresses you trust, e.g. via a
-    repo secret). With none configured, this feature is a pure no-op --
-    same as with no API key.
-  - The exact response JSON shape from this endpoint was not confirmed
-    live either. Parsing below defensively handles the shape used across
-    Whale Alert's public API generally (a list of transactions, each with
-    "from"/"to" as either a plain address string or a {"address": ...}
-    object, and "amount_usd"), tolerating either directly-returned lists
-    or a {"transactions": [...]} wrapper, and skips anything that doesn't
-    match rather than raising. If the real shape differs further, this
-    fails open (contributes zero, never crashes a scan) rather than
-    breaking -- but the netflow signal will simply stay neutral until the
-    parsing is corrected against a real captured response.
+No exchange address list is hardcoded here, for the same reason as before:
+cold/hot wallets rotate over time without notice, and shipping a stale or
+wrong guess would silently produce a misleading trading signal. Populate
+WHALE_MONITORED_ADDRESSES yourself (comma-separated BTC addresses you
+trust) -- with none configured, this feature is a pure no-op.
+
+Amounts are tracked in native BTC (satoshis / 1e8), not USD -- Esplora
+returns raw on-chain values with no fiat conversion built in, and pulling
+in a separate price feed just for this one signal would be an extra moving
+part for little benefit. WHALE_FLOW_SIGNIFICANT_BTC is the significance
+threshold.
+
+No API key needed at all. Fails open on any error -- network failure, rate
+limit, unexpected response shape -- always returns [] rather than ever
+blocking a scan, same convention as strategy/news_calendar.py.
 """
 import json
 import os
@@ -48,15 +40,16 @@ import requests
 
 import strategy_config as cfg
 
-WHALE_ALERT_API_KEY = os.environ.get("WHALE_ALERT_API_KEY")
-WHALE_ALERT_BASE_URL = os.environ.get("WHALE_ALERT_BASE_URL", "https://leviathan.whale-alert.io")
+ESPLORA_BASE_URL = os.environ.get("ESPLORA_BASE_URL", "https://blockstream.info/api")
 WHALE_MONITORED_ADDRESSES = [
     a.strip() for a in os.environ.get("WHALE_MONITORED_ADDRESSES", "").split(",") if a.strip()
 ]
 
 CACHE_DIR = ".cache"
-CACHE_PATH = os.path.join(CACHE_DIR, "whale_alert.json")
+CACHE_PATH = os.path.join(CACHE_DIR, "whale_flow.json")
 CACHE_TTL_SECONDS = 5 * 60
+
+SATS_PER_BTC = 100_000_000
 
 
 def _read_cache():
@@ -69,78 +62,82 @@ def _read_cache():
     return None
 
 
-def _write_cache(transactions):
+def _write_cache(entries):
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         with open(CACHE_PATH, "w") as f:
-            json.dump(transactions, f)
+            json.dump(entries, f)
     except OSError:
         pass
 
 
-def _extract_address(side):
-    """side is whatever the API put under "from"/"to" -- a plain address
-    string or a dict with an "address" key. Never raises."""
-    if isinstance(side, str):
-        return side
-    if isinstance(side, dict):
-        return side.get("address")
-    return None
+def _address_net_btc(tx, address):
+    """Net BTC received by `address` in one transaction (positive = inbound
+    deposit, negative = outbound withdrawal). Sums across every matching
+    vin/vout entry, since a single tx can touch the same address more than
+    once (e.g. change outputs). Never raises."""
+    net_sats = 0
+    try:
+        for vout in tx.get("vout", []) or []:
+            if vout.get("scriptpubkey_address") == address:
+                net_sats += int(vout.get("value", 0))
+        for vin in tx.get("vin", []) or []:
+            prevout = vin.get("prevout") or {}
+            if prevout.get("scriptpubkey_address") == address:
+                net_sats -= int(prevout.get("value", 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+    return net_sats / SATS_PER_BTC
 
 
-def fetch_recent_whale_transactions(now_utc, addresses=None):
-    """Best-effort fetch of recent transactions for each monitored address.
-    Never raises. Returns [] with no API key or no addresses configured --
-    a pure no-op until both are set."""
+def fetch_recent_whale_transactions(now_utc, addresses=None, lookback_minutes=None):
+    """Best-effort fetch of each monitored address's recent confirmed
+    transactions, each reduced to its net BTC impact on that address.
+    Never raises. Returns [] with no addresses configured -- a pure no-op
+    until WHALE_MONITORED_ADDRESSES is populated."""
     addresses = WHALE_MONITORED_ADDRESSES if addresses is None else addresses
-    if not WHALE_ALERT_API_KEY or not addresses:
+    if not addresses:
         return []
+    lookback_minutes = cfg.WHALE_FLOW_LOOKBACK_MINUTES if lookback_minutes is None else lookback_minutes
+    cutoff_ts = now_utc.timestamp() - lookback_minutes * 60
     try:
         cached = _read_cache()
         if cached is not None:
             return cached
-        transactions = []
+        entries = []
         for address in addresses:
             try:
-                r = requests.get(
-                    f"{WHALE_ALERT_BASE_URL}/bitcoin/address/{address}/transactions",
-                    timeout=10, params={"api_key": WHALE_ALERT_API_KEY})
+                r = requests.get(f"{ESPLORA_BASE_URL}/address/{address}/txs", timeout=10)
                 r.raise_for_status()
-                payload = r.json()
-                txs = payload.get("transactions", payload) if isinstance(payload, dict) else payload
-                if isinstance(txs, list):
-                    for tx in txs:
-                        if isinstance(tx, dict):
-                            tagged = dict(tx)
-                            tagged["_monitored_address"] = address
-                            transactions.append(tagged)
+                txs = r.json()
+                if not isinstance(txs, list):
+                    continue
+                for tx in txs:
+                    if not isinstance(tx, dict):
+                        continue
+                    block_time = (tx.get("status") or {}).get("block_time")
+                    if block_time is None or block_time < cutoff_ts:
+                        continue
+                    net_btc = _address_net_btc(tx, address)
+                    if net_btc != 0:
+                        entries.append({"address": address, "net_btc": net_btc, "block_time": block_time})
             except Exception:
                 continue  # one bad/rate-limited address must not block the others
-        _write_cache(transactions)
-        return transactions
+        _write_cache(entries)
+        return entries
     except Exception:
         return []
 
 
-def compute_exchange_netflow(transactions):
-    """(netflow_usd, signal) -- netflow relative to the monitored addresses:
-    an inbound transfer *to* a monitored address is a deposit (bearish); an
-    outbound transfer *from* one is a withdrawal (bullish). Malformed
-    entries are skipped, never raise.
+def compute_exchange_netflow(entries):
+    """(netflow_btc, signal) summed across all monitored-address entries.
+    Positive -> net deposits into monitored addresses (bearish); negative ->
+    net withdrawals (bullish). Malformed entries are skipped, never raise.
     """
     netflow = 0.0
-    for tx in transactions or []:
+    for e in entries or []:
         try:
-            amount_usd = float(tx.get("amount_usd", 0.0))
-            monitored = tx.get("_monitored_address")
-            if not monitored:
-                continue
-            to_addr = _extract_address(tx.get("to"))
-            from_addr = _extract_address(tx.get("from"))
-            if to_addr == monitored:
-                netflow += amount_usd
-            elif from_addr == monitored:
-                netflow -= amount_usd
+            netflow += float(e.get("net_btc", 0.0))
         except (TypeError, ValueError, AttributeError):
             continue
     if netflow > 0:
@@ -152,13 +149,13 @@ def compute_exchange_netflow(transactions):
     return netflow, signal
 
 
-def whale_flow_bonus(direction, netflow_usd, threshold=None):
+def whale_flow_bonus(direction, netflow_btc, threshold=None):
     """(points, tag) -- confirmation only, never a penalty for the
     opposite/neutral case (matches every other bonus in scoring_strategy.py).
     """
-    threshold = cfg.WHALE_FLOW_SIGNIFICANT_USD if threshold is None else threshold
-    if direction == "BUY" and netflow_usd <= -threshold:
+    threshold = cfg.WHALE_FLOW_SIGNIFICANT_BTC if threshold is None else threshold
+    if direction == "BUY" and netflow_btc <= -threshold:
         return cfg.WHALE_FLOW_BONUS, "whale_accumulation"
-    if direction == "SELL" and netflow_usd >= threshold:
+    if direction == "SELL" and netflow_btc >= threshold:
         return cfg.WHALE_FLOW_BONUS, "whale_distribution"
     return 0, None

@@ -65,12 +65,11 @@ jobs:
           # ECONOMIC_CALENDAR_URL: "https://example.com/calendar.xml"
           # ECONOMIC_CALENDAR_TZ: "America/New_York"
           # BTCUSD-only whale-flow confirmation bonus (strategy/whale_tracker.py).
-          # Requires BOTH secrets below -- with either one missing, the
-          # feature is a no-op. WHALE_MONITORED_ADDRESSES is a comma-separated
-          # list of BTC addresses you trust (e.g. known exchange wallets);
-          # none are hardcoded, since a stale/wrong guess would silently
-          # produce a misleading signal.
-          WHALE_ALERT_API_KEY: ${{ secrets.WHALE_ALERT_API_KEY }}
+          # No API key needed -- reads Blockstream's free Esplora API. Only
+          # WHALE_MONITORED_ADDRESSES is required: a comma-separated list of
+          # BTC addresses you trust (e.g. known exchange wallets); none are
+          # hardcoded, since a stale/wrong guess would silently produce a
+          # misleading signal. With this unset, the feature is a no-op.
           WHALE_MONITORED_ADDRESSES: ${{ secrets.WHALE_MONITORED_ADDRESSES }}
       - name: Chain the next relay run
         if: always()

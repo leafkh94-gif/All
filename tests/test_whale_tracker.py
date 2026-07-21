@@ -3,48 +3,70 @@ import datetime as dt
 from strategy import whale_tracker as wt
 
 ADDR = "17BkMzRJt3XjEqp3TTmjmoj4dCZdjB9NEk"
+OTHER_ADDR = "1SomeOtherAddressNotMonitored"
 
 
-def _tx(amount_usd, from_side=None, to_side=None, monitored=ADDR):
-    return {"amount_usd": amount_usd, "from": from_side, "to": to_side, "_monitored_address": monitored}
+def _entry(net_btc, address=ADDR):
+    return {"address": address, "net_btc": net_btc, "block_time": 0}
 
 
-def test_netflow_positive_when_deposit_into_monitored_address():
-    txs = [_tx(4_000_000, from_side="unknown-addr", to_side=ADDR)]
-    netflow, signal = wt.compute_exchange_netflow(txs)
-    assert netflow == 4_000_000
+def _tx(vout=None, vin=None, block_time=1000):
+    return {"vout": vout or [], "vin": vin or [], "status": {"confirmed": True, "block_time": block_time}}
+
+
+def _vout(address, sats):
+    return {"scriptpubkey_address": address, "value": sats}
+
+
+def _vin(address, sats):
+    return {"prevout": {"scriptpubkey_address": address, "value": sats}}
+
+
+def test_address_net_btc_positive_for_deposit_into_address():
+    tx = _tx(vout=[_vout(ADDR, 5_00_000_000)], vin=[_vin(OTHER_ADDR, 5_00_000_000)])
+    assert wt._address_net_btc(tx, ADDR) == 5.0
+
+
+def test_address_net_btc_negative_for_withdrawal_from_address():
+    tx = _tx(vout=[_vout(OTHER_ADDR, 3_00_000_000)], vin=[_vin(ADDR, 3_00_000_000)])
+    assert wt._address_net_btc(tx, ADDR) == -3.0
+
+
+def test_address_net_btc_sums_multiple_matching_outputs():
+    tx = _tx(vout=[_vout(ADDR, 1_00_000_000), _vout(ADDR, 2_00_000_000), _vout(OTHER_ADDR, 1_00_000_000)])
+    assert wt._address_net_btc(tx, ADDR) == 3.0
+
+
+def test_address_net_btc_zero_when_address_not_involved():
+    tx = _tx(vout=[_vout(OTHER_ADDR, 1_00_000_000)])
+    assert wt._address_net_btc(tx, ADDR) == 0.0
+
+
+def test_address_net_btc_never_raises_on_malformed_tx():
+    assert wt._address_net_btc({}, ADDR) == 0.0
+    assert wt._address_net_btc({"vout": None, "vin": None}, ADDR) == 0.0
+    assert wt._address_net_btc({"vout": [{"scriptpubkey_address": ADDR, "value": "bad"}]}, ADDR) == 0.0
+
+
+def test_netflow_positive_when_deposits_dominate():
+    entries = [_entry(5.0)]
+    netflow, signal = wt.compute_exchange_netflow(entries)
+    assert netflow == 5.0
     assert signal == "bearish"
 
 
-def test_netflow_negative_when_withdrawal_from_monitored_address():
-    txs = [_tx(4_000_000, from_side=ADDR, to_side="unknown-addr")]
-    netflow, signal = wt.compute_exchange_netflow(txs)
-    assert netflow == -4_000_000
+def test_netflow_negative_when_withdrawals_dominate():
+    entries = [_entry(-5.0)]
+    netflow, signal = wt.compute_exchange_netflow(entries)
+    assert netflow == -5.0
     assert signal == "bullish"
 
 
-def test_netflow_handles_address_as_dict_shape():
-    txs = [_tx(4_000_000, from_side="unknown-addr", to_side={"address": ADDR})]
-    netflow, signal = wt.compute_exchange_netflow(txs)
-    assert netflow == 4_000_000
+def test_netflow_nets_multiple_entries():
+    entries = [_entry(10.0), _entry(-3.0)]
+    netflow, signal = wt.compute_exchange_netflow(entries)
+    assert netflow == 7.0
     assert signal == "bearish"
-
-
-def test_netflow_nets_multiple_transactions():
-    txs = [
-        _tx(5_000_000, from_side="unknown-addr", to_side=ADDR),
-        _tx(2_000_000, from_side=ADDR, to_side="unknown-addr"),
-    ]
-    netflow, signal = wt.compute_exchange_netflow(txs)
-    assert netflow == 3_000_000
-    assert signal == "bearish"
-
-
-def test_netflow_ignores_transaction_not_touching_monitored_address():
-    txs = [_tx(4_000_000, from_side="unknown-a", to_side="unknown-b")]
-    netflow, signal = wt.compute_exchange_netflow(txs)
-    assert netflow == 0.0
-    assert signal == "neutral"
 
 
 def test_netflow_zero_is_neutral():
@@ -53,77 +75,62 @@ def test_netflow_zero_is_neutral():
 
 
 def test_netflow_skips_malformed_entries_without_raising():
-    txs = [{"amount_usd": "not-a-number", "_monitored_address": ADDR}, {}, None]
-    netflow, signal = wt.compute_exchange_netflow(txs)
-    assert netflow == 0.0
-    assert signal == "neutral"
-
-
-def test_netflow_skips_entries_missing_monitored_tag():
-    txs = [{"amount_usd": 4_000_000, "from": "a", "to": "b"}]
-    netflow, signal = wt.compute_exchange_netflow(txs)
+    entries = [{"net_btc": "not-a-number"}, {}, None]
+    netflow, signal = wt.compute_exchange_netflow(entries)
     assert netflow == 0.0
     assert signal == "neutral"
 
 
 def test_whale_flow_bonus_fires_on_strong_accumulation_for_buy():
-    pts, tag = wt.whale_flow_bonus("BUY", netflow_usd=-5_000_000, threshold=3_000_000)
+    pts, tag = wt.whale_flow_bonus("BUY", netflow_btc=-80.0, threshold=50.0)
     assert pts == wt.cfg.WHALE_FLOW_BONUS
     assert tag == "whale_accumulation"
 
 
 def test_whale_flow_bonus_fires_on_strong_distribution_for_sell():
-    pts, tag = wt.whale_flow_bonus("SELL", netflow_usd=5_000_000, threshold=3_000_000)
+    pts, tag = wt.whale_flow_bonus("SELL", netflow_btc=80.0, threshold=50.0)
     assert pts == wt.cfg.WHALE_FLOW_BONUS
     assert tag == "whale_distribution"
 
 
 def test_whale_flow_bonus_is_zero_when_below_threshold():
-    pts, tag = wt.whale_flow_bonus("BUY", netflow_usd=-1_000_000, threshold=3_000_000)
+    pts, tag = wt.whale_flow_bonus("BUY", netflow_btc=-10.0, threshold=50.0)
     assert pts == 0 and tag is None
 
 
 def test_whale_flow_bonus_is_zero_never_a_penalty_when_contradicting_direction():
-    pts, tag = wt.whale_flow_bonus("BUY", netflow_usd=5_000_000, threshold=3_000_000)
+    pts, tag = wt.whale_flow_bonus("BUY", netflow_btc=80.0, threshold=50.0)
     assert pts == 0 and tag is None
 
 
-def test_fetch_returns_empty_without_api_key(monkeypatch, tmp_path):
-    monkeypatch.setattr(wt, "WHALE_ALERT_API_KEY", None)
-    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_alert.json"))
-    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
-    assert wt.fetch_recent_whale_transactions(now, addresses=[ADDR]) == []
-
-
-def test_fetch_returns_empty_without_any_addresses_configured(monkeypatch, tmp_path):
-    monkeypatch.setattr(wt, "WHALE_ALERT_API_KEY", "test-key")
-    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_alert.json"))
+def test_fetch_returns_empty_without_any_addresses_configured(tmp_path, monkeypatch):
+    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_flow.json"))
     now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
     assert wt.fetch_recent_whale_transactions(now, addresses=[]) == []
 
 
-def test_fetch_fails_open_on_request_exception(monkeypatch, tmp_path):
-    monkeypatch.setattr(wt, "WHALE_ALERT_API_KEY", "test-key")
-    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_alert.json"))
+def test_fetch_fails_open_on_request_exception(tmp_path, monkeypatch):
+    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_flow.json"))
 
     def _boom(*a, **k):
         raise wt.requests.RequestException("network down")
     monkeypatch.setattr(wt.requests, "get", _boom)
 
     now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
-    assert wt.fetch_recent_whale_transactions(now, addresses=[ADDR]) == []  # never raises
+    assert wt.fetch_recent_whale_transactions(now, addresses=[ADDR]) == []
 
 
-def test_fetch_one_bad_address_does_not_block_the_others(monkeypatch, tmp_path):
-    monkeypatch.setattr(wt, "WHALE_ALERT_API_KEY", "test-key")
-    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_alert.json"))
+def test_fetch_one_bad_address_does_not_block_the_others(tmp_path, monkeypatch):
+    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_flow.json"))
+    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
+    now_ts = int(now.timestamp())
 
     class FakeResponse:
         def raise_for_status(self):
             pass
 
         def json(self):
-            return {"transactions": [{"amount_usd": 1_000_000, "from": "x", "to": "good-addr"}]}
+            return [_tx(vout=[_vout("good-addr", 1_00_000_000)], block_time=now_ts - 60)]
 
     def _get(url, *a, **k):
         if "bad-addr" in url:
@@ -131,44 +138,63 @@ def test_fetch_one_bad_address_does_not_block_the_others(monkeypatch, tmp_path):
         return FakeResponse()
 
     monkeypatch.setattr(wt.requests, "get", _get)
-    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
     result = wt.fetch_recent_whale_transactions(now, addresses=["bad-addr", "good-addr"])
     assert len(result) == 1
-    assert result[0]["_monitored_address"] == "good-addr"
+    assert result[0]["address"] == "good-addr"
+    assert result[0]["net_btc"] == 1.0
 
 
-def test_fetch_handles_response_as_bare_list_not_wrapped(monkeypatch, tmp_path):
-    monkeypatch.setattr(wt, "WHALE_ALERT_API_KEY", "test-key")
-    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_alert.json"))
+def test_fetch_filters_out_transactions_older_than_lookback(tmp_path, monkeypatch):
+    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_flow.json"))
+    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
+    now_ts = int(now.timestamp())
 
     class FakeResponse:
         def raise_for_status(self):
             pass
 
         def json(self):
-            return [{"amount_usd": 1_000_000, "from": "x", "to": ADDR}]
+            return [
+                _tx(vout=[_vout(ADDR, 1_00_000_000)], block_time=now_ts - 60),        # within window
+                _tx(vout=[_vout(ADDR, 2_00_000_000)], block_time=now_ts - 3600 * 5),  # too old
+            ]
 
     monkeypatch.setattr(wt.requests, "get", lambda *a, **k: FakeResponse())
-    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
-    result = wt.fetch_recent_whale_transactions(now, addresses=[ADDR])
+    result = wt.fetch_recent_whale_transactions(now, addresses=[ADDR], lookback_minutes=60)
     assert len(result) == 1
-    assert result[0]["_monitored_address"] == ADDR
+    assert result[0]["net_btc"] == 1.0
 
 
-def test_fetch_caches_within_ttl(monkeypatch, tmp_path):
-    monkeypatch.setattr(wt, "WHALE_ALERT_API_KEY", "test-key")
-    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_alert.json"))
+def test_fetch_skips_transactions_missing_block_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_flow.json"))
+    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
 
     class FakeResponse:
         def raise_for_status(self):
             pass
 
         def json(self):
-            return {"transactions": [{"amount_usd": 1_000_000, "from": "x", "to": ADDR}]}
+            return [{"vout": [_vout(ADDR, 1_00_000_000)], "vin": [], "status": {"confirmed": False}}]
+
+    monkeypatch.setattr(wt.requests, "get", lambda *a, **k: FakeResponse())
+    result = wt.fetch_recent_whale_transactions(now, addresses=[ADDR])
+    assert result == []
+
+
+def test_fetch_caches_within_ttl(tmp_path, monkeypatch):
+    monkeypatch.setattr(wt, "CACHE_PATH", str(tmp_path / "whale_flow.json"))
+    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
+    now_ts = int(now.timestamp())
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [_tx(vout=[_vout(ADDR, 1_00_000_000)], block_time=now_ts - 60)]
 
     calls = []
     monkeypatch.setattr(wt.requests, "get", lambda *a, **k: calls.append(1) or FakeResponse())
-    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
 
     result = wt.fetch_recent_whale_transactions(now, addresses=[ADDR])
     assert len(result) == 1

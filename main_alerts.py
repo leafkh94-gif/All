@@ -689,7 +689,7 @@ def run():
                            or news_blackout or econ_blackout)
 
     # BTCUSD-only whale-flow confirmation bonus (see strategy/whale_tracker.py).
-    # Returns [] when WHALE_ALERT_API_KEY is unset -- a pure no-op until then.
+    # Returns [] when WHALE_MONITORED_ADDRESSES is unset -- a pure no-op until then.
     whale_transactions = whale_tracker.fetch_recent_whale_transactions(now)
 
     feed = CapitalFeed()
