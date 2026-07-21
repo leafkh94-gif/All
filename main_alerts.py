@@ -17,6 +17,8 @@ import scoring_strategy as strat
 import strategy_config as cfg
 from strategy import modes
 from strategy import news_calendar
+from strategy import economic_calendar
+from strategy import whale_tracker
 from strategy import scan_diagnostics
 from strategy.capital_feed import CapitalFeed
 from strategy.watch_tracker import WatchTracker
@@ -473,7 +475,7 @@ def build_market(feed, instrument, mode=None):
 # Section 5.6 — 3-candle confirmation for pending A+ setups
 # ─────────────────────────────────────────────────────────────────────
 def evaluate_pending_confirmations(pending_store, feed, level_store, now_utc, entry_tracker, main_state,
-                                    mode=None):
+                                    mode=None, whale_transactions=None):
     m = mode or modes.STANDARD
     for instrument, scored in list(pending_store.all().items()):
         market = build_market(feed, instrument, mode=m)
@@ -490,7 +492,8 @@ def evaluate_pending_confirmations(pending_store, feed, level_store, now_utc, en
             cls = cfg.INSTRUMENTS[instrument]["class"]
             rescored = strat.score_candidate(
                 instrument, cls, candidate, market, now_utc, level_store,
-                confirmation_bonus=cfg.CONFIRMATION_CANDLE_BONUS, mode=m)
+                confirmation_bonus=cfg.CONFIRMATION_CANDLE_BONUS, mode=m,
+                whale_transactions=whale_transactions)
 
         if rescored and rescored["score"] >= m.aplus_min_score:
             send_telegram(format_aplus_alert(rescored, now_utc, mode=m))
@@ -502,6 +505,57 @@ def evaluate_pending_confirmations(pending_store, feed, level_store, now_utc, en
 # ─────────────────────────────────────────────────────────────────────
 # Section 4 — Health check
 # ─────────────────────────────────────────────────────────────────────
+def _closed_trade_stats(entries):
+    count = len(entries)
+    if count == 0:
+        return 0, 0.0, 0.0
+    wins = sum(1 for e in entries if e["r_multiple"] > 0)
+    avg_r = sum(e["r_multiple"] for e in entries) / count
+    return count, wins / count, avg_r
+
+
+def weekly_performance_report_text(entries, now_utc):
+    cutoff = now_utc - timedelta(days=7)
+    recent = []
+    for e in entries:
+        try:
+            closed_at = datetime.fromisoformat(e["closed_at"])
+            if closed_at.tzinfo is None:
+                closed_at = closed_at.replace(tzinfo=timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if closed_at >= cutoff:
+            recent.append(e)
+
+    if not recent:
+        return "🗓️ Weekly performance: no trades closed this week."
+
+    count, win_rate, avg_r = _closed_trade_stats(recent)
+    total_r = sum(e["r_multiple"] for e in recent)
+    lines = ["🗓️ Weekly performance summary",
+              f"Trades closed: {count}, {win_rate:.0%} win rate, {avg_r:+.2f}R avg, {total_r:+.2f}R total"]
+    by_pattern = {}
+    for e in recent:
+        by_pattern.setdefault(e.get("pattern") or "unknown", []).append(e)
+    for pattern, group in sorted(by_pattern.items(), key=lambda kv: -len(kv[1])):
+        c, wr, ar = _closed_trade_stats(group)
+        lines.append(f"  {pattern}: {c} trades, {wr:.0%} win rate, {ar:+.2f}R avg")
+    return "\n".join(lines)
+
+
+def maybe_send_weekly_performance_report(main_state, now_utc, path=None):
+    """Fires once per ISO week, Friday 21:00 UTC -- end of the forex trading
+    week, right alongside maybe_record_weekly_levels."""
+    if now_utc.weekday() != 4 or now_utc.hour != 21:
+        return
+    week_key = now_utc.strftime("%G-W%V")
+    if main_state.get("last_weekly_report_week") == week_key:
+        return
+    entries = load_json(path or TRADE_LOG_PATH).get("entries", [])
+    send_telegram(weekly_performance_report_text(entries, now_utc))
+    main_state["last_weekly_report_week"] = week_key
+
+
 def maybe_send_health_check(main_state, watch_tracker, now_utc):
     last = main_state.get("last_health_check_time")
     if last and now_utc - datetime.fromisoformat(last) <= timedelta(hours=cfg.HEALTH_CHECK_INTERVAL_HOURS):
@@ -626,7 +680,17 @@ def run():
     news_headlines = news_calendar.fetch_recent_headlines(now)
     news_blackout, news_event_name = news_calendar.is_news_blackout_active(now, news_headlines)
     main_state["news_blackout_event"] = news_event_name if news_blackout else None
-    suppress_new_alerts = breaker_tripped or manual_blackout_active(main_state, now) or news_blackout
+
+    econ_events = economic_calendar.fetch_upcoming_events(now)
+    econ_blackout, econ_event_name = economic_calendar.is_economic_blackout_active(now, econ_events)
+    main_state["econ_blackout_event"] = econ_event_name if econ_blackout else None
+
+    suppress_new_alerts = (breaker_tripped or manual_blackout_active(main_state, now)
+                           or news_blackout or econ_blackout)
+
+    # BTCUSD-only whale-flow confirmation bonus (see strategy/whale_tracker.py).
+    # Returns [] when WHALE_ALERT_API_KEY is unset -- a pure no-op until then.
+    whale_transactions = whale_tracker.fetch_recent_whale_transactions(now)
 
     feed = CapitalFeed()
     feed.open_session()
@@ -639,6 +703,7 @@ def run():
 
     maybe_record_daily_levels(feed, level_store, now)
     maybe_record_weekly_levels(feed, level_store, now)
+    maybe_send_weekly_performance_report(main_state, now)
 
     def rescorer(direction, instrument, now_utc):
         market = build_market(feed, instrument, mode=mode)
@@ -646,7 +711,8 @@ def run():
         if not candidate or candidate["direction"] != direction:
             return None
         cls = cfg.INSTRUMENTS[instrument]["class"]
-        return strat.score_candidate(instrument, cls, candidate, market, now_utc, level_store, mode=mode)
+        return strat.score_candidate(instrument, cls, candidate, market, now_utc, level_store, mode=mode,
+                                      whale_transactions=whale_transactions)
 
     def on_upgrade(scored, now_utc):
         entry_tracker.add(scored, now_utc)
@@ -661,7 +727,8 @@ def run():
     watch_tracker.evaluate_all(now)
     open_trade_tracker.evaluate_all(now, feed, mode=mode)
     entry_tracker.evaluate_all(now, feed, mode=mode, open_tracker=open_trade_tracker)
-    evaluate_pending_confirmations(pending_store, feed, level_store, now, entry_tracker, main_state, mode=mode)
+    evaluate_pending_confirmations(pending_store, feed, level_store, now, entry_tracker, main_state, mode=mode,
+                                    whale_transactions=whale_transactions)
     maybe_send_health_check(main_state, watch_tracker, now)
 
     candidates = []
@@ -685,7 +752,7 @@ def run():
                                             "blocked": f"no pattern detected ({bars_diag.split(': ', 1)[1]})"}
                 continue
             scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store,
-                                            diagnostic=True, mode=mode)
+                                            diagnostic=True, mode=mode, whale_transactions=whale_transactions)
             diagnostics[instrument] = {"pattern": scored["pattern"], "direction": scored["direction"],
                                         "score": scored["score"], "blocked": scored["blocked"]}
             if scored["blocked"] is None:

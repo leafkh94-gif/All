@@ -387,6 +387,59 @@ def test_find_leg_sell_locates_sweep_and_bos():
     assert leg == {"leg_origin": 110.0, "leg_end": 88.0, "bos_index": 11}
 
 
+def test_score_candidate_applies_whale_flow_bonus_for_btcusd_only():
+    """The whale-flow confirmation bonus (strategy/whale_tracker.py) is only
+    meaningful for the one on-chain instrument tracked; every other
+    instrument has no exchange-netflow signal to speak of."""
+    market = {
+        "entry": make_candles(80, start_price=100.0, noise=0.3),
+        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
+        "h4": trending_h4_candles(up=True),
+    }
+    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
+                 "sweep_price": 100.0, "quality": 38}
+    import contextlib
+    import datetime as dt
+    now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
+
+    with contextlib.ExitStack() as stack:
+        _patch_qualifying_stack(stack)
+        stack.enter_context(patch.object(
+            strat.whale_tracker, "whale_flow_bonus", return_value=(8, "whale_accumulation")))
+        btc_result = strat.score_candidate(
+            "BTCUSD", "CRYPTO", candidate, market, now, _fake_level_store(),
+            diagnostic=True, whale_transactions=["some-tx"])
+        other_result = strat.score_candidate(
+            "US500", "US_INDEX", candidate, market, now, _fake_level_store(),
+            diagnostic=True, whale_transactions=["some-tx"])
+
+    assert btc_result["breakdown"]["whale_flow"] == "whale_accumulation"
+    assert "whale_flow" not in other_result["breakdown"]
+    assert btc_result["score"] - other_result["score"] == 8
+
+
+def test_score_candidate_btcusd_whale_flow_defaults_to_no_bonus_without_transactions():
+    """whale_transactions defaults to None -- must never raise, and with no
+    real data the netflow is neutral so no bonus applies."""
+    market = {
+        "entry": make_candles(80, start_price=100.0, noise=0.3),
+        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
+        "h4": trending_h4_candles(up=True),
+    }
+    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
+                 "sweep_price": 100.0, "quality": 38}
+    import contextlib
+    import datetime as dt
+    now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
+
+    with contextlib.ExitStack() as stack:
+        _patch_qualifying_stack(stack)
+        result = strat.score_candidate(
+            "BTCUSD", "CRYPTO", candidate, market, now, _fake_level_store(), diagnostic=True)
+
+    assert result["breakdown"]["whale_flow"] is None
+
+
 def test_find_leg_returns_none_without_a_confirmed_bos():
     flat = [_c(100, 101, 99, 100)] * 10
     assert strat.find_leg(flat, "BUY") is None

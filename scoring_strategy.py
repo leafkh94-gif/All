@@ -18,6 +18,7 @@ import market_sessions
 import scoring_indicators as ind
 import strategy_config as cfg
 from strategy import modes
+from strategy import whale_tracker
 
 STATE_DIR = "state"
 PENDING_APLUS_PATH = os.path.join(STATE_DIR, "pending_aplus.json")
@@ -467,7 +468,7 @@ def compute_tp3(direction, entry, risk, tp2_price, levels):
 # score_candidate() — the full pipeline
 # ─────────────────────────────────────────────────────────────────────
 def score_candidate(instrument, instrument_class, candidate, market, now_utc, level_store,
-                     confirmation_bonus=0, diagnostic=False, mode=None):
+                     confirmation_bonus=0, diagnostic=False, mode=None, whale_transactions=None):
     """
     market: {'entry': [...15m candles], 'h1': [...], 'h4': [...], 'daily': [...]}
     Returns a dict with the full score breakdown + entry/stop/targets, or None if
@@ -558,6 +559,12 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     eq_pts, eq_zone = ind.eqh_eql_bonus(candidate["sweep_price"], eqh_eql_zones)
     total += eq_pts
     breakdown["eqh_eql"] = eq_zone is not None
+
+    if instrument == "BTCUSD":
+        netflow_usd, _ = whale_tracker.compute_exchange_netflow(whale_transactions)
+        whale_pts, whale_tag = whale_tracker.whale_flow_bonus(direction, netflow_usd)
+        total += whale_pts
+        breakdown["whale_flow"] = whale_tag
 
     total += confirmation_bonus
     breakdown["confirmation_bonus"] = confirmation_bonus

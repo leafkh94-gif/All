@@ -230,8 +230,41 @@ def test_handle_command_performance_replies(monkeypatch):
     sent = []
     monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
     monkeypatch.setattr(rf, "performance_text", lambda: "PERF")
+    monkeypatch.setattr(ma, "load_json", lambda path: {})
     rf.handle_command("/performance")
     assert sent == ["PERF"]
+
+
+def test_handle_command_performance_sends_equity_chart_when_trades_exist(monkeypatch):
+    sent, photos = [], []
+    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
+    monkeypatch.setattr(rf, "reply_photo", lambda image_bytes, caption="": photos.append((image_bytes, caption)))
+    monkeypatch.setattr(rf, "performance_text", lambda: "PERF")
+    monkeypatch.setattr(ma, "load_json", lambda path: {"entries": [{"r_multiple": 1.0}]})
+    rf.handle_command("/performance")
+    assert len(photos) == 1
+    assert photos[0][0][:8] == b"\x89PNG\r\n\x1a\n"  # PNG magic bytes
+
+
+def test_handle_command_performance_skips_chart_when_no_trades(monkeypatch):
+    photos = []
+    monkeypatch.setattr(rf, "reply", lambda text: None)
+    monkeypatch.setattr(rf, "reply_photo", lambda image_bytes, caption="": photos.append(1))
+    monkeypatch.setattr(rf, "performance_text", lambda: "PERF")
+    monkeypatch.setattr(ma, "load_json", lambda path: {})
+    rf.handle_command("/performance")
+    assert photos == []
+
+
+def test_equity_curve_png_returns_valid_png_bytes():
+    entries = [{"r_multiple": 1.5}, {"r_multiple": -1.0}, {"r_multiple": 2.0}]
+    png_bytes = rf.equity_curve_png(entries)
+    assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_equity_curve_png_handles_empty_entries():
+    png_bytes = rf.equity_curve_png([])
+    assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_diagnostics_text_no_pattern_never_renders_none_none(monkeypatch):
