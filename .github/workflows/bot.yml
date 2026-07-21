@@ -59,6 +59,11 @@ jobs:
           # No secret needed: strategy/news_calendar.py reads a public RSS feed.
           # Override only if the default (Khaleej Times) needs to change.
           # NEWS_RSS_URL: "https://example.com/rss"
+          # No secret needed: strategy/economic_calendar.py reads a public,
+          # no-signup Forex Factory calendar feed. Override only if the
+          # default feed URL or assumed timezone needs to change.
+          # ECONOMIC_CALENDAR_URL: "https://example.com/calendar.xml"
+          # ECONOMIC_CALENDAR_TZ: "America/New_York"
           # BTCUSD-only whale-flow confirmation bonus (strategy/whale_tracker.py).
           # Sign up for a free-tier key at https://whale-alert.io/ and add it as
           # a repo secret; until then this is unset and the feature is a no-op.

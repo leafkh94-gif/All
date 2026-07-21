@@ -53,7 +53,7 @@ def help_text():
         "/loss <amount> - log a realized loss (pauses new alerts at the daily limit)\n"
         "/win <amount> - log a realized win\n"
         "/blackout <minutes> - pause new alerts for N minutes (e.g. ahead of known news)\n"
-        "/performance - win rate and avg R by pattern, from tracked TP/stop outcomes\n"
+        "/performance - win rate and avg R by pattern, plus an equity-curve chart\n"
         "/help - this menu\n\n"
         f"Mode: {m.name} — scans every {m.scan_interval_minutes} min "
         f"on a {m.entry_timeframe} entry timeframe."
@@ -66,6 +66,44 @@ def reply(text):
                       json={"chat_id": CHAT_ID, "text": text}, timeout=20)
     except requests.RequestException:
         pass
+
+
+def reply_photo(image_bytes, caption=""):
+    try:
+        requests.post(f"{TELEGRAM_API}/sendPhoto",
+                      data={"chat_id": CHAT_ID, "caption": caption},
+                      files={"photo": ("equity_curve.png", image_bytes, "image/png")},
+                      timeout=30)
+    except requests.RequestException:
+        pass
+
+
+def equity_curve_png(entries):
+    """PNG bytes of cumulative R-multiple across the trade sequence in
+    entries (chronological order, as appended to trade_log.json)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import io
+
+    cum = 0.0
+    xs, ys = [0], [0.0]
+    for i, e in enumerate(entries, start=1):
+        cum += e["r_multiple"]
+        xs.append(i)
+        ys.append(cum)
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(xs, ys, marker="o", markersize=3)
+    ax.axhline(0, linewidth=0.8, color="gray")
+    ax.set_xlabel("Trade #")
+    ax.set_ylabel("Cumulative R")
+    ax.set_title("Equity curve (R-multiple)")
+    ax.grid(True, alpha=0.3)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return buf.getvalue()
 
 
 def status_text():
@@ -94,6 +132,9 @@ def status_text():
     news_event = main_state.get("news_blackout_event")
     if news_event:
         loss_line += f"\n📰 News blackout active — {news_event}"
+    econ_event = main_state.get("econ_blackout_event")
+    if econ_event:
+        loss_line += f"\n🗓️ Economic-calendar blackout active — {econ_event}"
     lines = [f"📊 Bot status — {now.strftime('%H:%M')} UTC",
              f"Mode: {mode_name}",
              f"Last scan: {main_state.get('last_scan_time', 'n/a')}",
@@ -258,6 +299,9 @@ def handle_command(text):
                 reply(f"🔇 Blackout set — no new alerts for {int(minutes)} min.")
     elif t.startswith("/performance"):
         reply(performance_text())
+        entries = ma.load_json(ma.TRADE_LOG_PATH).get("entries", [])
+        if entries:
+            reply_photo(equity_curve_png(entries), caption="📈 Equity curve (cumulative R)")
     elif t.startswith(("/help", "/start")):
         reply(help_text())
 

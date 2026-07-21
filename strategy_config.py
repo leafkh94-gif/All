@@ -56,6 +56,15 @@ RECENT_SPIKE_PENALTY = -8   # applied to non-NEWS_RETEST patterns firing right a
 # alerts *after* a matching headline is published, not before.
 NEWS_BLACKOUT_MINUTES_AFTER = 30
 
+# Real (predictive) economic-calendar blackout -- a forward-looking
+# complement to the reactive RSS feed above. Only fires for a scheduled
+# High-impact release in a currency at least one tracked instrument cares
+# about (USD indices + BTCUSD, EUR/USD for EURUSD, GBP/JPY for GBPJPY).
+ECON_CALENDAR_MIN_IMPACT = "High"
+ECON_BLACKOUT_MINUTES_BEFORE = 15
+ECON_BLACKOUT_MINUTES_AFTER = 15
+ECON_CALENDAR_RELEVANT_CURRENCIES = {"USD", "EUR", "GBP", "JPY"}
+
 # Whale-flow confirmation bonus (BTCUSD only -- the only on-chain instrument
 # tracked). Uses Whale Alert's large-transaction feed to approximate both
 # "exchange netflow" and "whale/smart-money" tracking in a single signal:

@@ -461,6 +461,71 @@ def test_record_win_reduces_daily_total_and_can_go_negative(tmp_path):
     assert total == -5.0
 
 
+def test_weekly_performance_report_text_reports_no_trades():
+    now = dt.datetime(2026, 7, 3, 21, 0, tzinfo=dt.timezone.utc)  # a Friday
+    text = ma.weekly_performance_report_text([], now)
+    assert "no trades closed this week" in text
+
+
+def test_weekly_performance_report_text_excludes_trades_older_than_a_week():
+    now = dt.datetime(2026, 7, 3, 21, 0, tzinfo=dt.timezone.utc)
+    entries = [
+        {"pattern": "FLAG", "r_multiple": 1.5, "closed_at": (now - dt.timedelta(days=2)).isoformat()},
+        {"pattern": "FLAG", "r_multiple": -1.0, "closed_at": (now - dt.timedelta(days=10)).isoformat()},
+    ]
+    text = ma.weekly_performance_report_text(entries, now)
+    assert "Trades closed: 1" in text
+    assert "+1.50R avg" in text
+
+
+def test_weekly_performance_report_text_groups_by_pattern():
+    now = dt.datetime(2026, 7, 3, 21, 0, tzinfo=dt.timezone.utc)
+    entries = [
+        {"pattern": "FLAG", "r_multiple": 2.0, "closed_at": (now - dt.timedelta(hours=1)).isoformat()},
+        {"pattern": "FLAG", "r_multiple": -1.0, "closed_at": (now - dt.timedelta(hours=2)).isoformat()},
+        {"pattern": "HEAD_SHOULDERS", "r_multiple": 1.0, "closed_at": (now - dt.timedelta(hours=3)).isoformat()},
+    ]
+    text = ma.weekly_performance_report_text(entries, now)
+    assert "Trades closed: 3" in text
+    assert "FLAG: 2 trades" in text
+    assert "HEAD_SHOULDERS: 1 trades" in text
+
+
+def test_weekly_performance_report_text_never_raises_on_malformed_entry():
+    now = dt.datetime(2026, 7, 3, 21, 0, tzinfo=dt.timezone.utc)
+    entries = [{"pattern": "FLAG"}, {"closed_at": "not-a-date", "r_multiple": 1.0}, {}]
+    text = ma.weekly_performance_report_text(entries, now)
+    assert "no trades closed this week" in text
+
+
+def test_maybe_send_weekly_performance_report_only_fires_friday_2100(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
+    path = str(tmp_path / "trade_log.json")
+    ma.save_json(path, {"entries": [
+        {"pattern": "FLAG", "r_multiple": 1.0, "closed_at": "2026-07-03T20:00:00+00:00"}]})
+    state = {}
+    ma.maybe_send_weekly_performance_report(
+        state, dt.datetime(2026, 7, 3, 20, 0, tzinfo=dt.timezone.utc), path=path)  # Friday, wrong hour
+    assert sent == []
+    ma.maybe_send_weekly_performance_report(
+        state, dt.datetime(2026, 7, 3, 21, 0, tzinfo=dt.timezone.utc), path=path)  # Friday 21:00 UTC
+    assert len(sent) == 1
+    assert state["last_weekly_report_week"] == "2026-W27"
+
+
+def test_maybe_send_weekly_performance_report_fires_once_per_week(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
+    path = str(tmp_path / "trade_log.json")
+    ma.save_json(path, {"entries": []})
+    state = {}
+    now = dt.datetime(2026, 7, 3, 21, 0, tzinfo=dt.timezone.utc)
+    ma.maybe_send_weekly_performance_report(state, now, path=path)
+    ma.maybe_send_weekly_performance_report(state, now, path=path)  # same week -- no second send
+    assert len(sent) == 1
+
+
 def test_ensure_loss_breaker_window_sets_start_only_once():
     state = {}
     first = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)

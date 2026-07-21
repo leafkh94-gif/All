@@ -17,6 +17,7 @@ import scoring_strategy as strat
 import strategy_config as cfg
 from strategy import modes
 from strategy import news_calendar
+from strategy import economic_calendar
 from strategy import whale_tracker
 from strategy import scan_diagnostics
 from strategy.capital_feed import CapitalFeed
@@ -504,6 +505,57 @@ def evaluate_pending_confirmations(pending_store, feed, level_store, now_utc, en
 # ─────────────────────────────────────────────────────────────────────
 # Section 4 — Health check
 # ─────────────────────────────────────────────────────────────────────
+def _closed_trade_stats(entries):
+    count = len(entries)
+    if count == 0:
+        return 0, 0.0, 0.0
+    wins = sum(1 for e in entries if e["r_multiple"] > 0)
+    avg_r = sum(e["r_multiple"] for e in entries) / count
+    return count, wins / count, avg_r
+
+
+def weekly_performance_report_text(entries, now_utc):
+    cutoff = now_utc - timedelta(days=7)
+    recent = []
+    for e in entries:
+        try:
+            closed_at = datetime.fromisoformat(e["closed_at"])
+            if closed_at.tzinfo is None:
+                closed_at = closed_at.replace(tzinfo=timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if closed_at >= cutoff:
+            recent.append(e)
+
+    if not recent:
+        return "🗓️ Weekly performance: no trades closed this week."
+
+    count, win_rate, avg_r = _closed_trade_stats(recent)
+    total_r = sum(e["r_multiple"] for e in recent)
+    lines = ["🗓️ Weekly performance summary",
+              f"Trades closed: {count}, {win_rate:.0%} win rate, {avg_r:+.2f}R avg, {total_r:+.2f}R total"]
+    by_pattern = {}
+    for e in recent:
+        by_pattern.setdefault(e.get("pattern") or "unknown", []).append(e)
+    for pattern, group in sorted(by_pattern.items(), key=lambda kv: -len(kv[1])):
+        c, wr, ar = _closed_trade_stats(group)
+        lines.append(f"  {pattern}: {c} trades, {wr:.0%} win rate, {ar:+.2f}R avg")
+    return "\n".join(lines)
+
+
+def maybe_send_weekly_performance_report(main_state, now_utc, path=None):
+    """Fires once per ISO week, Friday 21:00 UTC -- end of the forex trading
+    week, right alongside maybe_record_weekly_levels."""
+    if now_utc.weekday() != 4 or now_utc.hour != 21:
+        return
+    week_key = now_utc.strftime("%G-W%V")
+    if main_state.get("last_weekly_report_week") == week_key:
+        return
+    entries = load_json(path or TRADE_LOG_PATH).get("entries", [])
+    send_telegram(weekly_performance_report_text(entries, now_utc))
+    main_state["last_weekly_report_week"] = week_key
+
+
 def maybe_send_health_check(main_state, watch_tracker, now_utc):
     last = main_state.get("last_health_check_time")
     if last and now_utc - datetime.fromisoformat(last) <= timedelta(hours=cfg.HEALTH_CHECK_INTERVAL_HOURS):
@@ -628,7 +680,13 @@ def run():
     news_headlines = news_calendar.fetch_recent_headlines(now)
     news_blackout, news_event_name = news_calendar.is_news_blackout_active(now, news_headlines)
     main_state["news_blackout_event"] = news_event_name if news_blackout else None
-    suppress_new_alerts = breaker_tripped or manual_blackout_active(main_state, now) or news_blackout
+
+    econ_events = economic_calendar.fetch_upcoming_events(now)
+    econ_blackout, econ_event_name = economic_calendar.is_economic_blackout_active(now, econ_events)
+    main_state["econ_blackout_event"] = econ_event_name if econ_blackout else None
+
+    suppress_new_alerts = (breaker_tripped or manual_blackout_active(main_state, now)
+                           or news_blackout or econ_blackout)
 
     # BTCUSD-only whale-flow confirmation bonus (see strategy/whale_tracker.py).
     # Returns [] when WHALE_ALERT_API_KEY is unset -- a pure no-op until then.
@@ -645,6 +703,7 @@ def run():
 
     maybe_record_daily_levels(feed, level_store, now)
     maybe_record_weekly_levels(feed, level_store, now)
+    maybe_send_weekly_performance_report(main_state, now)
 
     def rescorer(direction, instrument, now_utc):
         market = build_market(feed, instrument, mode=mode)
