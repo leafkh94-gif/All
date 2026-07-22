@@ -570,6 +570,36 @@ def test_compute_tp2_falls_back_to_1_8r_without_a_level():
     assert from_level is False
 
 
+def test_compute_tp2_rejects_a_pooled_level_between_entry_and_tp1():
+    """Regression test for a real production bug: a pooled liquidity level
+    merely 'ahead of entry' can land BETWEEN entry and TP1, which would
+    make TP2 trigger before TP1 in real price action. Confirmed against
+    live AUDUSD/JP225 alerts where TP1 ended up farther from entry than
+    both TP2 and TP3. 105 is ahead of entry (100) but not ahead of TP1
+    (110) -- it must be rejected, falling back to the 1.8R raw target."""
+    tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[105.0], tp1_price=110.0)
+    assert tp2 == 118.0
+    assert from_level is False
+
+
+def test_compute_tp2_accepts_a_pooled_level_beyond_tp1():
+    tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[112.0], tp1_price=110.0)
+    assert tp2 == 112.0
+    assert from_level is True
+
+
+def test_compute_tp2_sell_rejects_a_pooled_level_between_entry_and_tp1():
+    tp2, from_level = strat.compute_tp2("SELL", entry=100.0, risk=10.0, levels=[95.0], tp1_price=90.0)
+    assert tp2 == 82.0  # 1.8R fallback: 100 - 18
+    assert from_level is False
+
+
+def test_compute_tp2_sell_accepts_a_pooled_level_beyond_tp1():
+    tp2, from_level = strat.compute_tp2("SELL", entry=100.0, risk=10.0, levels=[88.0], tp1_price=90.0)
+    assert tp2 == 88.0
+    assert from_level is True
+
+
 def test_compute_tp3_prefers_whichever_is_nearer_entry():
     # raw 2.8R = 128; an external level at 150 is farther than raw -> raw wins.
     tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=108.0, levels=[150.0])
