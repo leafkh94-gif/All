@@ -100,6 +100,9 @@ class ActiveEntryTracker:
         self.path = path
         self._data = load_json(path)
 
+    def has_active(self, instrument):
+        return instrument in self._data
+
     def add(self, scored, now_utc):
         self._data[scored["instrument"]] = {
             "direction": scored["direction"],
@@ -205,6 +208,9 @@ class OpenTradeTracker:
         self.path = path
         self.trade_log_path = trade_log_path or TRADE_LOG_PATH
         self._data = load_json(path)
+
+    def has_active(self, instrument):
+        return instrument in self._data
 
     def add(self, scored, now_utc):
         entry_price = scored["entry_price"]
@@ -781,6 +787,8 @@ def run():
                 continue  # no new entry alerts after 18:30 UTC, US indices
             if watch_tracker.has_active(instrument) or pending_store.get(instrument):
                 continue
+            if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
+                continue  # already a live pending entry or open trade on this instrument
             # Section 5.6 — A+ waits for one candle's confirmation; WATCH stays instant.
             pending_store.add(instrument, scored)
             continue
@@ -788,6 +796,8 @@ def run():
         if scored["score"] >= mode.watch_min_score:
             if watch_tracker.has_active(instrument):
                 continue  # Section 3.4 cooldown — one active WATCH per instrument
+            if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
+                continue  # already a live pending entry or open trade on this instrument
             expires_at = now + timedelta(minutes=mode.watch_expiry_minutes)
             send_telegram(format_watch_alert(scored, expires_at, mode=mode))
             watch_tracker.add(scored, now)
