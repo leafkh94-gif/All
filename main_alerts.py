@@ -81,6 +81,19 @@ def _format_duration(minutes):
     return f"{hrs}h {mins}m"
 
 
+def _timeframe_minutes(timeframe):
+    """Minutes per bar for a mode's entry timeframe string ('5min'/'15min'/'1h')."""
+    return {"5min": 5, "15min": 15, "1h": 60, "4h": 240}.get(timeframe, 15)
+
+
+def pending_expiry_minutes(mode=None):
+    """v2: pending-order expiry in wall-clock minutes = PENDING_ORDER_MAX_BARS x
+    the active mode's entry-timeframe bar size (so swing/1h doesn't expire in
+    ~1.5 candles the way the old flat 90-minute timer did)."""
+    m = mode or modes.STANDARD
+    return cfg.PENDING_ORDER_MAX_BARS * _timeframe_minutes(m.entry_timeframe)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Entry/SL/TP Selection Rules v1.3 §2 — pending-order lifecycle.
 # Three cancellation reasons, checked in this order: touched (filled) takes
@@ -128,9 +141,10 @@ class ActiveEntryTracker:
         )
 
     def evaluate_all(self, now_utc, feed, mode=None, open_tracker=None):
-        # mode is accepted for call-site compatibility but no longer scales
-        # the pending-order timer -- v1.3's 90-minute expiry is flat across
-        # every instrument, not mode/instrument-scaled like the old system.
+        # v2: expiry is candle-count based (PENDING_ORDER_MAX_BARS x the active
+        # mode's entry-timeframe bar size), so swing/1h no longer expires every
+        # order in ~1.5 candles the way the old flat 90-minute timer did.
+        max_minutes = pending_expiry_minutes(mode)
         for instrument, e in list(self._data.items()):
             alert_time = datetime.fromisoformat(e["alert_time"])
             price = feed.get_current_price(instrument)
@@ -163,11 +177,11 @@ class ActiveEntryTracker:
                     self._cancel(instrument, "LEFT_WITHOUT_US")
                     continue
 
-            if now_utc - alert_time > timedelta(minutes=cfg.PENDING_ORDER_MAX_MINUTES):
+            if now_utc - alert_time > timedelta(minutes=max_minutes):
                 send_telegram(
                     f"⌛ {instrument} entry expired (EXPIRED).\n"
                     f"Price did not reach entry zone within "
-                    f"{_format_duration(cfg.PENDING_ORDER_MAX_MINUTES)}.\n"
+                    f"{_format_duration(max_minutes)}.\n"
                     f"Setup cancelled. No action needed."
                 )
                 del self._data[instrument]
@@ -271,14 +285,16 @@ class OpenTradeTracker:
                 hit_tp1 = price >= t["tp1"] if is_buy else price <= t["tp1"]
                 hit_stop = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
                 if hit_tp1:
+                    # v2: TP1 closes 50% but the stop STAYS at the initial stop
+                    # (moving to breakeven here chokes the runner too early --
+                    # breakeven now happens at TP2).
                     t["tp1_hit"] = True
                     t["locked_r"] = 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp1"])
-                    t["stop_loss"] = entry_price
                     save_json(self.path, self._data)
                     send_telegram(
                         f"🎯 {instrument} TP1 hit @ {t['tp1']}.\n"
                         f"Close 50% of the position now.\n"
-                        f"Stop loss moved to breakeven ({entry_price}) on the rest — targeting TP2 ({t['tp2']})."
+                        f"Stop stays at the initial stop ({t['stop_loss']}) on the rest — targeting TP2 ({t['tp2']})."
                     )
                     continue
                 if hit_stop:
@@ -288,24 +304,26 @@ class OpenTradeTracker:
                     closed_this_cycle = True
             elif not t["tp2_hit"]:
                 hit_tp2 = price >= t["tp2"] if is_buy else price <= t["tp2"]
-                hit_be = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
+                hit_stop = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
                 if hit_tp2:
+                    # v2: TP2 closes 30% and NOW moves the stop to breakeven
+                    # (not TP1) -- the 20% runner rides from breakeven to TP3.
                     t["tp2_hit"] = True
                     t["locked_r"] += 0.3 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp2"])
-                    t["stop_loss"] = t["tp1"]
+                    t["stop_loss"] = entry_price
                     save_json(self.path, self._data)
                     send_telegram(
                         f"🎯 {instrument} TP2 hit @ {t['tp2']}.\n"
                         f"Close 30% of the position now.\n"
-                        f"Stop loss moved to TP1 ({t['tp1']}) on the runner (20%) — targeting TP3 ({t['tp3']})."
+                        f"Stop moved to breakeven ({entry_price}) on the runner (20%) — targeting TP3 ({t['tp3']})."
                     )
                     continue
-                if hit_be:
+                if hit_stop:
                     r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["stop_loss"])
-                    self._close(instrument, t, now_utc, "breakeven_after_tp1", r)
+                    self._close(instrument, t, now_utc, "stop_after_tp1", r)
                     send_telegram(
-                        f"⚖️ {instrument} breakeven stop hit after TP1. "
-                        f"Remainder closed at entry — partial profit locked in."
+                        f"🛑 {instrument} stop hit after TP1 @ {t['stop_loss']}. "
+                        f"Remainder closed — 50% profit from TP1 locked in."
                     )
                     closed_this_cycle = True
             else:
@@ -373,7 +391,12 @@ def _level_description(scored):
 
 
 def _correlation_tag(instrument):
-    return f"\n{cfg.CORRELATION_CLUSTER_WARNING}" if instrument in cfg.CORRELATION_CLUSTER else ""
+    c = cfg.correlation_cluster_of(instrument)
+    if not c:
+        return ""
+    label, _ = c
+    return (f"\n⚠️ Correlated cluster ({label}) — treat as ONE move, not an "
+            f"independent signal. Check the other instruments in this cluster first.")
 
 
 def format_watch_alert(scored, expires_at, mode=None):
@@ -391,7 +414,8 @@ def format_watch_alert(scored, expires_at, mode=None):
 
 
 def format_aplus_alert(scored, now_utc, mode=None):
-    expiry = now_utc + timedelta(minutes=cfg.PENDING_ORDER_MAX_MINUTES)
+    exp_minutes = pending_expiry_minutes(mode)
+    expiry = now_utc + timedelta(minutes=exp_minutes)
     entry_basis = scored.get("entry_basis", "50% leg retrace")
     tp1_basis = scored.get("tp1_basis", "1.0R")
     tp2_note = "  (session/PDH-PDL level)" if scored.get("tp2_capped") else "  (1.8R fallback)"
@@ -403,13 +427,13 @@ def format_aplus_alert(scored, now_utc, mode=None):
         f"Entry:      {scored['entry_price']}  ({entry_basis})\n"
         f"Stop Loss:  {scored['stop_loss']}  (behind sweep wick + buffer)\n"
         f"Risk (R):   {risk:g}\n"
-        f"TP1:        {scored['tp1']}  ({tp1_basis})   ← close 50%, SL to breakeven\n"
-        f"TP2:        {scored['tp2']}{tp2_note}   ← close 30%, SL to TP1\n"
+        f"TP1:        {scored['tp1']}  ({tp1_basis})   ← close 50%, stop stays\n"
+        f"TP2:        {scored['tp2']}{tp2_note}   ← close 30%, SL to breakeven\n"
         f"TP3:        {scored['tp3']}{tp3_note}   ← runner 20%, trail after TP2\n\n"
-        f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(cfg.PENDING_ORDER_MAX_MINUTES)})\n\n"
+        f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(exp_minutes)})\n\n"
         f"📋 Reason: {scored['breakdown']['pattern']} at {_level_description(scored)}\n"
         f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}\n\n"
-        f"After TP1 → SL to breakeven. After TP2 → SL to TP1, runner (20%) targets TP3.\n"
+        f"After TP1 → close 50%, stop unchanged. After TP2 → SL to breakeven, runner (20%) targets TP3.\n"
         f"18:00 UTC → get ready to close manually. 18:30 UTC hard flat → close all remaining."
         f"{_correlation_tag(scored['instrument'])}"
     )
@@ -778,6 +802,13 @@ def run():
 
     candidates = dedup_us_index_candidates(candidates)
 
+    def cluster_busy(inst):
+        # v2 P5: a correlated cluster is one macro trade -- if ANY member has a
+        # pending entry or open trade, don't open a second on the same move.
+        c = cfg.correlation_cluster_of(inst)
+        members = c[1] if c else {inst}
+        return any(entry_tracker.has_active(m) or open_trade_tracker.has_active(m) for m in members)
+
     for instrument, scored in candidates:
         if suppress_new_alerts:
             continue  # daily loss limit, manual /blackout, or news blackout — no new entries
@@ -785,19 +816,22 @@ def run():
         if scored["score"] >= mode.aplus_min_score:
             if hard_flat_active(now, instrument, mode=mode):
                 continue  # no new entry alerts after 18:30 UTC, US indices
-            if watch_tracker.has_active(instrument) or pending_store.get(instrument):
+            if watch_tracker.has_active(instrument):
                 continue
-            if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
-                continue  # already a live pending entry or open trade on this instrument
-            # Section 5.6 — A+ waits for one candle's confirmation; WATCH stays instant.
-            pending_store.add(instrument, scored)
+            if cluster_busy(instrument):
+                continue  # a live pending/open trade on this instrument or its correlated cluster
+            # v2: A+ fires IMMEDIATELY (no confirmation-candle wait -- that
+            # caused adverse selection). It goes straight to the entry tracker.
+            send_telegram(format_aplus_alert(scored, now, mode=mode))
+            entry_tracker.add(scored, now)
+            main_state["aplus_count"] = main_state.get("aplus_count", 0) + 1
             continue
 
         if scored["score"] >= mode.watch_min_score:
             if watch_tracker.has_active(instrument):
                 continue  # Section 3.4 cooldown — one active WATCH per instrument
-            if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
-                continue  # already a live pending entry or open trade on this instrument
+            if cluster_busy(instrument):
+                continue  # a live pending/open trade on this instrument or its correlated cluster
             expires_at = now + timedelta(minutes=mode.watch_expiry_minutes)
             send_telegram(format_watch_alert(scored, expires_at, mode=mode))
             watch_tracker.add(scored, now)
