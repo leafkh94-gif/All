@@ -166,7 +166,12 @@ SL_BUFFER_SPREAD_MULT = 3.0
 ROUND_NUMBER_OFFSET_ATR_MULT = 0.15  # extra push beyond a round-number collision
 # v2: reject a setup whose risk is smaller than this x ATR -- an artificially
 # tiny R (from a truncated leg or a too-close stop) is not worth taking.
+# (Largely a safety net now that the buffer is >= 1.0xATR; the leg-size gate
+# below is the active "minimum risk" filter.)
 MIN_RISK_ATR_MULT = 0.8
+# v2: reject a weak displacement leg -- the swept swing -> BOS move must span
+# at least this many ATRs, else the structure is too weak / R too small.
+MIN_LEG_ATR_MULT = 1.0
 # Per-instrument (round_multiple, proximity_threshold) for the SL anti-stop-hunt check.
 ROUND_NUMBER_OFFSET_TABLE = {
     "US500":  (50, 3),

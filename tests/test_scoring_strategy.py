@@ -352,6 +352,27 @@ def test_independence_gate_blocks_setup_with_no_context_axis():
     assert "insufficient independent confluence" in result["blocked"]
 
 
+def test_weak_leg_gate_blocks_tiny_displacement():
+    """v2: a displacement leg smaller than MIN_LEG_ATR_MULT x ATR is rejected
+    as weak structure / artificially small R."""
+    import contextlib
+    import datetime as dt
+    market = {
+        "entry": make_candles(80, start_price=100.0, noise=0.3),
+        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
+        "h4": trending_h4_candles(up=True),
+    }
+    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
+                 "sweep_price": 100.0, "quality": 38}
+    now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
+    with contextlib.ExitStack() as stack:
+        # tiny leg (0.05 span) -- well under 1 ATR of the noisy synthetic candles.
+        _patch_qualifying_stack(stack, find_leg_return={"leg_origin": 100.0, "leg_end": 100.05, "bos_index": 79})
+        result = strat.score_candidate(
+            "US500", "US_INDEX", candidate, market, now, _fake_level_store(), diagnostic=True)
+    assert "weak leg" in result["blocked"]
+
+
 def test_with_trend_signal_is_not_blocked_and_scores():
     """A BUY signal in a confirmed uptrend must not be hard-blocked, and with all
     sub-factors forced to known values it must clear the A+ threshold."""

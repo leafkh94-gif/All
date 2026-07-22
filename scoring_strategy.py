@@ -612,6 +612,17 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
         return None
     leg_origin, leg_end = leg["leg_origin"], leg["leg_end"]
 
+    # ── Gate 3 (v2): reject a weak displacement leg (< MIN_LEG_ATR_MULT x ATR).
+    # This is the meaningful "minimum risk" filter -- a leg smaller than ~1 ATR
+    # is weak structure and yields an artificially small R; per-instrument by
+    # construction since ATR scales per instrument.
+    if abs(leg_end - leg_origin) < cfg.MIN_LEG_ATR_MULT * a:
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": int(round(total)), "htf_bias": htf,
+                     "blocked": f"weak leg (< {cfg.MIN_LEG_ATR_MULT}xATR displacement)"}
+        return None
+
     # ── Gate 1 (v2): independence -- require all 3 axes present ──
     #   STRUCTURE: a confirmed BOS/leg (guaranteed here -- find_leg returned).
     #   TIMING:    inside a killzone window (not the dead zone).
