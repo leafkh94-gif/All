@@ -440,11 +440,19 @@ def compute_tp1(direction, entry, risk, fvg_zones, swing_prices):
     return raw, "1.0R"
 
 
-def compute_tp2(direction, entry, risk, levels):
-    """§4 TP2 -- nearest pooled liquidity level beyond entry in the trade
-    direction; falls back to entry + 1.8R if none exists."""
+def compute_tp2(direction, entry, risk, levels, tp1_price=None):
+    """§4 TP2 -- nearest pooled liquidity level beyond TP1 (not just beyond
+    entry) in the trade direction; falls back to entry + 1.8R if none
+    exists. tp1_price defaults to entry for callers that don't have it, but
+    every real caller must pass the actual computed TP1 -- pooled liquidity
+    levels are independent of the ATR-based R-multiples, so a level that is
+    merely "ahead of entry" can easily land BETWEEN entry and TP1, which
+    would make TP2 trigger before TP1 in real price action (a genuine
+    production bug, confirmed against live alerts where TP1 ended up
+    farther from entry than both TP2 and TP3)."""
     raw = entry + cfg.TP2_R_MULT * risk if direction == "BUY" else entry - cfg.TP2_R_MULT * risk
-    ahead = [lvl for lvl in levels if (lvl > entry if direction == "BUY" else lvl < entry)]
+    floor = entry if tp1_price is None else tp1_price
+    ahead = [lvl for lvl in levels if (lvl > floor if direction == "BUY" else lvl < floor)]
     if not ahead:
         return raw, False
     return (min(ahead), True) if direction == "BUY" else (max(ahead), True)
@@ -623,7 +631,7 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
         ny_h, ny_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.NY_SESSION)
         tp2_pool = [lvl for lvl in (pdh, pdl, asian_h, asian_l, london_h, london_l, ny_h, ny_l) if lvl is not None]
         tp2_pool += [z["price"] for z in eqh_eql_zones]
-    tp2, tp2_from_level = compute_tp2(direction, entry, risk, tp2_pool)
+    tp2, tp2_from_level = compute_tp2(direction, entry, risk, tp2_pool, tp1_price=tp1)
 
     # TP3's "next external level" is universal (prior-week H/L + nearest H4
     # swing), regardless of instrument class.
