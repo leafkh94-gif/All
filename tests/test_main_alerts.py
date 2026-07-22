@@ -72,6 +72,30 @@ def test_active_entry_tracker_touch_removes_without_message(tmp_path, monkeypatc
     assert "US500" not in tracker._data
 
 
+def test_active_entry_tracker_has_active(tmp_path):
+    """Regression guard for a real production bug: JP225 fired two A+
+    alerts 30 minutes apart for the same setup because nothing checked
+    whether a pending entry already existed. has_active() is what the scan
+    loop now gates on before sending a second alert."""
+    tracker = ma.ActiveEntryTracker(path=str(tmp_path / "entries.json"))
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    assert tracker.has_active("JP225") is False
+    tracker.add({"instrument": "JP225", "direction": "SELL", "entry_price": 66825.2}, now)
+    assert tracker.has_active("JP225") is True
+    assert tracker.has_active("US500") is False
+
+
+def test_open_trade_tracker_has_active(tmp_path):
+    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"),
+                                   trade_log_path=str(tmp_path / "trade_log.json"))
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    assert tracker.has_active("JP225") is False
+    tracker.add({"instrument": "JP225", "direction": "SELL", "entry_price": 66825.2,
+                 "stop_loss": 67465.0, "tp1": 66185.0, "tp2": 66298.0, "tp3": 66236.0}, now)
+    assert tracker.has_active("JP225") is True
+    assert tracker.has_active("US500") is False
+
+
 def test_r_multiple_buy_and_sell_directions():
     assert ma._r_multiple("BUY", 100.0, 10.0, 120.0) == 2.0
     assert ma._r_multiple("SELL", 100.0, 10.0, 80.0) == 2.0
