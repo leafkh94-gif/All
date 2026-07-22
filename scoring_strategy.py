@@ -329,8 +329,13 @@ def find_leg(candles, direction, max_lookback=cfg.BOS_SEARCH_LOOKBACK_BARS):
     fractal_lows = _swings(df, "low")
     floor_idx = max(0, n - max_lookback)
 
+    # v2: the displacement usually continues past the BOS candle, so leg_end is
+    # measured over the BOS candle PLUS a few extension bars (then frozen),
+    # rather than truncated at the BOS close.
+    ext = cfg.LEG_END_EXTENSION_BARS
     for bos_idx in range(n - 1, floor_idx - 1, -1):
         close = df["c"].iloc[bos_idx]
+        end_idx = min(n - 1, bos_idx + ext)  # inclusive extension window for leg_end
         if direction == "BUY":
             prior_highs = [p for i, p in fractal_highs if i < bos_idx]
             if not prior_highs or close <= prior_highs[-1]:
@@ -340,7 +345,7 @@ def find_leg(candles, direction, max_lookback=cfg.BOS_SEARCH_LOOKBACK_BARS):
                 continue
             origin_idx = prior_lows[-1]
             leg_origin = float(df["l"].iloc[origin_idx: bos_idx + 1].min())
-            leg_end = float(df["h"].iloc[origin_idx: bos_idx + 1].max())
+            leg_end = float(df["h"].iloc[origin_idx: end_idx + 1].max())
         else:
             prior_lows = [p for i, p in fractal_lows if i < bos_idx]
             if not prior_lows or close >= prior_lows[-1]:
@@ -350,7 +355,7 @@ def find_leg(candles, direction, max_lookback=cfg.BOS_SEARCH_LOOKBACK_BARS):
                 continue
             origin_idx = prior_highs[-1]
             leg_origin = float(df["h"].iloc[origin_idx: bos_idx + 1].max())
-            leg_end = float(df["l"].iloc[origin_idx: bos_idx + 1].min())
+            leg_end = float(df["l"].iloc[origin_idx: end_idx + 1].min())
 
         if leg_end == leg_origin:
             continue
@@ -451,7 +456,13 @@ def compute_tp2(direction, entry, risk, levels, tp1_price=None):
     production bug, confirmed against live alerts where TP1 ended up
     farther from entry than both TP2 and TP3)."""
     raw = entry + cfg.TP2_R_MULT * risk if direction == "BUY" else entry - cfg.TP2_R_MULT * risk
-    floor = entry if tp1_price is None else tp1_price
+    # v2: a pooled level must clear TP1 by at least TP2_MIN_SEPARATION_R, else
+    # TP1 and TP2 fire on nearly the same candle (80% of the position out at ~1R).
+    if tp1_price is None:
+        floor = entry
+    else:
+        sep = cfg.TP2_MIN_SEPARATION_R * risk
+        floor = tp1_price + sep if direction == "BUY" else tp1_price - sep
     ahead = [lvl for lvl in levels if (lvl > floor if direction == "BUY" else lvl < floor)]
     if not ahead:
         return raw, False
@@ -459,15 +470,16 @@ def compute_tp2(direction, entry, risk, levels, tp1_price=None):
 
 
 def compute_tp3(direction, entry, risk, tp2_price, levels):
-    """§4 TP3 -- whichever is CLOSER to entry between the raw 2.8R target and
-    the next external level beyond TP2 (prior-week H/L or nearest H4 swing);
-    falls back to the raw target alone if no such external level exists."""
+    """§4 TP3 (v2) -- whichever is FARTHER from entry between the raw 2.8R
+    target and the nearest external level beyond TP2 (prior-week H/L or nearest
+    H4 swing), so the runner isn't chronically clipped short; falls back to the
+    raw target alone if no external level sits beyond TP2."""
     raw = entry + cfg.TP3_R_MULT * risk if direction == "BUY" else entry - cfg.TP3_R_MULT * risk
     ahead = [lvl for lvl in levels if (lvl > tp2_price if direction == "BUY" else lvl < tp2_price)]
     if not ahead:
         return raw, False
     external = min(ahead) if direction == "BUY" else max(ahead)
-    if abs(external - entry) < abs(raw - entry):
+    if abs(external - entry) > abs(raw - entry):
         return external, True
     return raw, False
 
@@ -517,56 +529,63 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     breakdown = {"pattern": candidate["pattern"], "pattern_quality": candidate["quality"]}
     total = candidate["quality"]
 
-    total += technical_confirm_score(df_entry, direction)
+    # ── Gate 0 (v2): a choppy market blocks outright, not a -10 nudge ──
+    if choppiness_index(df_entry) > cfg.CHOPPY_GATE_THRESHOLD:
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": int(round(total)), "htf_bias": htf, "blocked": "choppy market (gated)"}
+        return None
+
+    # ── Trend / directional context ──
     bias_pts, bias_tag = daily_bias_score(htf, direction)
     total += bias_pts
     breakdown["daily_bias"] = bias_tag
-    total += vwap_filter_score(df_entry, direction, now_utc)
+    total += vwap_filter_score(df_entry, direction, now_utc)   # kept (not a removed factor)
 
+    # ── Timing axis: killzone ──
     kz_pts, kz_name = market_sessions.killzone_bonus(now_utc, instrument_class)
     total += kz_pts
     breakdown["killzone"] = kz_name
 
-    total += ind.round_number_bonus(candidate["sweep_price"], instrument_class)
-    poc, va_low, va_high = ind.volume_profile_zones(df_entry)
-    vp_pts, vp_tag = ind.volume_profile_bonus(candidate["sweep_price"], poc, va_low, va_high)
-    total += vp_pts
-    breakdown["volume_profile"] = vp_tag
-    total += choppy_market_penalty(df_entry)
+    # ── Context: liquidity confluence as ONE capped group (v2 -- PDH/PDL +
+    # EQH/EQL + round number no longer summed independently off one sweep price) ──
+    daily = level_store.get_daily_levels(instrument)
+    weekly = level_store.get_weekly_levels(instrument)
+    pdh = daily.get("high") if daily else None
+    pdl = daily.get("low") if daily else None
+    pwh = weekly.get("high") if weekly else None
+    pwl = weekly.get("low") if weekly else None
+    eqh_eql_zones = ind.detect_eqh_eql_zones(market["h1"])
+    liq_pts, liq_tags = ind.liquidity_confluence_bonus(
+        candidate["sweep_price"], instrument_class, pdh=pdh, pdl=pdl, eqh_eql_zones=eqh_eql_zones)
+    total += liq_pts
+    breakdown["liquidity"] = liq_tags
 
+    # ── Penalties kept: recent spike + ATR sweet-spot ──
     spike_penalty = recent_spike_penalty(df_entry, a, candidate["pattern"])
     total += spike_penalty
     breakdown["recent_spike"] = spike_penalty != 0
-
     atr_penalty, atr_state = ind.atr_sweet_spot_penalty(df_entry, mode=m)
     total += atr_penalty
     breakdown["atr_state"] = atr_state
 
-    daily = level_store.get_daily_levels(instrument)
-    if daily:
-        pdh_pts, pdh_tag = ind.pdh_pdl_bonus(candidate["sweep_price"], daily.get("high"), daily.get("low"))
-        total += pdh_pts
-        breakdown["pdh_pdl"] = pdh_tag
-
-    weekly = level_store.get_weekly_levels(instrument)
+    # ── Weekly Monday sweep (distinct weekly signal, kept) ──
     if weekly:
         wk_pts, wk_tag = ind.monday_weekly_sweep_bonus(
             candidate["sweep_price"], weekly.get("high"), weekly.get("low"), now_utc)
         total += wk_pts
         breakdown["weekly_sweep"] = wk_tag
 
+    # ── FVG / IFVG (kept, distinct structural context) ──
     fvg_pts, fvg_zone = ind.fvg_bonus(candidate["sweep_price"], direction, market["h1"])
     total += fvg_pts
     breakdown["fvg"] = fvg_zone is not None
-
     ifvg_pts, ifvg_zone = ind.ifvg_bonus(candidate["sweep_price"], direction, market["h1"])
     total += ifvg_pts
     breakdown["ifvg"] = ifvg_zone is not None
 
-    eqh_eql_zones = ind.detect_eqh_eql_zones(market["h1"])
-    eq_pts, eq_zone = ind.eqh_eql_bonus(candidate["sweep_price"], eqh_eql_zones)
-    total += eq_pts
-    breakdown["eqh_eql"] = eq_zone is not None
+    # NOTE (v2): technical_confirm_score (RSI/MACD/EMA, auto-aligned at a BOS)
+    # and volume_profile_bonus (tick-volume) were removed as non-discriminative.
 
     if instrument == "BTCUSD":
         netflow_usd, _ = whale_tracker.compute_exchange_netflow(whale_transactions)
@@ -584,11 +603,6 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
                      "blocked": f"below WATCH threshold ({m.watch_min_score})"}
         return None
 
-    pdh = daily.get("high") if daily else None
-    pdl = daily.get("low") if daily else None
-    pwh = weekly.get("high") if weekly else None
-    pwl = weekly.get("low") if weekly else None
-
     leg = find_leg(market["entry"], direction)
     if leg is None:
         if diagnostic:
@@ -597,6 +611,22 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
                      "blocked": "no confirmed BOS in recent history"}
         return None
     leg_origin, leg_end = leg["leg_origin"], leg["leg_end"]
+
+    # ── Gate 1 (v2): independence -- require all 3 axes present ──
+    #   STRUCTURE: a confirmed BOS/leg (guaranteed here -- find_leg returned).
+    #   TIMING:    inside a killzone window (not the dead zone).
+    #   CONTEXT:   a liquidity confluence, an FVG/IFVG, or a with-trend H4 bias.
+    axis_structure = True
+    axis_timing = kz_pts > 0
+    axis_context = bool(liq_tags) or (fvg_zone is not None) or (ifvg_zone is not None) or (bias_tag == "with_trend")
+    axes = int(axis_structure) + int(axis_timing) + int(axis_context)
+    breakdown["independent_axes"] = axes
+    if axes < cfg.INDEPENDENCE_MIN_AXES:
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": int(round(total)), "htf_bias": htf,
+                     "blocked": f"insufficient independent confluence ({axes}/3 axes: structure/timing/context)"}
+        return None
 
     wanted_fvg_dir = "BULLISH" if direction == "BUY" else "BEARISH"
     m15_fvg_zones = [z for z in ind.detect_fvg_zones(market["entry"]) if z["direction"] == wanted_fvg_dir]
@@ -614,6 +644,13 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
             return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
                      "score": int(round(total)), "htf_bias": htf,
                      "blocked": "non-positive risk (entry/stop construction failed)"}
+        return None
+    # ── Gate 2 (v2): reject artificially tiny risk (truncated leg / too-close stop) ──
+    if risk < cfg.MIN_RISK_ATR_MULT * a:
+        if diagnostic:
+            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                     "score": int(round(total)), "htf_bias": htf,
+                     "blocked": f"risk below floor ({cfg.MIN_RISK_ATR_MULT}xATR)"}
         return None
 
     m15_swing_prices = [p for _, p in _swings(df_entry, "high" if direction == "BUY" else "low")]
