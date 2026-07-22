@@ -5,28 +5,48 @@ All times UTC.
 """
 from datetime import datetime, time, timezone
 
-# (name, start, end, bonus_us_index, bonus_btc) — end is exclusive, times are UTC.
+# (name, start, end, {instrument_class: bonus}) — end is exclusive, times are UTC.
+# Window boundaries are shared across classes (they're the same global FX
+# liquidity windows regardless of what's traded); only the bonus magnitude
+# varies by how much that window actually matters to each class.
+#
+# US_INDEX/CRYPTO values are unchanged from the original 2-tier table.
+# FOREX/FOREX_JPY get their own tuned values now -- previously EURUSD/GBPJPY
+# silently fell into the CRYPTO bucket via this function's old binary
+# US_INDEX-vs-everything-else branch, which was never intentional (a latent
+# bug, not a design choice). ASIA_INDEX (JP225/HK50/A50) treats the Asian
+# session as its prime window (like US_INDEX/FOREX treat London/NY) and
+# London/NY as its comparatively minor extended-hours window -- the
+# mirror-image of the other classes. FOREX_JPY additionally gets a real
+# Asian-session bonus (Tokyo open) that plain FOREX doesn't, since JPY pairs
+# are genuinely active there in a way EUR/USD or AUD/USD generally aren't.
+#
+# First-pass values for FOREX/FOREX_JPY/ASIA_INDEX -- tune once live data
+# shows where these instruments actually score well.
 KILLZONES = [
-    ("ASIAN_SESSION",        time(0, 0),  time(6, 0),  2,  3),
-    ("LONDON_PRE_KILL",      time(6, 0),  time(7, 0),  6,  4),
-    ("LONDON_KILLZONE",      time(7, 0),  time(8, 30), 12, 6),
-    ("NY_PRE_MARKET",        time(11, 30), time(12, 30), 6, 6),
-    ("NY_KILLZONE",          time(12, 30), time(14, 0), 12, 10),
+    ("ASIAN_SESSION",   time(0, 0),  time(6, 0),
+        {"US_INDEX": 2,  "CRYPTO": 3,  "FOREX": 3,  "FOREX_JPY": 10, "ASIA_INDEX": 12}),
+    ("LONDON_PRE_KILL", time(6, 0),  time(7, 0),
+        {"US_INDEX": 6,  "CRYPTO": 4,  "FOREX": 6,  "FOREX_JPY": 6,  "ASIA_INDEX": 4}),
+    ("LONDON_KILLZONE", time(7, 0),  time(8, 30),
+        {"US_INDEX": 12, "CRYPTO": 6,  "FOREX": 12, "FOREX_JPY": 12, "ASIA_INDEX": 4}),
+    ("NY_PRE_MARKET",   time(11, 30), time(12, 30),
+        {"US_INDEX": 6,  "CRYPTO": 6,  "FOREX": 6,  "FOREX_JPY": 6,  "ASIA_INDEX": 2}),
+    ("NY_KILLZONE",     time(12, 30), time(14, 0),
+        {"US_INDEX": 12, "CRYPTO": 10, "FOREX": 12, "FOREX_JPY": 10, "ASIA_INDEX": 2}),
 ]
 
-DEAD_ZONE_PENALTY_US_INDEX = -4
-DEAD_ZONE_PENALTY_BTC = -2
+DEAD_ZONE_PENALTY = {"US_INDEX": -4, "CRYPTO": -2, "FOREX": -3, "FOREX_JPY": -3, "ASIA_INDEX": -4}
 
 
 def killzone_bonus(now_utc, instrument_class):
-    """Return (bonus_points, zone_name) for the given UTC time and instrument class
-    ('US_INDEX' or 'CRYPTO'). Falls back to the dead-zone penalty outside all windows."""
+    """Return (bonus_points, zone_name) for the given UTC time and instrument
+    class. Falls back to the dead-zone penalty outside all windows."""
     t = now_utc.time()
-    for name, start, end, bonus_index, bonus_btc in KILLZONES:
+    for name, start, end, bonuses in KILLZONES:
         if start <= t < end:
-            return (bonus_index, name) if instrument_class == "US_INDEX" else (bonus_btc, name)
-    penalty = DEAD_ZONE_PENALTY_US_INDEX if instrument_class == "US_INDEX" else DEAD_ZONE_PENALTY_BTC
-    return penalty, "DEAD_ZONE"
+            return bonuses.get(instrument_class, bonuses["US_INDEX"]), name
+    return DEAD_ZONE_PENALTY.get(instrument_class, DEAD_ZONE_PENALTY["US_INDEX"]), "DEAD_ZONE"
 
 
 # ─────────────────────────────────────────────────────────────────────
