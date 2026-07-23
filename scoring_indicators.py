@@ -365,24 +365,3 @@ def eqh_eql_bonus(price, zones, tolerance_pct=cfg.EQH_EQL_TOLERANCE_PCT):
     return 0, None
 
 
-def liquidity_confluence_bonus(price, instrument_class, pdh=None, pdl=None, eqh_eql_zones=None):
-    """v2 — PDH/PDL, EQH/EQL and round-number all describe the SAME fact (a
-    liquidity level sits at this sweep price), so they are counted as one
-    confluence GROUP rather than summed independently. One base bonus for the
-    first distinct type present, a small extra per additional distinct type,
-    capped. Returns (points, tags)."""
-    tags = []
-    if pdh_pdl_bonus(price, pdh, pdl)[0]:
-        tags.append(pdh_pdl_bonus(price, pdh, pdl)[1])
-    eq_pts, eq_zone = eqh_eql_bonus(price, eqh_eql_zones or [])
-    if eq_pts:
-        tags.append(eq_zone.get("type", "EQ") if isinstance(eq_zone, dict) else "EQ")
-    if round_number_bonus(price, instrument_class):
-        tags.append("ROUND")
-    if not tags:
-        return 0, []
-    pts = min(cfg.LIQUIDITY_CONFLUENCE_CAP,
-              cfg.LIQUIDITY_CONFLUENCE_BASE + cfg.LIQUIDITY_CONFLUENCE_EXTRA * (len(tags) - 1))
-    return pts, tags
-
-
