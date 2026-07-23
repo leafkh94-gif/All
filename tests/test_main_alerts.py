@@ -136,9 +136,7 @@ def test_active_entry_tracker_touch_hands_off_to_open_tracker(tmp_path, monkeypa
     assert open_tracker._data["US500"]["initial_risk"] == 20.0
 
 
-def test_open_trade_tracker_tp1_hit_closes_half_and_keeps_initial_stop(tmp_path, monkeypatch):
-    """v2: TP1 closes 50% but the stop STAYS at the initial stop (breakeven now
-    happens at TP2, so the runner isn't choked too early)."""
+def test_open_trade_tracker_tp1_hit_closes_half_and_moves_stop_to_breakeven(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
     tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
@@ -153,7 +151,7 @@ def test_open_trade_tracker_tp1_hit_closes_half_and_keeps_initial_stop(tmp_path,
     tracker.evaluate_all(now + dt.timedelta(minutes=15), FakeFeed())
     assert any("TP1 hit" in m for m in sent)
     assert tracker._data["US500"]["tp1_hit"] is True
-    assert tracker._data["US500"]["stop_loss"] == 4980.0  # v2: stop UNCHANGED at TP1
+    assert tracker._data["US500"]["stop_loss"] == 5000.0  # moved to breakeven
     assert tracker._data["US500"]["locked_r"] == 1.0  # 0.5 * (40/20)
     assert ma.load_json(tracker.trade_log_path).get("entries", []) == []  # not a final close yet
 
@@ -189,7 +187,7 @@ def test_open_trade_tracker_tp2_hit_moves_to_runner_phase_not_a_final_close(tmp_
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
                  "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "tp3": 5080.0}, now)
     tracker._data["US500"]["tp1_hit"] = True
-    tracker._data["US500"]["stop_loss"] = 4980.0  # v2: still at initial stop after TP1
+    tracker._data["US500"]["stop_loss"] = 5000.0  # already at breakeven
     tracker._data["US500"]["locked_r"] = 1.0  # as if TP1 had already fired at 5040
 
     class FakeFeed:
@@ -200,7 +198,7 @@ def test_open_trade_tracker_tp2_hit_moves_to_runner_phase_not_a_final_close(tmp_
     assert any("TP2 hit" in m for m in sent)
     assert "US500" in tracker._data  # still open -- runner phase, not closed
     assert tracker._data["US500"]["tp2_hit"] is True
-    assert tracker._data["US500"]["stop_loss"] == 5000.0  # v2: moved to breakeven at TP2
+    assert tracker._data["US500"]["stop_loss"] == 5040.0  # moved to TP1
     assert tracker._data["US500"]["locked_r"] == 1.9  # locked 1.0 + 0.3 * (60/20)
     assert ma.load_json(tracker.trade_log_path).get("entries", []) == []  # not a final close yet
 
@@ -253,28 +251,27 @@ def test_open_trade_tracker_runner_stopped_after_tp2(tmp_path, monkeypatch):
     assert entry["r_multiple"] == 2.9  # locked 2.5 + 0.2 * (40/20) at the TP1-level stop
 
 
-def test_open_trade_tracker_stop_after_tp1_closes_remainder(tmp_path, monkeypatch):
-    """v2: after TP1 the stop stays at the initial stop (not breakeven). If it's
-    hit, the remainder closes with the 50% TP1 profit already locked."""
+def test_open_trade_tracker_breakeven_stop_after_tp1_closes_remainder(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
     tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
                  "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "tp3": 5080.0}, now)
-    tracker._data["US500"]["tp1_hit"] = True  # stop stays at the initial 4980
+    tracker._data["US500"]["tp1_hit"] = True
+    tracker._data["US500"]["stop_loss"] = 5000.0  # breakeven
     tracker._data["US500"]["locked_r"] = 1.0  # as if TP1 had already fired at 5040
 
     class FakeFeed:
         def get_current_price(self, instrument):
-            return 4980.0  # pulled back to the initial stop after TP1
+            return 4999.0  # pulled back to breakeven stop after TP1
 
     tracker.evaluate_all(now + dt.timedelta(minutes=30), FakeFeed())
-    assert any("stop hit after TP1" in m for m in sent)
+    assert any("breakeven stop hit" in m for m in sent)
     assert "US500" not in tracker._data
     entry = ma.load_json(tracker.trade_log_path)["entries"][0]
-    assert entry["outcome"] == "stop_after_tp1"
-    assert entry["r_multiple"] == 0.5  # locked 1.0 + 0.5 * (-1.0)
+    assert entry["outcome"] == "breakeven_after_tp1"
+    assert entry["r_multiple"] == 1.0  # locked 1.0 + 0.5 * 0
 
 
 def test_open_trade_tracker_session_cutoff_closes_every_instrument_including_btc(tmp_path, monkeypatch):
@@ -358,10 +355,10 @@ def test_active_entry_tracker_expires_after_2_hours(tmp_path, monkeypatch):
     assert "US500" not in tracker._data
 
 
-def test_active_entry_tracker_expiry_is_candle_count_based_per_mode(monkeypatch):
-    """v2: the pending-order EXPIRED timer is 6 x the active mode's entry-timeframe
-    bar size -- standard(15m)=90 min, fast(5m)=30 min -- so swing/1h no longer
-    expires every order in ~1.5 candles."""
+def test_active_entry_tracker_expiry_is_flat_90_minutes_regardless_of_mode(monkeypatch):
+    """v1.3 Section 2: the pending-order EXPIRED timer is a flat 90 minutes
+    (6 x M15 bars) across every mode -- not mode/instrument-scaled like the
+    old system."""
     monkeypatch.setattr(ma, "send_telegram", lambda text: None)
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
 
@@ -371,19 +368,18 @@ def test_active_entry_tracker_expiry_is_candle_count_based_per_mode(monkeypatch)
 
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
-        # standard mode: 6 x 15min = 90 min
         default_tracker = ma.ActiveEntryTracker(path=f"{tmp}/entries_default.json")
         default_tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0}, now)
         default_tracker.evaluate_all(now + dt.timedelta(minutes=89), FakeFeed())
-        assert "US500" in default_tracker._data
-        default_tracker.evaluate_all(now + dt.timedelta(minutes=91), FakeFeed())
-        assert "US500" not in default_tracker._data
+        assert "US500" in default_tracker._data  # 90-min expiry not yet reached
 
-        # fast mode: 6 x 5min = 30 min -> already expired at 31 min (would NOT under standard)
         fast_tracker = ma.ActiveEntryTracker(path=f"{tmp}/entries_fast.json")
         fast_tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0}, now)
-        fast_tracker.evaluate_all(now + dt.timedelta(minutes=31), FakeFeed(), mode=modes.FAST)
-        assert "US500" not in fast_tracker._data
+        fast_tracker.evaluate_all(now + dt.timedelta(minutes=89), FakeFeed(), mode=modes.FAST)
+        assert "US500" in fast_tracker._data  # same flat 90-min expiry under fast mode too
+
+        default_tracker.evaluate_all(now + dt.timedelta(minutes=91), FakeFeed())
+        assert "US500" not in default_tracker._data
 
 
 def test_build_market_fast_mode_requests_5min_entry():
@@ -456,10 +452,9 @@ def test_format_aplus_alert_adds_correlation_tag_for_cluster_member():
 
 
 def test_format_aplus_alert_no_correlation_tag_outside_cluster():
-    # v2: US500 is now in a correlation cluster; BTCUSD is not in any cluster.
     scored = {
-        "instrument": "BTCUSD", "direction": "BUY", "entry_price": 60000.0,
-        "stop_loss": 59000.0, "tp1": 61000.0, "tp2": 62000.0, "tp3": 63000.0,
+        "instrument": "US500", "direction": "BUY", "entry_price": 5420.0,
+        "stop_loss": 5398.0, "tp1": 5464.0, "tp2": 5508.0, "tp3": 5552.0,
         "score": 82, "htf_bias": "TRENDING_UP",
         "breakdown": {"pattern": "LIQUIDITY_SWEEP_BOS"},
     }
@@ -473,20 +468,6 @@ def test_format_watch_alert_adds_correlation_tag_for_cluster_member():
     expires = dt.datetime(2026, 7, 1, 16, 0, tzinfo=dt.timezone.utc)
     body = ma.format_watch_alert(scored, expires)
     assert "Correlated cluster" in body
-
-
-def test_format_aplus_alert_adds_correlation_tag_for_us_index():
-    # v2: US500/US100/US30 are now a correlation cluster (the gap the review flagged).
-    scored = {
-        "instrument": "US100", "direction": "SELL", "entry_price": 20000.0,
-        "stop_loss": 20100.0, "tp1": 19900.0, "tp2": 19800.0, "tp3": 19700.0,
-        "score": 82, "htf_bias": "TRENDING_DOWN",
-        "breakdown": {"pattern": "LIQUIDITY_SWEEP_BOS"},
-    }
-    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
-    body = ma.format_aplus_alert(scored, now)
-    assert "Correlated cluster" in body
-    assert "US indices" in body
 
 
 def test_format_watch_alert_no_correlation_tag_for_hk50():

@@ -35,24 +35,11 @@ INSTRUMENTS = {
 # never deduped/suppressed like US_INDEX_INSTRUMENTS below. A trader seeing
 # two of these fire in the same cycle should read it as one macro move, not
 # two independent confirmations.
-# Correlated groups that move as one macro trade. Each is (label, members).
-# A single move across a cluster must NOT read as N independent confirmations,
-# and (v2) must NOT open N parallel trades on the same idea -- so the alert
-# carries a warning AND the "one active setup" gate is applied cluster-wide
-# (see main_alerts.py). US500/US100/US30 are one move (the missing case the
-# review flagged); the AUD/JPY-USD risk-on/off group is the original one.
-CORRELATION_CLUSTERS = [
-    ("AUD/JPY-USD risk-on/off + JP225", {"AUDJPY", "AUDUSD", "USDJPY", "JP225"}),
-    ("US indices (US500/US100/US30)", {"US500", "US100", "US30"}),
-]
-
-
-def correlation_cluster_of(instrument):
-    """(label, members) of the cluster this instrument belongs to, or None."""
-    for label, members in CORRELATION_CLUSTERS:
-        if instrument in members:
-            return label, members
-    return None
+CORRELATION_CLUSTER = {"AUDJPY", "AUDUSD", "USDJPY", "JP225"}
+CORRELATION_CLUSTER_WARNING = (
+    "⚠️ Correlated cluster (AUD/JPY-USD risk-on/off + JP225) — treat as ONE move, "
+    "not an independent signal. Check the other instruments in this cluster first."
+)
 
 US_INDEX_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "US_INDEX"]
 CRYPTO_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "CRYPTO"]
@@ -65,24 +52,8 @@ SCAN_INTERVAL_MINUTES = 15
 # ─────────────────────────────────────────────────────────────────────
 # 1.3  Scoring system — max points per factor (kept as-is)
 # ─────────────────────────────────────────────────────────────────────
-# v2: base capped at 25 (was 38) so the base + H4 bias alone can no longer
-# clear the WATCH gate -- forces genuine multi-axis confluence.
-PATTERN_QUALITY_BASE_MAX = 25
+PATTERN_QUALITY_BASE_MAX = 38
 PATTERN_QUALITY_BONUS_MAX = 10
-
-# v2: liquidity confluences (PDH/PDL, EQH/EQL, round number) all key off the
-# SAME sweep price -- previously summed to +25 for one fact. Now grouped into a
-# single capped bonus: base for the first confluence type present, a small
-# extra per additional distinct type, capped.
-LIQUIDITY_CONFLUENCE_BASE = 8
-LIQUIDITY_CONFLUENCE_EXTRA = 2
-LIQUIDITY_CONFLUENCE_CAP = 12
-
-# v2: hard gates layered on top of the score threshold. A setup must clear ALL
-# THREE independent axes (structure + timing + context); and a choppy market
-# blocks outright rather than a soft penalty.
-INDEPENDENCE_MIN_AXES = 3
-CHOPPY_GATE_THRESHOLD = 61.8   # choppiness_index above this = blocked (was a -10 nudge)
 
 TECHNICAL_CONFIRM_ALL_ALIGNED = 10   # 2-3 of RSI/MACD/EMA aligned
 TECHNICAL_CONFIRM_ONE_ALIGNED = 4
@@ -150,28 +121,13 @@ DAILY_LOSS_BREAKER_DURATION_DAYS = 14   # trial window; breaker stops enforcing 
 # ─────────────────────────────────────────────────────────────────────
 BOS_SEARCH_LOOKBACK_BARS = 60        # how far back (in entry-timeframe bars) to search for the most recent BOS
 
-# v2: the displacement usually continues past the BOS candle, so freezing
-# leg_end at the BOS close truncated the leg (entry too shallow, R too small).
-# Extend the leg-extreme window this many bars past BOS, then freeze.
-LEG_END_EXTENSION_BARS = 3
-
 ENTRY_RETRACE_PCT = 0.50             # limit entry at 50% of the leg
 ENTRY_FVG_ZONE_MIN_PCT = 0.40        # FVG-midpoint entry override zone (fraction retraced from leg_end)
 ENTRY_FVG_ZONE_MAX_PCT = 0.62
 
-# v2: thicker, further-back stop (was 0.5xATR / 2xspread -- too thin, parked
-# right on the sweep wick where it gets hunted again).
-SL_BUFFER_ATR_MULT = 1.0             # buffer = max(SL_BUFFER_ATR_MULT x ATR, SL_BUFFER_SPREAD_MULT x spread)
-SL_BUFFER_SPREAD_MULT = 3.0
+SL_BUFFER_ATR_MULT = 0.5             # buffer = max(SL_BUFFER_ATR_MULT x ATR, SL_BUFFER_SPREAD_MULT x spread)
+SL_BUFFER_SPREAD_MULT = 2.0
 ROUND_NUMBER_OFFSET_ATR_MULT = 0.15  # extra push beyond a round-number collision
-# v2: reject a setup whose risk is smaller than this x ATR -- an artificially
-# tiny R (from a truncated leg or a too-close stop) is not worth taking.
-# (Largely a safety net now that the buffer is >= 1.0xATR; the leg-size gate
-# below is the active "minimum risk" filter.)
-MIN_RISK_ATR_MULT = 0.8
-# v2: reject a weak displacement leg -- the swept swing -> BOS move must span
-# at least this many ATRs, else the structure is too weak / R too small.
-MIN_LEG_ATR_MULT = 1.0
 # Per-instrument (round_multiple, proximity_threshold) for the SL anti-stop-hunt check.
 ROUND_NUMBER_OFFSET_TABLE = {
     "US500":  (50, 3),
@@ -196,15 +152,9 @@ TP1_R_MULT = 1.0
 TP1_EXCEPTION_MIN_R = 0.8            # an unfilled FVG/minor swing in [0.8R, 1.0R) overrides raw TP1
 TP1_EXCEPTION_MAX_R = 1.0
 TP2_R_MULT = 1.8                     # fallback when no liquidity level sits beyond TP1
-# v2: a pooled TP2 level must clear TP1 by at least this much R, else TP1/TP2
-# fire on nearly the same candle (80% of the position out at ~1R).
-TP2_MIN_SEPARATION_R = 0.5
-TP3_R_MULT = 2.8                     # fallback; v2: TP3 = the FARTHER of 2.8R vs. the next external level (was closer)
+TP3_R_MULT = 2.8                     # fallback (also the ceiling vs. any external level beyond TP2)
 
-# v2: expiry is measured in entry-timeframe BARS, not fixed wall-clock minutes,
-# so swing mode (1h) no longer expires every order in ~1.5 candles.
-PENDING_ORDER_MAX_BARS = 6           # 6 x entry-timeframe bars unfilled -> cancel (EXPIRED)
-PENDING_ORDER_MAX_MINUTES = 90       # retained only as a floor/back-compat default (6 x M15)
+PENDING_ORDER_MAX_MINUTES = 90       # 6 x M15 bars unfilled -> cancel (EXPIRED)
 
 HARD_FLAT_UTC_HOUR = 18
 HARD_FLAT_UTC_MINUTE = 30           # no new entry alerts after 18:30 UTC (instruments with session_cutoff on)

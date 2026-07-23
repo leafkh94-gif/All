@@ -16,21 +16,12 @@ def test_new_asia_pacific_and_correlation_instruments_present():
         assert symbol in cfg.INSTRUMENTS
 
 
-def test_correlation_clusters_match_spec():
-    sets = [members for _, members in cfg.CORRELATION_CLUSTERS]
-    assert {"AUDJPY", "AUDUSD", "USDJPY", "JP225"} in sets
-    assert {"US500", "US100", "US30"} in sets   # v2: US indices are one move
+def test_correlation_cluster_matches_spec():
+    assert cfg.CORRELATION_CLUSTER == {"AUDJPY", "AUDUSD", "USDJPY", "JP225"}
 
 
 def test_correlation_cluster_members_are_tracked_instruments():
-    for _, members in cfg.CORRELATION_CLUSTERS:
-        assert members <= set(cfg.INSTRUMENTS)
-
-
-def test_correlation_cluster_of_lookup():
-    assert cfg.correlation_cluster_of("US100")[1] == {"US500", "US100", "US30"}
-    assert cfg.correlation_cluster_of("AUDJPY")[1] == {"AUDJPY", "AUDUSD", "USDJPY", "JP225"}
-    assert cfg.correlation_cluster_of("BTCUSD") is None
+    assert cfg.CORRELATION_CLUSTER <= set(cfg.INSTRUMENTS)
 
 
 def test_hk50_and_a50_are_asia_index_class():

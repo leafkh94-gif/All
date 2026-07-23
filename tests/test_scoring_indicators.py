@@ -189,26 +189,6 @@ def test_eqh_eql_bonus_matches_zone():
     assert pts == 10 and zone is not None
 
 
-def test_liquidity_confluence_bonus_groups_and_caps():
-    """v2: PDH/PDL + EQH/EQL + round number key off the same sweep price, so
-    they're one capped group, not summed. One type -> base 8; each extra
-    distinct type -> +2; capped at 12 (so all three -> 12, not 25)."""
-    price = 6000.0  # a US_INDEX round-number level (nearest 500-multiple = 6000)
-    # one type only (round number)
-    pts, tags = ind.liquidity_confluence_bonus(price, "US_INDEX", pdh=None, pdl=None, eqh_eql_zones=[])
-    assert pts == 8 and tags == ["ROUND"]
-    # two types (PDH + round)
-    pts, tags = ind.liquidity_confluence_bonus(price, "US_INDEX", pdh=6000.0, pdl=None, eqh_eql_zones=[])
-    assert pts == 10 and set(tags) == {"PDH", "ROUND"}
-    # all three types -> capped at 12 (would have summed to 25 pre-v2)
-    zones = [{"type": "EQH", "price": 6000.0, "touches": 2}]
-    pts, tags = ind.liquidity_confluence_bonus(price, "US_INDEX", pdh=6000.0, pdl=None, eqh_eql_zones=zones)
-    assert pts == 12 and len(tags) == 3
-    # nothing present -> no bonus
-    pts, tags = ind.liquidity_confluence_bonus(6250.0, "US_INDEX", pdh=None, pdl=None, eqh_eql_zones=[])
-    assert pts == 0 and tags == []
-
-
 def test_anchored_vwap_returns_none_without_volume():
     df = pd.DataFrame(make_candles(10))  # helper always sets v=None
     assert ind.anchored_vwap(df) is None
