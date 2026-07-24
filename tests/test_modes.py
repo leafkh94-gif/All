@@ -3,7 +3,7 @@ from strategy import modes
 
 
 def test_standard_mode_matches_current_cfg_constants():
-    assert modes.STANDARD.entry_timeframe == "15min"
+    assert modes.STANDARD.entry_timeframe == "1h"   # Strategy v3.2 — H1 analysis
     assert modes.STANDARD.scan_interval_minutes == cfg.SCAN_INTERVAL_MINUTES
     assert modes.STANDARD.watch_min_score == cfg.WATCH_MIN_SCORE
     assert modes.STANDARD.aplus_min_score == cfg.APLUS_MIN_SCORE
@@ -43,7 +43,9 @@ def test_swing_mode_uses_hourly_entries_and_disables_session_cutoff():
     assert modes.SWING.session_cutoff_enabled is False
     assert modes.SWING.watch_expiry_minutes > modes.STANDARD.watch_expiry_minutes
     assert modes.SWING.watch_update_interval_minutes > modes.STANDARD.watch_update_interval_minutes
-    assert modes.SWING.entry_expiry_minutes > modes.STANDARD.entry_expiry_minutes
+    # v3.2 makes STANDARD itself an 8h-validity H1 strategy, so SWING is no
+    # longer strictly longer on entry expiry -- they match at 8h.
+    assert modes.SWING.entry_expiry_minutes >= modes.STANDARD.entry_expiry_minutes
     assert modes.MODES["swing"] is modes.SWING
 
 
