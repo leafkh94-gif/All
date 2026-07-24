@@ -16,6 +16,31 @@ def test_new_asia_pacific_and_correlation_instruments_present():
         assert symbol in cfg.INSTRUMENTS
 
 
+def test_active_instruments_are_the_v32_four():
+    assert cfg.ACTIVE_INSTRUMENTS == ["US500", "US100", "US30", "BTCUSD"]
+
+
+def test_active_instruments_are_defined_in_the_instrument_table():
+    assert set(cfg.ACTIVE_INSTRUMENTS) <= set(cfg.INSTRUMENTS)
+
+
+def test_v32_alert_thresholds():
+    assert cfg.WATCH_MIN_SCORE == 72
+    assert cfg.APLUS_MIN_SCORE == 82
+    assert cfg.NO_ALERT_MAX == 71
+    assert cfg.APLUS_MIN_FLOOR <= cfg.APLUS_BASE_SCORE <= cfg.APLUS_MAX_CAP
+
+
+def test_v32_setup_validity_is_eight_hours():
+    assert cfg.PENDING_ORDER_MAX_MINUTES == 480
+    assert cfg.ENTRY_EXPIRY_HOURS == 8
+
+
+def test_v32_two_fixed_r_targets():
+    assert cfg.TP1_R_MULT == 2.0
+    assert cfg.TP2_R_MULT == 3.0
+
+
 def test_correlation_cluster_matches_spec():
     assert cfg.CORRELATION_CLUSTER == {"AUDJPY", "AUDUSD", "USDJPY", "JP225"}
 
