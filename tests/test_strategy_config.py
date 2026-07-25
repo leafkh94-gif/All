@@ -16,8 +16,10 @@ def test_new_asia_pacific_and_correlation_instruments_present():
         assert symbol in cfg.INSTRUMENTS
 
 
-def test_active_instruments_are_the_v32_four():
-    assert cfg.ACTIVE_INSTRUMENTS == ["US500", "US100", "US30", "BTCUSD"]
+def test_active_instruments_cover_the_full_monitored_list():
+    assert set(cfg.ACTIVE_INSTRUMENTS) == set(cfg.INSTRUMENTS)
+    for symbol in ("US500", "US100", "US30", "BTCUSD", "HK50", "GBPJPY", "A50", "JP225"):
+        assert symbol in cfg.ACTIVE_INSTRUMENTS
 
 
 def test_active_instruments_are_defined_in_the_instrument_table():

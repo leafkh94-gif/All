@@ -45,12 +45,12 @@ US_INDEX_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "US_I
 CRYPTO_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "CRYPTO"]
 
 # ─────────────────────────────────────────────────────────────────────
-# Strategy v3.2 scope — the bot scans ONLY these four instruments (S&P 500,
-# Nasdaq 100, Dow Jones, Bitcoin) on H1. The other entries in INSTRUMENTS
-# above are kept for config/lookups and can be re-activated by adding them
-# back here, but v3.2 is deliberately a focused 4-instrument strategy.
+# Instruments the bot actively scans. v3.2's scoring/entry/SL/TP logic runs
+# on ALL of them (not just the doc's four headline instruments) — the full
+# monitored list is intentionally kept. Edit this list to add/drop what the
+# bot watches; every symbol here must exist in INSTRUMENTS above.
 # ─────────────────────────────────────────────────────────────────────
-ACTIVE_INSTRUMENTS = ["US500", "US100", "US30", "BTCUSD"]
+ACTIVE_INSTRUMENTS = list(INSTRUMENTS.keys())
 
 # ─────────────────────────────────────────────────────────────────────
 # 1.2  Architecture
