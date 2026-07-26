@@ -333,6 +333,25 @@ def _correlation_tag(instrument):
     return f"\n{cfg.CORRELATION_CLUSTER_WARNING}" if instrument in cfg.CORRELATION_CLUSTER else ""
 
 
+_TF_ARROW = {"up": "▲", "down": "▼", "flat": "▬"}
+_TF_MARK = {"aligned": "✅ aligned", "against": "⚠️ against", "flat": "➖ flat"}
+
+
+def _format_timeframes(scored):
+    """Informational 15m / 1h / 4h trend read-out vs the trade direction.
+    Empty string if the scored dict has no timeframe data (older callers)."""
+    tf = scored.get("timeframes")
+    if not tf:
+        return ""
+    lines = [f"\n📊 Timeframes vs {scored['direction']}:"]
+    for label in ("15m", "1h", "4h"):
+        d = tf.get(label)
+        if not d:
+            continue
+        lines.append(f"   {label:>3}: {_TF_ARROW.get(d['trend'], '')} {d['trend']}  ({_TF_MARK.get(d['agree'], d['agree'])})")
+    return "\n".join(lines)
+
+
 def format_watch_alert(scored, expires_at, mode=None):
     m = mode or modes.STANDARD
     entry_basis = scored.get("entry_basis", "50% leg retrace")
@@ -343,6 +362,7 @@ def format_watch_alert(scored, expires_at, mode=None):
         f"Entry zone: {scored['entry_price']}  ({entry_basis})\n"
         f"Score: {scored['score']}/100\n"
         f"Expires: {expires_at.strftime('%H:%M')} UTC ({_format_duration(m.watch_expiry_minutes)})"
+        f"{_format_timeframes(scored)}"
         f"{_correlation_tag(scored['instrument'])}"
     )
 
@@ -363,7 +383,8 @@ def format_aplus_alert(scored, now_utc, mode=None):
         f"TP2:        {scored['tp2']}  ({tp2_basis})   ← close the rest\n\n"
         f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(cfg.PENDING_ORDER_MAX_MINUTES)})\n\n"
         f"📋 Reason: {scored['breakdown']['pattern']} at {_level_description(scored)}\n"
-        f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}\n\n"
+        f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}"
+        f"{_format_timeframes(scored)}\n\n"
         f"After TP1 → SL to breakeven, second half targets TP2.\n"
         f"18:00 UTC → get ready to close manually. 18:30 UTC hard flat → close all remaining."
         f"{_correlation_tag(scored['instrument'])}"
@@ -433,6 +454,7 @@ def build_market(feed, instrument, mode=None):
     m = mode or modes.STANDARD
     return {
         "entry": feed.get_candles(instrument, m.entry_timeframe, n=80),
+        "m15": feed.get_candles(instrument, "15min", n=60),
         "h1": feed.get_candles(instrument, "1h", n=160),
         "h4": feed.get_candles(instrument, "4h", n=260),
     }
