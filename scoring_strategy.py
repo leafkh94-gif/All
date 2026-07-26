@@ -46,6 +46,43 @@ def htf_bias(candles_h4, flat_band_pct=0.001):
     return "TRENDING_UP" if e50 > e200 else "TRENDING_DOWN"
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Multi-timeframe read-out (15m / 1h / 4h) — informational only. Attached
+# to every qualifying alert so the reader can see how the shorter and
+# higher timeframes line up with the trade direction. Does NOT gate or
+# change when an alert fires.
+# ─────────────────────────────────────────────────────────────────────
+def _tf_trend(candles, flat_band_pct=0.0005):
+    """Short trend read for one timeframe: EMA20 vs EMA50 on closes ->
+    'up' / 'down' / 'flat'. Returns 'flat' when there isn't enough history."""
+    df = _df(candles)
+    if len(df) < 50:
+        return "flat"
+    e_fast = ind.ema(df["c"], 20).iloc[-1]
+    e_slow = ind.ema(df["c"], 50).iloc[-1]
+    if e_slow == 0:
+        return "flat"
+    diff = (e_fast - e_slow) / e_slow
+    if abs(diff) < flat_band_pct:
+        return "flat"
+    return "up" if e_fast > e_slow else "down"
+
+
+def multiframe_alignment(m15, h1, h4, direction):
+    """{'15m'|'1h'|'4h': {'trend': up/down/flat, 'agree': aligned/against/flat}}
+    for the three timeframes relative to the trade direction."""
+    out = {}
+    for label, candles in (("15m", m15), ("1h", h1), ("4h", h4)):
+        trend = _tf_trend(candles)
+        if trend == "flat":
+            agree = "flat"
+        else:
+            with_dir = (trend == "up" and direction == "BUY") or (trend == "down" and direction == "SELL")
+            agree = "aligned" if with_dir else "against"
+        out[label] = {"trend": trend, "agree": agree}
+    return out
+
+
 def daily_bias_score(htf, direction):
     """Section 1.3 — +15 with-trend / +5 neutral / -8 counter-trend.
     Note: counter-trend combinations against a TRENDING regime never reach this
@@ -605,7 +642,9 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
 
     result = {
         "instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
-        "score": int(round(total)), "breakdown": breakdown, "htf_bias": htf, **exits,
+        "score": int(round(total)), "breakdown": breakdown, "htf_bias": htf,
+        "timeframes": multiframe_alignment(market.get("m15", []), market["h1"], market["h4"], direction),
+        **exits,
     }
     if diagnostic:
         result["blocked"] = None

@@ -671,3 +671,24 @@ def test_recent_spike_penalty_ignores_spike_outside_lookback_window():
     df = _df_with_spike(spike_bars_ago=5)  # older than RECENT_SPIKE_LOOKBACK=3
     penalty = strat.recent_spike_penalty(df, atr_value=1.0, candidate_pattern="SD_REJECTION")
     assert penalty == 0
+
+
+def test_multiframe_alignment_reports_per_timeframe_agreement():
+    up = make_candles(60, start_price=100.0, step=1.0, noise=0.0)
+    down = make_candles(60, start_price=300.0, step=-1.0, noise=0.0)
+    tf = strat.multiframe_alignment(up, up, down, "BUY")
+    assert tf["15m"]["trend"] == "up" and tf["15m"]["agree"] == "aligned"
+    assert tf["1h"]["agree"] == "aligned"
+    assert tf["4h"]["trend"] == "down" and tf["4h"]["agree"] == "against"
+
+
+def test_multiframe_alignment_sell_direction_flips_agreement():
+    down = make_candles(60, start_price=300.0, step=-1.0, noise=0.0)
+    tf = strat.multiframe_alignment(down, down, down, "SELL")
+    assert tf["1h"]["trend"] == "down" and tf["1h"]["agree"] == "aligned"
+
+
+def test_multiframe_alignment_flat_without_enough_history():
+    tf = strat.multiframe_alignment([], [], [], "BUY")
+    assert tf["15m"] == {"trend": "flat", "agree": "flat"}
+    assert tf["4h"] == {"trend": "flat", "agree": "flat"}

@@ -341,8 +341,10 @@ def test_build_market_fast_mode_requests_5min_entry():
             return []
 
     ma.build_market(FakeFeed(), "US500", mode=modes.FAST)
-    assert "5min" in requested
-    assert "15min" not in requested
+    assert "5min" in requested   # fast mode's entry timeframe
+    # 15min is always fetched for the multi-timeframe read-out, independent of
+    # the entry timeframe, so it is expected here even in fast mode.
+    assert requested.get("15min", 0) == 1
 
 
 def test_build_market_defaults_to_1h_entry():
@@ -683,3 +685,37 @@ def test_daily_reset_zeroes_both_alert_counters():
     ma.daily_reset_if_needed(state, dt.datetime(2026, 7, 1, 0, 5, tzinfo=dt.timezone.utc))
     assert state["aplus_count"] == 0
     assert state["watch_count"] == 0
+
+
+def test_format_aplus_alert_includes_timeframe_readout():
+    scored = {
+        "instrument": "US500", "direction": "BUY", "entry_price": 5420.0,
+        "stop_loss": 5398.0, "tp1": 5464.0, "tp2": 5508.0, "tp3": None,
+        "score": 84, "htf_bias": "TRENDING_UP",
+        "breakdown": {"pattern": "LIQUIDITY_SWEEP_BOS", "pdh_pdl": "PDH"},
+        "timeframes": {"15m": {"trend": "up", "agree": "aligned"},
+                        "1h": {"trend": "up", "agree": "aligned"},
+                        "4h": {"trend": "flat", "agree": "flat"}},
+    }
+    body = ma.format_aplus_alert(scored, dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc))
+    assert "Timeframes vs BUY" in body
+    assert "15m" in body and "aligned" in body
+    assert "4h" in body
+
+
+def test_format_watch_alert_includes_timeframe_readout():
+    scored = {
+        "instrument": "US500", "direction": "SELL", "entry_price": 5400.0, "score": 74,
+        "timeframes": {"15m": {"trend": "down", "agree": "aligned"},
+                        "1h": {"trend": "up", "agree": "against"},
+                        "4h": {"trend": "down", "agree": "aligned"}},
+    }
+    body = ma.format_watch_alert(scored, dt.datetime(2026, 7, 1, 16, 0, tzinfo=dt.timezone.utc))
+    assert "Timeframes vs SELL" in body
+    assert "against" in body
+
+
+def test_format_alert_without_timeframes_omits_section():
+    scored = {"instrument": "US500", "direction": "BUY", "entry_price": 5400.0, "score": 74}
+    body = ma.format_watch_alert(scored, dt.datetime(2026, 7, 1, 16, 0, tzinfo=dt.timezone.utc))
+    assert "Timeframes" not in body
