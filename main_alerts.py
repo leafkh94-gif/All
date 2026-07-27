@@ -413,7 +413,7 @@ def format_watch_alert(scored, expires_at, mode=None):
 def format_aplus_alert(scored, now_utc, mode=None):
     expiry = now_utc + timedelta(minutes=cfg.PENDING_ORDER_MAX_MINUTES)
     entry_basis = scored.get("entry_basis", "50% leg retrace")
-    tp1_basis = scored.get("tp1_basis", "1.0R")
+    tp1_basis = scored.get("tp1_basis", "2.0R")
     tp2_note = "  (session/PDH-PDL level)" if scored.get("tp2_capped") else "  (1.8R fallback)"
     tp3_note = "  (external level)" if scored.get("tp3_capped") else "  (2.8R fallback)"
     risk = abs(scored["entry_price"] - scored["stop_loss"])

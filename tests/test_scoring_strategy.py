@@ -531,31 +531,31 @@ def test_compute_stop_applies_round_number_offset_when_too_close():
     assert stop == raw - strat.cfg.ROUND_NUMBER_OFFSET_ATR_MULT * 10.0
 
 
-def test_compute_tp1_raw_one_r_without_exception_candidates():
+def test_compute_tp1_raw_two_r_without_exception_candidates():
     tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=[])
-    assert tp1 == 110.0
-    assert basis == "1.0R"
+    assert tp1 == 120.0   # 2.0R first target (book's 2:1)
+    assert basis == "2.0R"
 
 
-def test_compute_tp1_swing_exception_inside_08_10_r_window():
-    swing_prices = [108.5]  # 0.85R from entry -- inside [0.8R, 1.0R)
+def test_compute_tp1_swing_exception_inside_16_20_r_window():
+    swing_prices = [117.0]  # 1.7R from entry -- inside [1.6R, 2.0R)
     tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=swing_prices)
-    assert tp1 == 108.5
+    assert tp1 == 117.0
     assert basis == "FVG/swing exception"
 
 
 def test_compute_tp1_fvg_exception_uses_near_edge():
-    fvg_zones = [{"direction": "BULLISH", "bottom": 109.0, "top": 111.0, "index": 0}]
+    fvg_zones = [{"direction": "BULLISH", "bottom": 117.0, "top": 119.0, "index": 0}]
     tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=fvg_zones, swing_prices=[])
-    assert tp1 == 109.0  # near edge (bottom) for a BUY
+    assert tp1 == 117.0  # near edge (bottom) for a BUY, inside [1.6R, 2.0R)
     assert basis == "FVG/swing exception"
 
 
 def test_compute_tp1_ignores_candidates_outside_the_window():
-    swing_prices = [107.0]  # 0.7R -- below the 0.8R floor
+    swing_prices = [114.0]  # 1.4R -- below the 1.6R floor
     tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=swing_prices)
-    assert tp1 == 110.0
-    assert basis == "1.0R"
+    assert tp1 == 120.0
+    assert basis == "2.0R"
 
 
 def test_compute_tp2_uses_nearest_level_ahead():
@@ -564,9 +564,9 @@ def test_compute_tp2_uses_nearest_level_ahead():
     assert from_level is True
 
 
-def test_compute_tp2_falls_back_to_1_8r_without_a_level():
+def test_compute_tp2_falls_back_to_3r_without_a_level():
     tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[])
-    assert tp2 == 118.0
+    assert tp2 == 130.0   # 3.0R fallback
     assert from_level is False
 
 
@@ -575,10 +575,10 @@ def test_compute_tp2_rejects_a_pooled_level_between_entry_and_tp1():
     merely 'ahead of entry' can land BETWEEN entry and TP1, which would
     make TP2 trigger before TP1 in real price action. Confirmed against
     live AUDUSD/JP225 alerts where TP1 ended up farther from entry than
-    both TP2 and TP3. 105 is ahead of entry (100) but not ahead of TP1
-    (110) -- it must be rejected, falling back to the 1.8R raw target."""
-    tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[105.0], tp1_price=110.0)
-    assert tp2 == 118.0
+    both TP2 and TP3. 110 is ahead of entry (100) but not ahead of TP1
+    (120) -- it must be rejected, falling back to the 3.0R raw target."""
+    tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[110.0], tp1_price=120.0)
+    assert tp2 == 130.0
     assert from_level is False
 
 
@@ -589,8 +589,8 @@ def test_compute_tp2_accepts_a_pooled_level_beyond_tp1():
 
 
 def test_compute_tp2_sell_rejects_a_pooled_level_between_entry_and_tp1():
-    tp2, from_level = strat.compute_tp2("SELL", entry=100.0, risk=10.0, levels=[95.0], tp1_price=90.0)
-    assert tp2 == 82.0  # 1.8R fallback: 100 - 18
+    tp2, from_level = strat.compute_tp2("SELL", entry=100.0, risk=10.0, levels=[90.0], tp1_price=80.0)
+    assert tp2 == 70.0  # 3.0R fallback: 100 - 30
     assert from_level is False
 
 
@@ -601,19 +601,19 @@ def test_compute_tp2_sell_accepts_a_pooled_level_beyond_tp1():
 
 
 def test_compute_tp3_prefers_whichever_is_nearer_entry():
-    # raw 2.8R = 128; an external level at 150 is farther than raw -> raw wins.
-    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=108.0, levels=[150.0])
-    assert tp3 == 128.0
+    # raw 4.0R = 140; an external level at 150 is farther than raw -> raw wins.
+    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=132.0, levels=[150.0])
+    assert tp3 == 140.0
     assert from_level is False
-    # an external level at 120 is nearer than raw -> external wins.
-    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=108.0, levels=[120.0])
-    assert tp3 == 120.0
+    # an external level at 135 is nearer than raw -> external wins.
+    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=132.0, levels=[135.0])
+    assert tp3 == 135.0
     assert from_level is True
 
 
-def test_compute_tp3_falls_back_to_2_8r_without_an_external_level():
-    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=108.0, levels=[])
-    assert tp3 == 128.0
+def test_compute_tp3_falls_back_to_4r_without_an_external_level():
+    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=132.0, levels=[])
+    assert tp3 == 140.0
     assert from_level is False
 
 
@@ -632,16 +632,17 @@ def test_worked_example_us100_long():
     assert risk == 60.0
 
     tp1, _ = strat.compute_tp1("BUY", entry, risk, fvg_zones=[], swing_prices=[])
-    assert tp1 == 26960.0
+    assert tp1 == 27020.0   # entry + 2.0R (2:1 first target)
 
-    tp2_with_pdh, from_level = strat.compute_tp2("BUY", entry, risk, levels=[27010.0])
-    assert tp2_with_pdh == 27010.0 and from_level is True
+    # A pooled level beyond TP1 (27020) caps TP2 there; else the 3.0R fallback.
+    tp2_with_pdh, from_level = strat.compute_tp2("BUY", entry, risk, levels=[27050.0], tp1_price=tp1)
+    assert tp2_with_pdh == 27050.0 and from_level is True
     tp2_fallback, from_level = strat.compute_tp2("BUY", entry, risk, levels=[])
-    assert tp2_fallback == 27008.0 and from_level is False
+    assert tp2_fallback == 27080.0 and from_level is False   # entry + 3.0R
 
     # "nearer than external level" -- no external level beyond TP2 in this example.
     tp3, from_level = strat.compute_tp3("BUY", entry, risk, tp2_price=tp2_with_pdh, levels=[])
-    assert tp3 == 27068.0
+    assert tp3 == 27140.0   # entry + 4.0R
     assert from_level is False
 
 
@@ -659,10 +660,10 @@ def test_worked_example_eurusd_long():
     assert round(risk, 5) == 0.00260
 
     tp1, _ = strat.compute_tp1("BUY", entry, risk, fvg_zones=[], swing_prices=[])
-    assert round(tp1, 5) == 1.17960
+    assert round(tp1, 5) == 1.18220   # entry + 2.0R
 
     tp3, from_level = strat.compute_tp3("BUY", entry, risk, tp2_price=entry, levels=[])
-    assert round(tp3, 5) == 1.18428
+    assert round(tp3, 5) == 1.18740   # entry + 4.0R
     assert from_level is False
 
 

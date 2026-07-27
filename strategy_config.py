@@ -148,11 +148,14 @@ ROUND_NUMBER_OFFSET_TABLE = {
     "A50":    (50, 5),
 }
 
-TP1_R_MULT = 1.0
-TP1_EXCEPTION_MIN_R = 0.8            # an unfilled FVG/minor swing in [0.8R, 1.0R) overrides raw TP1
-TP1_EXCEPTION_MAX_R = 1.0
-TP2_R_MULT = 1.8                     # fallback when no liquidity level sits beyond TP1
-TP3_R_MULT = 2.8                     # fallback (also the ceiling vs. any external level beyond TP2)
+# TP1 raised to a 2:1 reward-to-risk first target (per "How to Find the
+# Perfect Entry" -- the first meaningful target should justify the risk).
+# TP2/TP3 fallbacks bumped above it so the three targets stay ordered.
+TP1_R_MULT = 2.0
+TP1_EXCEPTION_MIN_R = 1.6            # an unfilled FVG/minor swing in [1.6R, 2.0R) overrides raw TP1
+TP1_EXCEPTION_MAX_R = 2.0
+TP2_R_MULT = 3.0                     # fallback when no liquidity level sits beyond TP1
+TP3_R_MULT = 4.0                     # fallback (also the ceiling vs. any external level beyond TP2)
 
 PENDING_ORDER_MAX_MINUTES = 90       # 6 x M15 bars unfilled -> cancel (EXPIRED)
 
