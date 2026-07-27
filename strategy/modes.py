@@ -27,7 +27,7 @@ class ModeConfig(NamedTuple):
 
 STANDARD = ModeConfig(
     name="standard",
-    entry_timeframe="1h",   # Strategy v3.2 — H1 analysis timeframe
+    entry_timeframe="15min",
     scan_interval_minutes=cfg.SCAN_INTERVAL_MINUTES,
     watch_min_score=cfg.WATCH_MIN_SCORE,
     aplus_min_score=cfg.APLUS_MIN_SCORE,

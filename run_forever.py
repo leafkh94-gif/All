@@ -149,7 +149,9 @@ def status_text():
     if open_trades:
         lines.append("Open trades:")
         for inst, t in open_trades.items():
-            if t.get("tp1_hit"):
+            if t.get("tp2_hit"):
+                stage = "past TP2, runner targeting TP3"
+            elif t.get("tp1_hit"):
                 stage = "past TP1, targeting TP2"
             else:
                 stage = "before TP1"

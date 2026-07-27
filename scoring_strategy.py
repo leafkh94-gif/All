@@ -431,11 +431,9 @@ def compute_entry(leg_origin, leg_end, direction, fvg_zones=None):
 
 
 def compute_stop(leg_origin, direction, atr_value, spread, instrument):
-    """v3.2 §7.1 -- buffer = max(1.0xATR, 3xspread) behind the structural
-    anchor (leg_origin), then an anti-stop-hunt push of an extra 0.15xATR if
-    that lands within the instrument's round-number proximity threshold. The
-    entry-to-stop distance is separately clamped into the allowed ATR band by
-    clamp_stop_distance() once the entry price is known."""
+    """§3 -- buffer = max(0.5xATR, 2xspread) behind leg_origin, then an
+    anti-stop-hunt push of an extra 0.15xATR if that lands within the
+    instrument's round-number proximity threshold."""
     buffer = max(cfg.SL_BUFFER_ATR_MULT * atr_value, cfg.SL_BUFFER_SPREAD_MULT * spread)
     stop = leg_origin - buffer if direction == "BUY" else leg_origin + buffer
 
@@ -448,33 +446,67 @@ def compute_stop(leg_origin, direction, atr_value, spread, instrument):
     return stop
 
 
-def clamp_stop_distance(entry, stop, direction, atr_value, instrument):
-    """v3.2 §7.1 step 3 -- pull the stop in / push it out so the entry-to-stop
-    distance sits inside [MIN_RISK_ATR_MULT x ATR, MAX_RISK_ATR_MULT x ATR]
-    (Bitcoin uses the tighter BTC ceiling). Keeps the R:R math sane without
-    ever flipping the stop to the wrong side of entry."""
-    max_mult = cfg.MAX_RISK_ATR_MULT_BTC if instrument == "BTCUSD" else cfg.MAX_RISK_ATR_MULT
-    lo = cfg.MIN_RISK_ATR_MULT * atr_value
-    hi = max_mult * atr_value
-    dist = abs(entry - stop)
-    if dist < lo:
-        dist = lo
-    elif dist > hi:
-        dist = hi
-    return entry - dist if direction == "BUY" else entry + dist
+def _tp1_exception_level(direction, entry, risk, fvg_zones, swing_prices):
+    """§4 TP1 exception -- an unfilled FVG (near edge) or a minor swing price
+    sitting in [entry + 0.8R, entry + 1.0R) (mirrored for shorts) overrides
+    the raw 1.0R target. Nearest-to-entry wins among qualifying candidates
+    (the most conservative partial-profit level)."""
+    if direction == "BUY":
+        lo, hi = entry + cfg.TP1_EXCEPTION_MIN_R * risk, entry + cfg.TP1_EXCEPTION_MAX_R * risk
+    else:
+        lo, hi = entry - cfg.TP1_EXCEPTION_MAX_R * risk, entry - cfg.TP1_EXCEPTION_MIN_R * risk
+
+    candidates = []
+    for z in (fvg_zones or []):
+        near_edge = z["bottom"] if direction == "BUY" else z["top"]
+        if lo <= near_edge < hi:
+            candidates.append(near_edge)
+    for price in swing_prices:
+        if lo <= price < hi:
+            candidates.append(price)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda p: abs(p - entry))
 
 
-def compute_tp1(direction, entry, risk):
-    """v3.2 §7.2 -- TP1 is a fixed 2R (twice the stop distance, a 1:2 reward)."""
-    tp = entry + cfg.TP1_R_MULT * risk if direction == "BUY" else entry - cfg.TP1_R_MULT * risk
-    return tp, "2.0R"
+def compute_tp1(direction, entry, risk, fvg_zones, swing_prices):
+    raw = entry + cfg.TP1_R_MULT * risk if direction == "BUY" else entry - cfg.TP1_R_MULT * risk
+    level = _tp1_exception_level(direction, entry, risk, fvg_zones, swing_prices)
+    if level is not None:
+        return level, "FVG/swing exception"
+    return raw, "1.0R"
 
 
-def compute_tp2(direction, entry, risk):
-    """v3.2 §7.2 -- TP2 is a fixed 3R (three times the stop distance, a 1:3
-    reward). No pooled-liquidity override and no third runner tier."""
-    tp = entry + cfg.TP2_R_MULT * risk if direction == "BUY" else entry - cfg.TP2_R_MULT * risk
-    return tp, "3.0R"
+def compute_tp2(direction, entry, risk, levels, tp1_price=None):
+    """§4 TP2 -- nearest pooled liquidity level beyond TP1 (not just beyond
+    entry) in the trade direction; falls back to entry + 1.8R if none
+    exists. tp1_price defaults to entry for callers that don't have it, but
+    every real caller must pass the actual computed TP1 -- pooled liquidity
+    levels are independent of the ATR-based R-multiples, so a level that is
+    merely "ahead of entry" can easily land BETWEEN entry and TP1, which
+    would make TP2 trigger before TP1 in real price action (a genuine
+    production bug, confirmed against live alerts where TP1 ended up
+    farther from entry than both TP2 and TP3)."""
+    raw = entry + cfg.TP2_R_MULT * risk if direction == "BUY" else entry - cfg.TP2_R_MULT * risk
+    floor = entry if tp1_price is None else tp1_price
+    ahead = [lvl for lvl in levels if (lvl > floor if direction == "BUY" else lvl < floor)]
+    if not ahead:
+        return raw, False
+    return (min(ahead), True) if direction == "BUY" else (max(ahead), True)
+
+
+def compute_tp3(direction, entry, risk, tp2_price, levels):
+    """§4 TP3 -- whichever is CLOSER to entry between the raw 2.8R target and
+    the next external level beyond TP2 (prior-week H/L or nearest H4 swing);
+    falls back to the raw target alone if no such external level exists."""
+    raw = entry + cfg.TP3_R_MULT * risk if direction == "BUY" else entry - cfg.TP3_R_MULT * risk
+    ahead = [lvl for lvl in levels if (lvl > tp2_price if direction == "BUY" else lvl < tp2_price)]
+    if not ahead:
+        return raw, False
+    external = min(ahead) if direction == "BUY" else max(ahead)
+    if abs(external - entry) < abs(raw - entry):
+        return external, True
+    return raw, False
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -517,18 +549,6 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
         if diagnostic:
             return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
                      "score": None, "htf_bias": htf, "blocked": "invalid ATR"}
-        return None
-
-    # v3.2 §8 — absolute volatility guard: ATR/price above the class ceiling
-    # (1.8% indices, 5% BTC) means the market is too wild for these structural
-    # stops. Hard-block before any scoring, like the counter-trend gate above.
-    price_now = float(df_entry["c"].iloc[-1])
-    atr_ratio_max = cfg.ATR_RATIO_MAX_BTC if instrument == "BTCUSD" else cfg.ATR_RATIO_MAX
-    if price_now > 0 and a / price_now > atr_ratio_max:
-        if diagnostic:
-            return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
-                     "score": None, "htf_bias": htf,
-                     "blocked": f"excessive volatility (ATR/price {a / price_now:.1%} > {atr_ratio_max:.1%})"}
         return None
 
     breakdown = {"pattern": candidate["pattern"], "pattern_quality": candidate["quality"]}
@@ -601,6 +621,11 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
                      "blocked": f"below WATCH threshold ({m.watch_min_score})"}
         return None
 
+    pdh = daily.get("high") if daily else None
+    pdl = daily.get("low") if daily else None
+    pwh = weekly.get("high") if weekly else None
+    pwl = weekly.get("low") if weekly else None
+
     leg = find_leg(market["entry"], direction)
     if leg is None:
         if diagnostic:
@@ -620,7 +645,6 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     # an error -- this degrades gracefully rather than blocking the setup).
     spread = market["entry"][-1].get("spread") or 0.0
     stop = compute_stop(leg_origin, direction, a, spread, instrument)
-    stop = clamp_stop_distance(entry, stop, direction, a, instrument)
     risk = abs(entry - stop)
     if risk <= 0:
         if diagnostic:
@@ -629,14 +653,34 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
                      "blocked": "non-positive risk (entry/stop construction failed)"}
         return None
 
-    # v3.2 §7.2 — two fixed R-multiple targets (1:2 and 1:3), no liquidity pool.
-    tp1, tp1_basis = compute_tp1(direction, entry, risk)
-    tp2, tp2_basis = compute_tp2(direction, entry, risk)
+    m15_swing_prices = [p for _, p in _swings(df_entry, "high" if direction == "BUY" else "low")]
+    tp1, tp1_basis = compute_tp1(direction, entry, risk, m15_fvg_zones, m15_swing_prices)
+
+    if instrument == "BTCUSD":
+        # No session structure for a 24/7 market -- PDH/PDL, Daily Open,
+        # Weekly Open, prior-week H/L instead of Asian/London/NY ranges.
+        d_open = market_sessions.daily_open(market["entry"], now_utc)
+        w_open = market_sessions.weekly_open(market["entry"], now_utc)
+        tp2_pool = [lvl for lvl in (pdh, pdl, d_open, w_open) if lvl is not None]
+    else:
+        asian_h, asian_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.ASIAN_SESSION)
+        london_h, london_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.LONDON_SESSION)
+        ny_h, ny_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.NY_SESSION)
+        tp2_pool = [lvl for lvl in (pdh, pdl, asian_h, asian_l, london_h, london_l, ny_h, ny_l) if lvl is not None]
+        tp2_pool += [z["price"] for z in eqh_eql_zones]
+    tp2, tp2_from_level = compute_tp2(direction, entry, risk, tp2_pool, tp1_price=tp1)
+
+    # TP3's "next external level" is universal (prior-week H/L + nearest H4
+    # swing), regardless of instrument class.
+    h4_swings = [p for _, p in _swings(_df(market["h4"]), "high" if direction == "BUY" else "low")]
+    tp3_pool = [lvl for lvl in (pwh, pwl) if lvl is not None] + h4_swings
+    tp3, tp3_from_level = compute_tp3(direction, entry, risk, tp2, tp3_pool)
 
     exits = {
         "entry_price": round(entry, 5), "stop_loss": round(stop, 5),
-        "tp1": round(tp1, 5), "tp2": round(tp2, 5), "tp3": None,
-        "entry_basis": entry_basis, "tp1_basis": tp1_basis, "tp2_basis": tp2_basis,
+        "tp1": round(tp1, 5), "tp2": round(tp2, 5), "tp3": round(tp3, 5),
+        "entry_basis": entry_basis, "tp1_basis": tp1_basis,
+        "tp2_capped": tp2_from_level, "tp3_capped": tp3_from_level,
         "leg_origin": round(leg_origin, 5), "leg_end": round(leg_end, 5),
     }
 

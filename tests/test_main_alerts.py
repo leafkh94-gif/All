@@ -177,15 +177,15 @@ def test_open_trade_tracker_stop_hit_before_tp1_closes_full_position(tmp_path, m
     assert entry["r_multiple"] == -1.0
 
 
-def test_open_trade_tracker_tp2_hit_after_tp1_closes_remainder(tmp_path, monkeypatch):
-    """v3.2 §7.2: after TP1 (half closed, SL at breakeven), reaching TP2 closes
-    the remaining half and completes the trade -- there is no third runner tier."""
+def test_open_trade_tracker_tp2_hit_moves_to_runner_phase_not_a_final_close(tmp_path, monkeypatch):
+    """v1.3 §5: TP2 closes 30% and moves SL to TP1 -- the remaining 20%
+    becomes a runner targeting TP3, it does NOT close the trade."""
     sent = []
     monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
     tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
-                 "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0}, now)
+                 "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "tp3": 5080.0}, now)
     tracker._data["US500"]["tp1_hit"] = True
     tracker._data["US500"]["stop_loss"] = 5000.0  # already at breakeven
     tracker._data["US500"]["locked_r"] = 1.0  # as if TP1 had already fired at 5040
@@ -196,10 +196,59 @@ def test_open_trade_tracker_tp2_hit_after_tp1_closes_remainder(tmp_path, monkeyp
 
     tracker.evaluate_all(now + dt.timedelta(minutes=30), FakeFeed())
     assert any("TP2 hit" in m for m in sent)
-    assert "US500" not in tracker._data  # trade complete after TP2
+    assert "US500" in tracker._data  # still open -- runner phase, not closed
+    assert tracker._data["US500"]["tp2_hit"] is True
+    assert tracker._data["US500"]["stop_loss"] == 5040.0  # moved to TP1
+    assert tracker._data["US500"]["locked_r"] == 1.9  # locked 1.0 + 0.3 * (60/20)
+    assert ma.load_json(tracker.trade_log_path).get("entries", []) == []  # not a final close yet
+
+
+def test_open_trade_tracker_tp3_hit_after_tp2_closes_runner(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
+    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
+                 "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "tp3": 5080.0}, now)
+    tracker._data["US500"]["tp1_hit"] = True
+    tracker._data["US500"]["tp2_hit"] = True
+    tracker._data["US500"]["stop_loss"] = 5040.0  # at TP1, as if TP2 already fired
+    tracker._data["US500"]["locked_r"] = 2.5
+
+    class FakeFeed:
+        def get_current_price(self, instrument):
+            return 5081.0  # price reached TP3
+
+    tracker.evaluate_all(now + dt.timedelta(minutes=45), FakeFeed())
+    assert any("TP3 hit" in m for m in sent)
+    assert "US500" not in tracker._data
     entry = ma.load_json(tracker.trade_log_path)["entries"][0]
-    assert entry["outcome"] == "tp2_complete"
-    assert entry["r_multiple"] == 2.5  # locked 1.0 + 0.5 * (60/20)
+    assert entry["outcome"] == "tp3_runner_complete"
+    assert entry["r_multiple"] == 3.3  # locked 2.5 + 0.2 * (80/20)
+
+
+def test_open_trade_tracker_runner_stopped_after_tp2(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
+    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
+    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
+    tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
+                 "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "tp3": 5080.0}, now)
+    tracker._data["US500"]["tp1_hit"] = True
+    tracker._data["US500"]["tp2_hit"] = True
+    tracker._data["US500"]["stop_loss"] = 5040.0  # at TP1
+    tracker._data["US500"]["locked_r"] = 2.5
+
+    class FakeFeed:
+        def get_current_price(self, instrument):
+            return 5039.0  # pulled back to the TP1-level runner stop
+
+    tracker.evaluate_all(now + dt.timedelta(minutes=45), FakeFeed())
+    assert any("runner stopped" in m for m in sent)
+    assert "US500" not in tracker._data
+    entry = ma.load_json(tracker.trade_log_path)["entries"][0]
+    assert entry["outcome"] == "runner_stopped"
+    assert entry["r_multiple"] == 2.9  # locked 2.5 + 0.2 * (40/20) at the TP1-level stop
 
 
 def test_open_trade_tracker_breakeven_stop_after_tp1_closes_remainder(tmp_path, monkeypatch):
@@ -290,7 +339,7 @@ def test_open_trade_tracker_session_cutoff_after_tp1_blends_locked_r(tmp_path, m
     assert "US500" not in tracker._data
 
 
-def test_active_entry_tracker_expires_after_8_hours(tmp_path, monkeypatch):
+def test_active_entry_tracker_expires_after_2_hours(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
     tracker = ma.ActiveEntryTracker(path=str(tmp_path / "entries.json"))
@@ -301,14 +350,15 @@ def test_active_entry_tracker_expires_after_8_hours(tmp_path, monkeypatch):
         def get_current_price(self, instrument):
             return 5050.0  # never touched the entry
 
-    tracker.evaluate_all(now + dt.timedelta(hours=8, minutes=1), FakeFeed())
+    tracker.evaluate_all(now + dt.timedelta(hours=2, minutes=1), FakeFeed())
     assert any("entry expired" in m for m in sent)
     assert "US500" not in tracker._data
 
 
-def test_active_entry_tracker_expiry_is_flat_8_hours_regardless_of_mode(monkeypatch):
-    """v3.2 §6.3: the pending-order EXPIRED timer is a flat 8 hours (setup
-    validity on H1) across every mode -- not mode/instrument-scaled."""
+def test_active_entry_tracker_expiry_is_flat_90_minutes_regardless_of_mode(monkeypatch):
+    """v1.3 Section 2: the pending-order EXPIRED timer is a flat 90 minutes
+    (6 x M15 bars) across every mode -- not mode/instrument-scaled like the
+    old system."""
     monkeypatch.setattr(ma, "send_telegram", lambda text: None)
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
 
@@ -320,15 +370,15 @@ def test_active_entry_tracker_expiry_is_flat_8_hours_regardless_of_mode(monkeypa
     with tempfile.TemporaryDirectory() as tmp:
         default_tracker = ma.ActiveEntryTracker(path=f"{tmp}/entries_default.json")
         default_tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0}, now)
-        default_tracker.evaluate_all(now + dt.timedelta(minutes=479), FakeFeed())
-        assert "US500" in default_tracker._data  # 8h expiry not yet reached
+        default_tracker.evaluate_all(now + dt.timedelta(minutes=89), FakeFeed())
+        assert "US500" in default_tracker._data  # 90-min expiry not yet reached
 
         fast_tracker = ma.ActiveEntryTracker(path=f"{tmp}/entries_fast.json")
         fast_tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0}, now)
-        fast_tracker.evaluate_all(now + dt.timedelta(minutes=479), FakeFeed(), mode=modes.FAST)
-        assert "US500" in fast_tracker._data  # same flat 8h expiry under fast mode too
+        fast_tracker.evaluate_all(now + dt.timedelta(minutes=89), FakeFeed(), mode=modes.FAST)
+        assert "US500" in fast_tracker._data  # same flat 90-min expiry under fast mode too
 
-        default_tracker.evaluate_all(now + dt.timedelta(minutes=481), FakeFeed())
+        default_tracker.evaluate_all(now + dt.timedelta(minutes=91), FakeFeed())
         assert "US500" not in default_tracker._data
 
 
@@ -347,7 +397,7 @@ def test_build_market_fast_mode_requests_5min_entry():
     assert requested.get("15min", 0) == 1
 
 
-def test_build_market_defaults_to_1h_entry():
+def test_build_market_defaults_to_15min_entry():
     requested = {}
 
     class FakeFeed:
@@ -356,7 +406,7 @@ def test_build_market_defaults_to_1h_entry():
             return []
 
     ma.build_market(FakeFeed(), "US500")
-    assert "1h" in requested   # Strategy v3.2 — H1 analysis timeframe
+    assert "15min" in requested
 
 
 def test_load_active_mode_defaults_to_standard_with_no_state_file(tmp_path):
@@ -379,7 +429,7 @@ def test_load_active_mode_falls_back_on_invalid_name(tmp_path):
 def test_format_aplus_alert_contains_partial_tp_guidance():
     scored = {
         "instrument": "US500", "direction": "BUY", "entry_price": 5420.0,
-        "stop_loss": 5398.0, "tp1": 5464.0, "tp2": 5508.0, "tp3": None,
+        "stop_loss": 5398.0, "tp1": 5464.0, "tp2": 5508.0, "tp3": 5552.0,
         "score": 82, "htf_bias": "TRENDING_UP",
         "breakdown": {"pattern": "LIQUIDITY_SWEEP_BOS", "pdh_pdl": "PDH"},
     }
@@ -387,8 +437,7 @@ def test_format_aplus_alert_contains_partial_tp_guidance():
     body = ma.format_aplus_alert(scored, now)
     assert "A+ SIGNAL — US500" in body
     assert "SL to breakeven" in body
-    assert "5508.0" in body   # TP2 shown
-    assert "TP3" not in body  # v3.2 has only two targets
+    assert "5552.0" in body  # TP3 shown
     assert "18:30" in body
 
 
@@ -618,80 +667,11 @@ def test_no_pattern_blocked_message_includes_bars_diagnostic():
     assert "data problem" in blocked
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Strategy v3.2 — adaptive A+ threshold, alert budget/spacing, fixed news
-# ─────────────────────────────────────────────────────────────────────
-def test_adaptive_aplus_threshold_defaults_to_base_when_no_history():
-    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
-    assert ma.adaptive_aplus_threshold({}, now) == ma.cfg.APLUS_BASE_SCORE
-
-
-def test_adaptive_aplus_threshold_eases_after_quiet_days():
-    now = dt.datetime(2026, 7, 10, 12, 0, tzinfo=dt.timezone.utc)
-    # last signal 5 days ago -> 2 days past the 3-day grace -> -2 x 2 = -4.
-    state = {"last_signal_date": dt.datetime(2026, 7, 5, 12, 0, tzinfo=dt.timezone.utc).isoformat()}
-    assert ma.adaptive_aplus_threshold(state, now) == ma.cfg.APLUS_BASE_SCORE - 4
-
-
-def test_adaptive_aplus_threshold_floors_at_min():
-    now = dt.datetime(2026, 8, 1, 12, 0, tzinfo=dt.timezone.utc)
-    state = {"last_signal_date": dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc).isoformat()}
-    assert ma.adaptive_aplus_threshold(state, now) == ma.cfg.APLUS_MIN_FLOOR
-
-
-def test_adaptive_aplus_threshold_rises_on_busy_day_and_caps():
-    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
-    # 10 signals already today -> well past the busy trigger -> capped at 90.
-    state = {"last_signal_date": now.isoformat(), "aplus_count": 5, "watch_count": 5}
-    assert ma.adaptive_aplus_threshold(state, now) == ma.cfg.APLUS_MAX_CAP
-
-
-def test_instrument_cooldown_blocks_within_window_and_clears_after():
-    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
-    state = {"last_alert_time_by_instrument": {"US500": now.isoformat()}}
-    assert ma.instrument_in_cooldown(state, "US500", now + dt.timedelta(hours=3)) is True
-    assert ma.instrument_in_cooldown(state, "US500", now + dt.timedelta(hours=5)) is False
-    assert ma.instrument_in_cooldown(state, "US100", now + dt.timedelta(hours=1)) is False
-
-
-def test_within_min_gap_between_any_alerts():
-    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
-    state = {"last_any_alert_time": now.isoformat()}
-    assert ma.within_min_gap(state, now + dt.timedelta(minutes=90)) is True
-    assert ma.within_min_gap(state, now + dt.timedelta(minutes=121)) is False
-    assert ma.within_min_gap({}, now) is False
-
-
-def test_record_alert_sent_updates_all_spacing_state():
-    now = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
-    state = {}
-    ma.record_alert_sent(state, "US500", now)
-    assert state["last_alert_time_by_instrument"]["US500"] == now.isoformat()
-    assert state["last_any_alert_time"] == now.isoformat()
-    assert state["last_signal_date"] == now.isoformat()
-
-
-def test_fixed_news_blackout_windows():
-    inside = dt.datetime(2026, 7, 1, 12, 30, tzinfo=dt.timezone.utc)   # inside 12:25-13:05
-    inside2 = dt.datetime(2026, 7, 1, 13, 40, tzinfo=dt.timezone.utc)  # inside 13:25-14:05
-    outside = dt.datetime(2026, 7, 1, 15, 0, tzinfo=dt.timezone.utc)
-    assert ma.fixed_news_blackout_active(inside) is True
-    assert ma.fixed_news_blackout_active(inside2) is True
-    assert ma.fixed_news_blackout_active(outside) is False
-
-
-def test_daily_reset_zeroes_both_alert_counters():
-    state = {"aplus_count_date": "2026-06-30", "aplus_count": 4, "watch_count": 8}
-    ma.daily_reset_if_needed(state, dt.datetime(2026, 7, 1, 0, 5, tzinfo=dt.timezone.utc))
-    assert state["aplus_count"] == 0
-    assert state["watch_count"] == 0
-
-
 def test_format_aplus_alert_includes_timeframe_readout():
     scored = {
         "instrument": "US500", "direction": "BUY", "entry_price": 5420.0,
-        "stop_loss": 5398.0, "tp1": 5464.0, "tp2": 5508.0, "tp3": None,
-        "score": 84, "htf_bias": "TRENDING_UP",
+        "stop_loss": 5398.0, "tp1": 5464.0, "tp2": 5508.0, "tp3": 5552.0,
+        "score": 78, "htf_bias": "TRENDING_UP",
         "breakdown": {"pattern": "LIQUIDITY_SWEEP_BOS", "pdh_pdl": "PDH"},
         "timeframes": {"15m": {"trend": "up", "agree": "aligned"},
                         "1h": {"trend": "up", "agree": "aligned"},
@@ -700,12 +680,11 @@ def test_format_aplus_alert_includes_timeframe_readout():
     body = ma.format_aplus_alert(scored, dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc))
     assert "Timeframes vs BUY" in body
     assert "15m" in body and "aligned" in body
-    assert "4h" in body
 
 
 def test_format_watch_alert_includes_timeframe_readout():
     scored = {
-        "instrument": "US500", "direction": "SELL", "entry_price": 5400.0, "score": 74,
+        "instrument": "US500", "direction": "SELL", "entry_price": 5400.0, "score": 66,
         "timeframes": {"15m": {"trend": "down", "agree": "aligned"},
                         "1h": {"trend": "up", "agree": "against"},
                         "4h": {"trend": "down", "agree": "aligned"}},
@@ -716,6 +695,6 @@ def test_format_watch_alert_includes_timeframe_readout():
 
 
 def test_format_alert_without_timeframes_omits_section():
-    scored = {"instrument": "US500", "direction": "BUY", "entry_price": 5400.0, "score": 74}
+    scored = {"instrument": "US500", "direction": "BUY", "entry_price": 5400.0, "score": 66}
     body = ma.format_watch_alert(scored, dt.datetime(2026, 7, 1, 16, 0, tzinfo=dt.timezone.utc))
     assert "Timeframes" not in body

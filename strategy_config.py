@@ -45,14 +45,6 @@ US_INDEX_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "US_I
 CRYPTO_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "CRYPTO"]
 
 # ─────────────────────────────────────────────────────────────────────
-# Instruments the bot actively scans. v3.2's scoring/entry/SL/TP logic runs
-# on ALL of them (not just the doc's four headline instruments) — the full
-# monitored list is intentionally kept. Edit this list to add/drop what the
-# bot watches; every symbol here must exist in INSTRUMENTS above.
-# ─────────────────────────────────────────────────────────────────────
-ACTIVE_INSTRUMENTS = list(INSTRUMENTS.keys())
-
-# ─────────────────────────────────────────────────────────────────────
 # 1.2  Architecture
 # ─────────────────────────────────────────────────────────────────────
 SCAN_INTERVAL_MINUTES = 15
@@ -112,46 +104,15 @@ WHALE_FLOW_SIGNIFICANT_BTC = 50.0     # netflow must clear this (in BTC) to coun
 WHALE_FLOW_BONUS = 8
 
 # ─────────────────────────────────────────────────────────────────────
-# 1.4  Alert thresholds (Strategy v3.2 — WATCH >= 72, A+ >= 82)
+# 1.4  Alert thresholds
 # ─────────────────────────────────────────────────────────────────────
-NO_ALERT_MAX = 71          # score < 72 -> no alert
-WATCH_MIN_SCORE = 72
-WATCH_MAX_SCORE = 81
-APLUS_MIN_SCORE = 82
-
-# Adaptive A+ threshold (v3.2 §2.1): starts at APLUS_BASE_SCORE, drops
-# APLUS_QUIET_STEP points for each day of silence beyond APLUS_QUIET_DAYS
-# (floored at APLUS_MIN_FLOOR), and rises APLUS_BUSY_STEP per extra signal
-# on busy days (capped at APLUS_MAX_CAP). Goal: never go quiet for weeks in
-# a calm market, never flood in an active one. WATCH stays fixed at 72.
-APLUS_BASE_SCORE = 82
-APLUS_MIN_FLOOR = 68
-APLUS_MAX_CAP = 90
-APLUS_QUIET_DAYS = 3          # days with no signal before the threshold starts easing
-APLUS_QUIET_STEP = 2         # points shaved per quiet day past APLUS_QUIET_DAYS
-APLUS_BUSY_SIGNALS = 3       # today's alert count at/above this counts as a "busy" day
-APLUS_BUSY_STEP = 1          # points added per signal past APLUS_BUSY_SIGNALS
-
-# ─────────────────────────────────────────────────────────────────────
-# 1.4b  Daily alert budget / spacing (v3.2 §2.2)
-# ─────────────────────────────────────────────────────────────────────
-MAX_APLUS_PER_DAY = 5
-MAX_WATCH_PER_DAY = 10
-INSTRUMENT_COOLDOWN_HOURS = 4      # per-instrument quiet window after any alert on it
-MIN_MINUTES_BETWEEN_ALERTS = 120   # >= 2h between ANY two alerts, whatever the instrument
+NO_ALERT_MAX = 61          # score < 62 -> no alert
+WATCH_MIN_SCORE = 62
+WATCH_MAX_SCORE = 74
+APLUS_MIN_SCORE = 75
 
 DAILY_LOSS_LIMIT_USD = 20.0   # self-reported via /loss; new WATCH/A+ alerts pause once hit
 DAILY_LOSS_BREAKER_DURATION_DAYS = 14   # trial window; breaker stops enforcing after this
-
-# Fixed news-blackout windows (v3.2 §8) — the two recurring UTC windows when
-# the highest-impact US macro releases (08:30 ET data, 14:00 UTC events)
-# cluster. Deliberately time-fixed, not tied to a live calendar (that
-# limitation is acknowledged in the strategy doc). Complements the reactive
-# RSS feed and the predictive economic_calendar module, which stay active.
-NEWS_FIXED_BLACKOUT_WINDOWS = [
-    ((12, 25), (13, 5)),
-    ((13, 25), (14, 5)),
-]
 
 # ─────────────────────────────────────────────────────────────────────
 # 1.5  Entry & exit logic (Entry/SL/TP Selection Rules v1.3 — BOS-based leg
@@ -164,15 +125,8 @@ ENTRY_RETRACE_PCT = 0.50             # limit entry at 50% of the leg
 ENTRY_FVG_ZONE_MIN_PCT = 0.40        # FVG-midpoint entry override zone (fraction retraced from leg_end)
 ENTRY_FVG_ZONE_MAX_PCT = 0.62
 
-SL_BUFFER_ATR_MULT = 1.0             # v3.2 §7.1: buffer = max(1.0 x ATR, 3 x spread) behind the structural anchor
-SL_BUFFER_SPREAD_MULT = 3.0
-# v3.2 §7.1 step 3 — clamp the final entry-to-stop distance into an allowed
-# band so the stop is neither so tight that normal wobble takes it out, nor
-# so wide the R:R math collapses. Bitcoin gets a slightly tighter ceiling
-# (it already carries a much larger absolute ATR).
-MIN_RISK_ATR_MULT = 2.0
-MAX_RISK_ATR_MULT = 4.0
-MAX_RISK_ATR_MULT_BTC = 3.5
+SL_BUFFER_ATR_MULT = 0.5             # buffer = max(SL_BUFFER_ATR_MULT x ATR, SL_BUFFER_SPREAD_MULT x spread)
+SL_BUFFER_SPREAD_MULT = 2.0
 ROUND_NUMBER_OFFSET_ATR_MULT = 0.15  # extra push beyond a round-number collision
 # Per-instrument (round_multiple, proximity_threshold) for the SL anti-stop-hunt check.
 ROUND_NUMBER_OFFSET_TABLE = {
@@ -194,14 +148,13 @@ ROUND_NUMBER_OFFSET_TABLE = {
     "A50":    (50, 5),
 }
 
-# v3.2 §7.2 — two fixed R-multiple targets. TP1 = 2 x risk (1:2), TP2 = 3 x
-# risk (1:3). No pooled-liquidity override and no third runner tier: the doc
-# defines exactly two targets, close half at TP1 (SL -> breakeven) and the
-# rest at TP2.
-TP1_R_MULT = 2.0
-TP2_R_MULT = 3.0
+TP1_R_MULT = 1.0
+TP1_EXCEPTION_MIN_R = 0.8            # an unfilled FVG/minor swing in [0.8R, 1.0R) overrides raw TP1
+TP1_EXCEPTION_MAX_R = 1.0
+TP2_R_MULT = 1.8                     # fallback when no liquidity level sits beyond TP1
+TP3_R_MULT = 2.8                     # fallback (also the ceiling vs. any external level beyond TP2)
 
-PENDING_ORDER_MAX_MINUTES = 480      # v3.2 §6.3: setup validity = 8 hours on H1
+PENDING_ORDER_MAX_MINUTES = 90       # 6 x M15 bars unfilled -> cancel (EXPIRED)
 
 HARD_FLAT_UTC_HOUR = 18
 HARD_FLAT_UTC_MINUTE = 30           # no new entry alerts after 18:30 UTC (instruments with session_cutoff on)
@@ -234,8 +187,8 @@ INSTRUMENT_PROFILES = {
 # ─────────────────────────────────────────────────────────────────────
 WATCH_EXPIRY_HOURS = 4
 WATCH_UPDATE_INTERVAL_MINUTES = 45
-WATCH_UPGRADE_SCORE = APLUS_MIN_SCORE   # score >= 82 -> upgrade to A+
-WATCH_COLLAPSE_SCORE = 65               # score < 65 -> pattern collapsed, cancel (below the 72 WATCH floor)
+WATCH_UPGRADE_SCORE = APLUS_MIN_SCORE   # score >= 75 -> upgrade to A+
+WATCH_COLLAPSE_SCORE = 55               # score < 55 -> pattern collapsed, cancel
 
 # ─────────────────────────────────────────────────────────────────────
 # 4.  Health check
@@ -283,17 +236,10 @@ ATR_HIGH_PERCENTILE = 80    # > 80th percentile -> too volatile (lowered from 90
 ATR_DEAD_MARKET_PENALTY = -10
 ATR_TOO_VOLATILE_PENALTY = -10
 
-# v3.2 §8 — absolute volatility guard. If ATR(14) / price exceeds this ratio
-# the market is too wild for the structural stops to make sense, so the
-# opportunity is cancelled outright (a hard block, not a score penalty).
-# Bitcoin runs a much wider band than the indices.
-ATR_RATIO_MAX = 0.018       # 1.8% for the indices
-ATR_RATIO_MAX_BTC = 0.05    # 5% for Bitcoin
-
 # ─────────────────────────────────────────────────────────────────────
 # 6.  Entry expiry
 # ─────────────────────────────────────────────────────────────────────
-ENTRY_EXPIRY_HOURS = 8   # v3.2 §6.3 setup validity
+ENTRY_EXPIRY_HOURS = 2
 
 # ─────────────────────────────────────────────────────────────────────
 # 9.1  Core principles
