@@ -474,7 +474,7 @@ def compute_tp1(direction, entry, risk, fvg_zones, swing_prices):
     level = _tp1_exception_level(direction, entry, risk, fvg_zones, swing_prices)
     if level is not None:
         return level, "FVG/swing exception"
-    return raw, "1.0R"
+    return raw, f"{cfg.TP1_R_MULT:.1f}R"
 
 
 def compute_tp2(direction, entry, risk, levels, tp1_price=None):
