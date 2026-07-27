@@ -215,9 +215,9 @@ def test_score_candidate_skipped_when_no_bos_confirmed():
     assert diag["blocked"] == "no confirmed BOS in recent history"
 
 
-def test_score_candidate_emits_two_fixed_r_targets():
-    """v3.2 integration check: score_candidate emits exactly two targets, TP1
-    at 2R and TP2 at 3R off the (clamped) risk, and no third runner tier."""
+def test_score_candidate_wires_pooled_tp2_level():
+    """Integration check: score_candidate threads a real level-store PDH
+    into the TP2 pool and caps TP2 there, ahead of the raw 1.8R fallback."""
     market = {
         "entry": make_candles(80, start_price=100.0, noise=0.3),
         "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
@@ -227,19 +227,25 @@ def test_score_candidate_emits_two_fixed_r_targets():
                  "sweep_price": 100.0, "quality": 38}
     import contextlib
     import datetime as dt
+
+    class _Store:
+        def get_daily_levels(self, instrument):
+            return {"high": 108.0, "low": 90.0}
+
+        def get_weekly_levels(self, instrument):
+            return None
+
     with contextlib.ExitStack() as stack:
         _patch_qualifying_stack(stack)
         result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market,
-            dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc), _fake_level_store())
+            dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc), _Store())
     assert result is not None
-    assert result["tp3"] is None
-    assert result["tp1_basis"] == "2.0R"
-    assert result["tp2_basis"] == "3.0R"
-    entry, stop = result["entry_price"], result["stop_loss"]
-    risk = abs(entry - stop)
-    assert abs(result["tp1"] - (entry + 2 * risk)) < 1e-3
-    assert abs(result["tp2"] - (entry + 3 * risk)) < 1e-3
+    # leg_origin=95, leg_end=100.5 (mocked) -> entry=97.75, well below PDH=108,
+    # and the raw 1.8R target from that entry/risk is nowhere near 108 either
+    # -- PDH still ends up nearest and caps TP2.
+    assert result["tp2_capped"] is True
+    assert result["tp2"] == 108.0
 
 
 def test_diagnostic_mode_qualifying_result_survives_main_alerts_diagnostics_dict():
@@ -267,30 +273,6 @@ def test_diagnostic_mode_qualifying_result_survives_main_alerts_diagnostics_dict
     diagnostic_entry = {"pattern": scored["pattern"], "direction": scored["direction"],
                          "score": scored["score"], "blocked": scored["blocked"]}
     assert diagnostic_entry["pattern"] == "LIQUIDITY_SWEEP_BOS"
-
-
-def test_score_candidate_blocks_on_excessive_volatility():
-    """v3.2 §8: ATR/price above the class ceiling (1.8% for indices) is a hard
-    block before any scoring -- the market is too wild for structural stops."""
-    import contextlib
-    import datetime as dt
-    import pandas as pd
-    market = {
-        "entry": make_candles(80, start_price=100.0, noise=0.3),
-        "h1": make_candles(160, start_price=100.0, noise=0.3, interval_minutes=60),
-        "h4": trending_h4_candles(up=True),
-    }
-    candidate = {"pattern": "LIQUIDITY_SWEEP_BOS", "direction": "BUY",
-                 "sweep_price": 100.0, "quality": 38}
-    now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
-    with contextlib.ExitStack() as stack:
-        _patch_qualifying_stack(stack)
-        # ATR ~5 on a ~100 price = 5% -> above the 1.8% index ceiling.
-        stack.enter_context(patch.object(strat.ind, "atr", return_value=pd.Series([5.0] * 80)))
-        result = strat.score_candidate(
-            "US500", "US_INDEX", candidate, market, now, _fake_level_store(), diagnostic=True)
-    assert result["score"] is None
-    assert "volatility" in result["blocked"]
 
 
 def _ranging_market(quality):
@@ -335,7 +317,7 @@ def test_score_candidate_diagnostic_blocked_message_reflects_mode_threshold():
         loose_result = strat.score_candidate(
             "US500", "US_INDEX", candidate, market, now, _fake_level_store(),
             diagnostic=True, mode=modes.LOOSE)
-    assert "72" in default_result["blocked"]
+    assert "62" in default_result["blocked"]
     assert "55" in loose_result["blocked"]
 
 
@@ -521,71 +503,122 @@ def test_compute_entry_ignores_fvg_not_fully_inside_the_leg():
 
 
 def test_compute_stop_us100_worked_example():
-    """v3.2 §7.1: sweep low 26,850, ATR=20, spread=2 -> buffer=max(20,6)=20 ->
-    SL=26,830 (nearest 100-multiple is 26,800, 30pts away -> no round offset)."""
+    """Spec v1.3 worked example: sweep low 26,850, ATR=20, spread=2 ->
+    buffer=max(10,4)=10 -> SL=26,840 (no round-number collision)."""
     stop = strat.compute_stop(26850.0, "BUY", atr_value=20.0, spread=2.0, instrument="US100")
-    assert stop == 26830.0
+    assert stop == 26840.0
 
 
 def test_compute_stop_eurusd_worked_example():
-    """ATR=0.00120, spread=0.00006 -> buffer=max(0.00120,0.00018)=0.00120 ->
-    SL=1.17380; nearest 50-pip level (1.17500) is 12 pips away, clears the
-    3-pip round-number threshold."""
+    """ATR=0.00120, spread=0.00006 -> buffer=max(0.00060,0.00012)=0.00060 ->
+    SL=1.17440; round check vs 1.17500 (6 pips) clears the 3-pip threshold."""
     stop = strat.compute_stop(1.17500, "BUY", atr_value=0.00120, spread=0.00006, instrument="EURUSD")
-    assert round(stop, 5) == 1.17380
+    assert round(stop, 5) == 1.17440
 
 
 def test_compute_stop_applies_round_number_offset_when_too_close():
     """US500: round multiple 50, proximity 3. A raw SL landing within 3 pts
     of a 50-multiple must get pushed an extra 0.15xATR further away."""
-    # leg_origin=5111, buffer=max(1.0*10,0)=10 -> raw stop=5101, only 1pt from
+    # leg_origin=5103, buffer=max(0.5*10,0)=5 -> raw stop=5098, only 2pts from
     # the nearest 50-multiple (5100) -- inside the 3pt threshold.
-    raw = 5111.0 - 10.0
-    assert raw == 5101.0
+    raw = 5103.0 - 5.0
+    assert raw == 5098.0
     nearest = round(raw / 50) * 50
     assert nearest == 5100
     assert abs(raw - nearest) <= 3  # confirms this scenario actually triggers the offset
 
-    stop = strat.compute_stop(5111.0, "BUY", atr_value=10.0, spread=0.0, instrument="US500")
+    stop = strat.compute_stop(5103.0, "BUY", atr_value=10.0, spread=0.0, instrument="US500")
     assert stop == raw - strat.cfg.ROUND_NUMBER_OFFSET_ATR_MULT * 10.0
 
 
-def test_clamp_stop_distance_widens_a_too_tight_stop():
-    # entry 100, stop 99 -> dist 1; min = 2xATR(2) = 4 -> stop pushed out to 96.
-    stop = strat.clamp_stop_distance(100.0, 99.0, "BUY", atr_value=2.0, instrument="US500")
-    assert stop == 96.0
+def test_compute_tp1_raw_one_r_without_exception_candidates():
+    tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=[])
+    assert tp1 == 110.0
+    assert basis == "1.0R"
 
 
-def test_clamp_stop_distance_tightens_a_too_wide_stop():
-    # entry 100, stop 80 -> dist 20; max = 4xATR(2) = 8 -> stop pulled in to 92.
-    stop = strat.clamp_stop_distance(100.0, 80.0, "BUY", atr_value=2.0, instrument="US500")
-    assert stop == 92.0
+def test_compute_tp1_swing_exception_inside_08_10_r_window():
+    swing_prices = [108.5]  # 0.85R from entry -- inside [0.8R, 1.0R)
+    tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=swing_prices)
+    assert tp1 == 108.5
+    assert basis == "FVG/swing exception"
 
 
-def test_clamp_stop_distance_btc_uses_tighter_ceiling():
-    # BTC max = 3.5xATR. entry 100, stop 60 -> dist 40; ATR 10 -> max 35 -> stop 65.
-    stop = strat.clamp_stop_distance(100.0, 60.0, "BUY", atr_value=10.0, instrument="BTCUSD")
-    assert stop == 65.0
+def test_compute_tp1_fvg_exception_uses_near_edge():
+    fvg_zones = [{"direction": "BULLISH", "bottom": 109.0, "top": 111.0, "index": 0}]
+    tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=fvg_zones, swing_prices=[])
+    assert tp1 == 109.0  # near edge (bottom) for a BUY
+    assert basis == "FVG/swing exception"
 
 
-def test_compute_tp1_is_two_r():
-    tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0)
-    assert tp1 == 120.0
-    assert basis == "2.0R"
-    tp1_sell, _ = strat.compute_tp1("SELL", entry=100.0, risk=10.0)
-    assert tp1_sell == 80.0
+def test_compute_tp1_ignores_candidates_outside_the_window():
+    swing_prices = [107.0]  # 0.7R -- below the 0.8R floor
+    tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=swing_prices)
+    assert tp1 == 110.0
+    assert basis == "1.0R"
 
 
-def test_compute_tp2_is_three_r():
-    tp2, basis = strat.compute_tp2("BUY", entry=100.0, risk=10.0)
-    assert tp2 == 130.0
-    assert basis == "3.0R"
-    tp2_sell, _ = strat.compute_tp2("SELL", entry=100.0, risk=10.0)
-    assert tp2_sell == 70.0
+def test_compute_tp2_uses_nearest_level_ahead():
+    tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[108.0, 115.0])
+    assert tp2 == 108.0
+    assert from_level is True
+
+
+def test_compute_tp2_falls_back_to_1_8r_without_a_level():
+    tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[])
+    assert tp2 == 118.0
+    assert from_level is False
+
+
+def test_compute_tp2_rejects_a_pooled_level_between_entry_and_tp1():
+    """Regression test for a real production bug: a pooled liquidity level
+    merely 'ahead of entry' can land BETWEEN entry and TP1, which would
+    make TP2 trigger before TP1 in real price action. Confirmed against
+    live AUDUSD/JP225 alerts where TP1 ended up farther from entry than
+    both TP2 and TP3. 105 is ahead of entry (100) but not ahead of TP1
+    (110) -- it must be rejected, falling back to the 1.8R raw target."""
+    tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[105.0], tp1_price=110.0)
+    assert tp2 == 118.0
+    assert from_level is False
+
+
+def test_compute_tp2_accepts_a_pooled_level_beyond_tp1():
+    tp2, from_level = strat.compute_tp2("BUY", entry=100.0, risk=10.0, levels=[112.0], tp1_price=110.0)
+    assert tp2 == 112.0
+    assert from_level is True
+
+
+def test_compute_tp2_sell_rejects_a_pooled_level_between_entry_and_tp1():
+    tp2, from_level = strat.compute_tp2("SELL", entry=100.0, risk=10.0, levels=[95.0], tp1_price=90.0)
+    assert tp2 == 82.0  # 1.8R fallback: 100 - 18
+    assert from_level is False
+
+
+def test_compute_tp2_sell_accepts_a_pooled_level_beyond_tp1():
+    tp2, from_level = strat.compute_tp2("SELL", entry=100.0, risk=10.0, levels=[88.0], tp1_price=90.0)
+    assert tp2 == 88.0
+    assert from_level is True
+
+
+def test_compute_tp3_prefers_whichever_is_nearer_entry():
+    # raw 2.8R = 128; an external level at 150 is farther than raw -> raw wins.
+    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=108.0, levels=[150.0])
+    assert tp3 == 128.0
+    assert from_level is False
+    # an external level at 120 is nearer than raw -> external wins.
+    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=108.0, levels=[120.0])
+    assert tp3 == 120.0
+    assert from_level is True
+
+
+def test_compute_tp3_falls_back_to_2_8r_without_an_external_level():
+    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=108.0, levels=[])
+    assert tp3 == 128.0
+    assert from_level is False
 
 
 def test_worked_example_us100_long():
-    """Strategy v3.2 acceptance test: US100 long, two fixed R-multiple targets."""
+    """Entry/SL/TP Selection Rules v1.3 acceptance test: US100 long."""
     leg_origin, leg_end = 26850.0, 26950.0
     atr_value, spread = 20.0, 2.0
 
@@ -594,19 +627,26 @@ def test_worked_example_us100_long():
     assert entry_basis == "50% leg retrace"
 
     stop = strat.compute_stop(leg_origin, "BUY", atr_value, spread, "US100")
-    stop = strat.clamp_stop_distance(entry, stop, "BUY", atr_value, "US100")
-    assert stop == 26830.0
+    assert stop == 26840.0
     risk = entry - stop
-    assert risk == 70.0  # 3.5xATR -- inside the [2,4]xATR band, unchanged by the clamp
+    assert risk == 60.0
 
-    tp1, tp1_basis = strat.compute_tp1("BUY", entry, risk)
-    assert tp1 == 27040.0 and tp1_basis == "2.0R"   # entry + 2R
-    tp2, tp2_basis = strat.compute_tp2("BUY", entry, risk)
-    assert tp2 == 27110.0 and tp2_basis == "3.0R"   # entry + 3R
+    tp1, _ = strat.compute_tp1("BUY", entry, risk, fvg_zones=[], swing_prices=[])
+    assert tp1 == 26960.0
+
+    tp2_with_pdh, from_level = strat.compute_tp2("BUY", entry, risk, levels=[27010.0])
+    assert tp2_with_pdh == 27010.0 and from_level is True
+    tp2_fallback, from_level = strat.compute_tp2("BUY", entry, risk, levels=[])
+    assert tp2_fallback == 27008.0 and from_level is False
+
+    # "nearer than external level" -- no external level beyond TP2 in this example.
+    tp3, from_level = strat.compute_tp3("BUY", entry, risk, tp2_price=tp2_with_pdh, levels=[])
+    assert tp3 == 27068.0
+    assert from_level is False
 
 
 def test_worked_example_eurusd_long():
-    """Strategy v3.2 acceptance test: EURUSD long."""
+    """Entry/SL/TP Selection Rules v1.3 acceptance test: EURUSD long."""
     leg_origin, leg_end = 1.17500, 1.17900
     atr_value, spread = 0.00120, 0.00006
 
@@ -614,15 +654,16 @@ def test_worked_example_eurusd_long():
     assert round(entry, 5) == 1.17700
 
     stop = strat.compute_stop(leg_origin, "BUY", atr_value, spread, "EURUSD")
-    stop = strat.clamp_stop_distance(entry, stop, "BUY", atr_value, "EURUSD")
-    assert round(stop, 5) == 1.17380
+    assert round(stop, 5) == 1.17440
     risk = entry - stop
-    assert round(risk, 5) == 0.00320  # 2.667xATR -- inside the band
+    assert round(risk, 5) == 0.00260
 
-    tp1, _ = strat.compute_tp1("BUY", entry, risk)
-    assert round(tp1, 5) == 1.18340   # entry + 2R
-    tp2, _ = strat.compute_tp2("BUY", entry, risk)
-    assert round(tp2, 5) == 1.18660   # entry + 3R
+    tp1, _ = strat.compute_tp1("BUY", entry, risk, fvg_zones=[], swing_prices=[])
+    assert round(tp1, 5) == 1.17960
+
+    tp3, from_level = strat.compute_tp3("BUY", entry, risk, tp2_price=entry, levels=[])
+    assert round(tp3, 5) == 1.18428
+    assert from_level is False
 
 
 def test_confirmation_closed_in_direction():

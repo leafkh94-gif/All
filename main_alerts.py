@@ -198,11 +198,10 @@ def _append_trade_log(entry, path=None):
 
 
 class OpenTradeTracker:
-    """v3.2 §7.2 post-fill management (two targets): TP1 (2R) -> close 50%,
-    SL to breakeven; TP2 (3R) -> close the remaining 50%, trade complete. If
-    price returns to the breakeven stop after TP1, the remainder is closed at
-    entry with the first half's profit already locked in. A one-time 18:00
-    UTC heads-up alert precedes the 18:30 UTC hard flat (every instrument,
+    """v1.3 §5 post-fill management: TP1 (50%, SL->breakeven), TP2 (30%,
+    SL->TP1), runner (20%, targets TP3, SL trails behind new confirmed M15
+    minor swings after TP2). A one-time 18:00 UTC heads-up alert precedes
+    the existing 18:30 UTC hard flat (which now applies to every instrument,
     BTCUSD included)."""
 
     def __init__(self, path=OPEN_TRADES_PATH, trade_log_path=None):
@@ -224,7 +223,9 @@ class OpenTradeTracker:
             "initial_risk": abs(entry_price - stop_loss),
             "tp1": scored["tp1"],
             "tp2": scored["tp2"],
+            "tp3": scored["tp3"],
             "tp1_hit": False,
+            "tp2_hit": False,
             "locked_r": 0.0,
             "warned_1800": False,
             "opened_at": now_utc.isoformat(),
@@ -238,6 +239,24 @@ class OpenTradeTracker:
             "instrument": instrument, "pattern": t.get("pattern"), "direction": t["direction"],
             "outcome": outcome, "r_multiple": round(r_multiple, 2), "closed_at": now_utc.isoformat(),
         }, path=self.trade_log_path)
+
+    def _maybe_trail_runner_stop(self, instrument, t, feed):
+        """Runner-phase (post-TP2) optional trail: move SL to the most
+        recent confirmed M15 minor swing in the trade's favor, but only
+        ever toward price, never away from it."""
+        candles = feed.get_candles(instrument, "15min", n=30)
+        if not candles or len(candles) < 6:
+            return
+        df = pd.DataFrame(candles)
+        is_buy = t["direction"] == "BUY"
+        swings = strat._swings(df, "low" if is_buy else "high", window=2)
+        if not swings:
+            return
+        _, latest_swing_price = swings[-1]
+        better = (latest_swing_price > t["stop_loss"]) if is_buy else (latest_swing_price < t["stop_loss"])
+        if better:
+            t["stop_loss"] = float(latest_swing_price)
+            save_json(self.path, self._data)
 
     def evaluate_all(self, now_utc, feed, mode=None):
         for instrument, t in list(self._data.items()):
@@ -267,15 +286,21 @@ class OpenTradeTracker:
                     self._close(instrument, t, now_utc, "stop_before_tp1", r)
                     send_telegram(f"🛑 {instrument} stop loss hit @ {t['stop_loss']}. Full position closed.")
                     closed_this_cycle = True
-            else:
+            elif not t["tp2_hit"]:
                 hit_tp2 = price >= t["tp2"] if is_buy else price <= t["tp2"]
                 hit_be = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
                 if hit_tp2:
-                    r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp2"])
-                    self._close(instrument, t, now_utc, "tp2_complete", r)
-                    send_telegram(f"✅ {instrument} TP2 hit @ {t['tp2']}. Close the remaining position — trade complete.")
-                    closed_this_cycle = True
-                elif hit_be:
+                    t["tp2_hit"] = True
+                    t["locked_r"] += 0.3 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp2"])
+                    t["stop_loss"] = t["tp1"]
+                    save_json(self.path, self._data)
+                    send_telegram(
+                        f"🎯 {instrument} TP2 hit @ {t['tp2']}.\n"
+                        f"Close 30% of the position now.\n"
+                        f"Stop loss moved to TP1 ({t['tp1']}) on the runner (20%) — targeting TP3 ({t['tp3']})."
+                    )
+                    continue
+                if hit_be:
                     r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["stop_loss"])
                     self._close(instrument, t, now_utc, "breakeven_after_tp1", r)
                     send_telegram(
@@ -283,6 +308,21 @@ class OpenTradeTracker:
                         f"Remainder closed at entry — partial profit locked in."
                     )
                     closed_this_cycle = True
+            else:
+                hit_tp3 = price >= t["tp3"] if is_buy else price <= t["tp3"]
+                hit_runner_stop = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
+                if hit_tp3:
+                    r = t["locked_r"] + 0.2 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp3"])
+                    self._close(instrument, t, now_utc, "tp3_runner_complete", r)
+                    send_telegram(f"✅ {instrument} TP3 hit @ {t['tp3']}. Close the runner — trade complete.")
+                    closed_this_cycle = True
+                elif hit_runner_stop:
+                    r = t["locked_r"] + 0.2 * _r_multiple(t["direction"], entry_price, initial_risk, t["stop_loss"])
+                    self._close(instrument, t, now_utc, "runner_stopped", r)
+                    send_telegram(f"🏁 {instrument} runner stopped @ {t['stop_loss']}. Trade complete.")
+                    closed_this_cycle = True
+                else:
+                    self._maybe_trail_runner_stop(instrument, t, feed)
 
             if closed_this_cycle:
                 continue
@@ -299,7 +339,10 @@ class OpenTradeTracker:
                 )
 
             if hard_flat_active(now_utc, instrument, mode=mode):
-                if t["tp1_hit"]:
+                if t["tp2_hit"]:
+                    r = t["locked_r"] + 0.2 * _r_multiple(t["direction"], entry_price, initial_risk, price)
+                    outcome = "session_cutoff_runner"
+                elif t["tp1_hit"]:
                     r = t["locked_r"] + 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, price)
                     outcome = "session_cutoff_after_tp1"
                 else:
@@ -370,22 +413,24 @@ def format_watch_alert(scored, expires_at, mode=None):
 def format_aplus_alert(scored, now_utc, mode=None):
     expiry = now_utc + timedelta(minutes=cfg.PENDING_ORDER_MAX_MINUTES)
     entry_basis = scored.get("entry_basis", "50% leg retrace")
-    tp1_basis = scored.get("tp1_basis", "2.0R")
-    tp2_basis = scored.get("tp2_basis", "3.0R")
+    tp1_basis = scored.get("tp1_basis", "1.0R")
+    tp2_note = "  (session/PDH-PDL level)" if scored.get("tp2_capped") else "  (1.8R fallback)"
+    tp3_note = "  (external level)" if scored.get("tp3_capped") else "  (2.8R fallback)"
     risk = abs(scored["entry_price"] - scored["stop_loss"])
     return (
         f"🟢 A+ SIGNAL — {scored['instrument']}\n\n"
         f"Direction:  {scored['direction']}\n"
         f"Entry:      {scored['entry_price']}  ({entry_basis})\n"
-        f"Stop Loss:  {scored['stop_loss']}  (behind structure + buffer)\n"
+        f"Stop Loss:  {scored['stop_loss']}  (behind sweep wick + buffer)\n"
         f"Risk (R):   {risk:g}\n"
         f"TP1:        {scored['tp1']}  ({tp1_basis})   ← close 50%, SL to breakeven\n"
-        f"TP2:        {scored['tp2']}  ({tp2_basis})   ← close the rest\n\n"
+        f"TP2:        {scored['tp2']}{tp2_note}   ← close 30%, SL to TP1\n"
+        f"TP3:        {scored['tp3']}{tp3_note}   ← runner 20%, trail after TP2\n\n"
         f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(cfg.PENDING_ORDER_MAX_MINUTES)})\n\n"
         f"📋 Reason: {scored['breakdown']['pattern']} at {_level_description(scored)}\n"
         f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}"
         f"{_format_timeframes(scored)}\n\n"
-        f"After TP1 → SL to breakeven, second half targets TP2.\n"
+        f"After TP1 → SL to breakeven. After TP2 → SL to TP1, runner (20%) targets TP3.\n"
         f"18:00 UTC → get ready to close manually. 18:30 UTC hard flat → close all remaining."
         f"{_correlation_tag(scored['instrument'])}"
     )
@@ -419,7 +464,7 @@ def maybe_record_daily_levels(feed, level_store, now_utc):
     today_key = now_utc.strftime("%Y-%m-%d")
     if now_utc.hour != 0:
         return
-    for instrument in cfg.ACTIVE_INSTRUMENTS:
+    for instrument in cfg.INSTRUMENTS:
         existing = level_store.get_daily_levels(instrument)
         if existing and existing.get("day_key") == today_key:
             continue
@@ -434,7 +479,7 @@ def maybe_record_weekly_levels(feed, level_store, now_utc):
     if now_utc.weekday() != 4 or now_utc.hour != 21:
         return
     week_key = now_utc.strftime("%G-W%V")
-    for instrument in cfg.ACTIVE_INSTRUMENTS:
+    for instrument in cfg.INSTRUMENTS:
         existing = level_store.get_weekly_levels(instrument)
         if existing and existing.get("week_key") == week_key:
             continue
@@ -464,9 +509,8 @@ def build_market(feed, instrument, mode=None):
 # Section 5.6 — 3-candle confirmation for pending A+ setups
 # ─────────────────────────────────────────────────────────────────────
 def evaluate_pending_confirmations(pending_store, feed, level_store, now_utc, entry_tracker, main_state,
-                                    mode=None, whale_transactions=None, aplus_threshold=None):
+                                    mode=None, whale_transactions=None):
     m = mode or modes.STANDARD
-    threshold = m.aplus_min_score if aplus_threshold is None else aplus_threshold
     for instrument, scored in list(pending_store.all().items()):
         market = build_market(feed, instrument, mode=m)
         last_closed = market["entry"][-1]
@@ -485,16 +529,10 @@ def evaluate_pending_confirmations(pending_store, feed, level_store, now_utc, en
                 confirmation_bonus=cfg.CONFIRMATION_CANDLE_BONUS, mode=m,
                 whale_transactions=whale_transactions)
 
-        # v3.2 §2.2 — respect the daily A+ cap, per-instrument cooldown and
-        # global min-gap at the actual send point (the confirmation cycle).
-        if (rescored and rescored["score"] >= threshold
-                and main_state.get("aplus_count", 0) < cfg.MAX_APLUS_PER_DAY
-                and not instrument_in_cooldown(main_state, instrument, now_utc)
-                and not within_min_gap(main_state, now_utc)):
+        if rescored and rescored["score"] >= m.aplus_min_score:
             send_telegram(format_aplus_alert(rescored, now_utc, mode=m))
             entry_tracker.add(rescored, now_utc)
             main_state["aplus_count"] = main_state.get("aplus_count", 0) + 1
-            record_alert_sent(main_state, instrument, now_utc)
         pending_store.remove(instrument)
 
 
@@ -586,77 +624,7 @@ def daily_reset_if_needed(main_state, now_utc):
     if main_state.get("aplus_count_date") != today_key:
         main_state["aplus_count_date"] = today_key
         main_state["aplus_count"] = 0
-        main_state["watch_count"] = 0
         main_state["daily_loss_total"] = 0.0
-
-
-# ─────────────────────────────────────────────────────────────────────
-# v3.2 §2.1 — adaptive A+ threshold. Base 82, shaved 2 points per quiet day
-# past a 3-day silence (floor 68), lifted 1 point per signal past 3 on a busy
-# day (cap 90). Keeps the bot from going dark for weeks in a calm market and
-# from flooding in an active one. WATCH stays fixed at 72.
-# ─────────────────────────────────────────────────────────────────────
-def adaptive_aplus_threshold(main_state, now_utc, base=None):
-    base = cfg.APLUS_BASE_SCORE if base is None else base
-    threshold = base
-
-    last_signal = main_state.get("last_signal_date")
-    if last_signal:
-        try:
-            quiet_days = (now_utc.date() - datetime.fromisoformat(last_signal).date()).days
-        except (TypeError, ValueError):
-            quiet_days = 0
-        if quiet_days > cfg.APLUS_QUIET_DAYS:
-            threshold -= cfg.APLUS_QUIET_STEP * (quiet_days - cfg.APLUS_QUIET_DAYS)
-
-    todays_signals = main_state.get("aplus_count", 0) + main_state.get("watch_count", 0)
-    if todays_signals >= cfg.APLUS_BUSY_SIGNALS:
-        threshold += cfg.APLUS_BUSY_STEP * (todays_signals - cfg.APLUS_BUSY_SIGNALS + 1)
-
-    return max(cfg.APLUS_MIN_FLOOR, min(cfg.APLUS_MAX_CAP, threshold))
-
-
-# ─────────────────────────────────────────────────────────────────────
-# v3.2 §2.2 — alert budget / spacing gates. Daily caps (5 A+, 10 WATCH), a
-# per-instrument cooldown (4h) and a global minimum gap between any two
-# alerts (2h). All timestamps are ISO UTC strings kept in main_state.
-# ─────────────────────────────────────────────────────────────────────
-def instrument_in_cooldown(main_state, instrument, now_utc):
-    last = main_state.get("last_alert_time_by_instrument", {}).get(instrument)
-    if not last:
-        return False
-    try:
-        return now_utc - datetime.fromisoformat(last) < timedelta(hours=cfg.INSTRUMENT_COOLDOWN_HOURS)
-    except (TypeError, ValueError):
-        return False
-
-
-def within_min_gap(main_state, now_utc):
-    last = main_state.get("last_any_alert_time")
-    if not last:
-        return False
-    try:
-        return now_utc - datetime.fromisoformat(last) < timedelta(minutes=cfg.MIN_MINUTES_BETWEEN_ALERTS)
-    except (TypeError, ValueError):
-        return False
-
-
-def record_alert_sent(main_state, instrument, now_utc):
-    main_state.setdefault("last_alert_time_by_instrument", {})[instrument] = now_utc.isoformat()
-    main_state["last_any_alert_time"] = now_utc.isoformat()
-    main_state["last_signal_date"] = now_utc.isoformat()
-
-
-# ─────────────────────────────────────────────────────────────────────
-# v3.2 §8 — fixed news-blackout windows. Time-of-day UTC windows (not tied to
-# a live calendar) during which no new alerts are sent.
-# ─────────────────────────────────────────────────────────────────────
-def fixed_news_blackout_active(now_utc):
-    minutes = now_utc.hour * 60 + now_utc.minute
-    for (sh, sm), (eh, em) in cfg.NEWS_FIXED_BLACKOUT_WINDOWS:
-        if sh * 60 + sm <= minutes < eh * 60 + em:
-            return True
-    return False
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -752,11 +720,7 @@ def run():
     main_state["econ_blackout_event"] = econ_event_name if econ_blackout else None
 
     suppress_new_alerts = (breaker_tripped or manual_blackout_active(main_state, now)
-                           or news_blackout or econ_blackout or fixed_news_blackout_active(now))
-
-    # v3.2 §2.1 — adaptive A+ threshold for this scan (WATCH stays fixed at 72).
-    effective_aplus = adaptive_aplus_threshold(main_state, now)
-    main_state["effective_aplus_threshold"] = effective_aplus
+                           or news_blackout or econ_blackout)
 
     # BTCUSD-only whale-flow confirmation bonus (see strategy/whale_tracker.py).
     # Returns [] when WHALE_MONITORED_ADDRESSES is unset -- a pure no-op until then.
@@ -787,7 +751,6 @@ def run():
     def on_upgrade(scored, now_utc):
         entry_tracker.add(scored, now_utc)
         main_state["aplus_count"] = main_state.get("aplus_count", 0) + 1
-        record_alert_sent(main_state, scored["instrument"], now_utc)
 
     watch_tracker = WatchTracker(
         rescorer=rescorer, notifier=send_telegram,
@@ -799,13 +762,12 @@ def run():
     open_trade_tracker.evaluate_all(now, feed, mode=mode)
     entry_tracker.evaluate_all(now, feed, mode=mode, open_tracker=open_trade_tracker)
     evaluate_pending_confirmations(pending_store, feed, level_store, now, entry_tracker, main_state, mode=mode,
-                                    whale_transactions=whale_transactions, aplus_threshold=effective_aplus)
+                                    whale_transactions=whale_transactions)
     maybe_send_health_check(main_state, watch_tracker, now)
 
     candidates = []
     diagnostics = {}
-    for instrument in cfg.ACTIVE_INSTRUMENTS:
-        meta = cfg.INSTRUMENTS[instrument]
+    for instrument, meta in cfg.INSTRUMENTS.items():
         try:
             market = build_market(feed, instrument, mode=mode)
             bars_diag = scan_diagnostics.bars_report(instrument, market["entry"], now)
@@ -842,35 +804,25 @@ def run():
         if suppress_new_alerts:
             continue  # daily loss limit, manual /blackout, or news blackout — no new entries
 
-        # v3.2 §2.2 — global spacing gates apply to both tiers.
-        if within_min_gap(main_state, now) or instrument_in_cooldown(main_state, instrument, now):
-            continue
-
-        if scored["score"] >= effective_aplus:
+        if scored["score"] >= mode.aplus_min_score:
             if hard_flat_active(now, instrument, mode=mode):
                 continue  # no new entry alerts after 18:30 UTC, US indices
-            if main_state.get("aplus_count", 0) >= cfg.MAX_APLUS_PER_DAY:
-                continue  # v3.2 §2.2 — daily A+ cap
             if watch_tracker.has_active(instrument) or pending_store.get(instrument):
                 continue
             if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
                 continue  # already a live pending entry or open trade on this instrument
-            # A+ waits for one candle's confirmation before sending; WATCH stays instant.
+            # Section 5.6 — A+ waits for one candle's confirmation; WATCH stays instant.
             pending_store.add(instrument, scored)
             continue
 
         if scored["score"] >= mode.watch_min_score:
-            if main_state.get("watch_count", 0) >= cfg.MAX_WATCH_PER_DAY:
-                continue  # v3.2 §2.2 — daily WATCH cap
             if watch_tracker.has_active(instrument):
-                continue  # one active WATCH per instrument
+                continue  # Section 3.4 cooldown — one active WATCH per instrument
             if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
                 continue  # already a live pending entry or open trade on this instrument
             expires_at = now + timedelta(minutes=mode.watch_expiry_minutes)
             send_telegram(format_watch_alert(scored, expires_at, mode=mode))
             watch_tracker.add(scored, now)
-            main_state["watch_count"] = main_state.get("watch_count", 0) + 1
-            record_alert_sent(main_state, instrument, now)
 
     main_state["last_scan_time"] = now.strftime("%Y-%m-%d %H:%M UTC")
     main_state["last_scan_mode"] = mode.name

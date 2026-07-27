@@ -173,8 +173,8 @@ def test_handle_command_blackout_rejects_bad_number(monkeypatch):
     assert any("Usage" in m for m in sent)
 
 
-def test_status_text_shows_before_tp1_stage():
-    open_trades = {"US500": {"direction": "BUY", "entry_price": 5000.0, "tp1_hit": False}}
+def test_status_text_shows_runner_stage_after_tp2():
+    open_trades = {"US500": {"direction": "BUY", "entry_price": 5000.0, "tp1_hit": True, "tp2_hit": True}}
 
     def fake_load_json(path):
         if path == ma.OPEN_TRADES_PATH:
@@ -184,7 +184,7 @@ def test_status_text_shows_before_tp1_stage():
     import unittest.mock as mock
     with mock.patch.object(ma, "load_json", side_effect=fake_load_json):
         text = rf.status_text()
-    assert "before TP1" in text
+    assert "past TP2, runner targeting TP3" in text
 
 
 def test_status_text_shows_past_tp1_stage_before_tp2():

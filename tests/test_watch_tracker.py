@@ -44,7 +44,7 @@ def test_expiry_removes_silently_no_message(tmp_path):
 
 
 def test_upgrade_to_aplus_sends_message_and_removes(tmp_path):
-    tracker, messages = _tracker(tmp_path, rescore_value=85)  # >= v3.2 A+ threshold (82)
+    tracker, messages = _tracker(tmp_path, rescore_value=80)
     tracker.add(_scored(score=68), _now())
     tracker.evaluate_all(_now() + dt.timedelta(minutes=15))
     assert not tracker.has_active("US500")
@@ -135,7 +135,7 @@ def test_mode_collapse_threshold_loose(tmp_path):
 def test_on_upgrade_callback_invoked(tmp_path):
     calls = []
     rescorer = lambda direction, instrument, now_utc: {
-        "score": 85, "instrument": instrument, "direction": direction,
+        "score": 80, "instrument": instrument, "direction": direction,
         "entry_price": 5420.0, "stop_loss": 5398.0, "tp1": 5464.0, "tp2": 5508.0}
     tracker = WatchTracker(
         rescorer=rescorer, notifier=lambda text: None,
