@@ -36,3 +36,11 @@ def test_jpy_crosses_use_forex_jpy_class():
 
 def test_audusd_uses_plain_forex_class():
     assert cfg.INSTRUMENTS["AUDUSD"]["class"] == "FOREX"
+
+
+def test_active_instruments_are_us_indices_plus_bitcoin():
+    assert cfg.ACTIVE_INSTRUMENTS == ["US500", "US100", "US30", "BTCUSD"]
+
+
+def test_active_instruments_exist_in_the_instrument_table():
+    assert set(cfg.ACTIVE_INSTRUMENTS) <= set(cfg.INSTRUMENTS)

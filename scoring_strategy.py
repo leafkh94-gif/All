@@ -496,17 +496,31 @@ def compute_tp2(direction, entry, risk, levels, tp1_price=None):
 
 
 def compute_tp3(direction, entry, risk, tp2_price, levels):
-    """§4 TP3 -- whichever is CLOSER to entry between the raw 2.8R target and
-    the next external level beyond TP2 (prior-week H/L or nearest H4 swing);
-    falls back to the raw target alone if no such external level exists."""
+    """§4 TP3 -- the closer-to-entry (conservative) of the raw TP3_R_MULT
+    target and the next external level beyond TP2 (prior-week H/L or nearest
+    H4 swing) -- but ONLY among candidates that actually sit beyond TP2, so
+    the TP1<TP2<TP3 ordering can never invert. When TP2 is a pooled liquidity
+    level farther out than the raw R-target and no external level clears it,
+    TP3 is placed a fixed half-R beyond TP2 rather than collapsing back to a
+    raw target that would sit behind TP2."""
     raw = entry + cfg.TP3_R_MULT * risk if direction == "BUY" else entry - cfg.TP3_R_MULT * risk
-    ahead = [lvl for lvl in levels if (lvl > tp2_price if direction == "BUY" else lvl < tp2_price)]
-    if not ahead:
-        return raw, False
-    external = min(ahead) if direction == "BUY" else max(ahead)
-    if abs(external - entry) < abs(raw - entry):
-        return external, True
-    return raw, False
+    is_buy = direction == "BUY"
+    beyond_tp2 = (lambda p: p > tp2_price) if is_buy else (lambda p: p < tp2_price)
+
+    ahead = [lvl for lvl in levels if beyond_tp2(lvl)]
+    external = (min(ahead) if is_buy else max(ahead)) if ahead else None
+
+    candidates = []
+    if beyond_tp2(raw):
+        candidates.append((raw, False))
+    if external is not None:
+        candidates.append((external, True))
+    if not candidates:
+        # Neither the raw R-target nor any external level clears TP2: park TP3
+        # a fixed half-R past TP2 so the runner target is always the farthest.
+        tp3 = tp2_price + 0.5 * risk if is_buy else tp2_price - 0.5 * risk
+        return tp3, False
+    return min(candidates, key=lambda pair: abs(pair[0] - entry))
 
 
 # ─────────────────────────────────────────────────────────────────────
