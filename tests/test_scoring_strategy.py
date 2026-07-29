@@ -734,3 +734,21 @@ def test_multiframe_alignment_flat_without_enough_history():
     tf = strat.multiframe_alignment([], [], [], "BUY")
     assert tf["15m"] == {"trend": "flat", "agree": "flat"}
     assert tf["4h"] == {"trend": "flat", "agree": "flat"}
+
+
+def test_compute_tp3_stays_beyond_tp2_when_tp2_is_a_far_pooled_level():
+    """Ordering bug: when TP2 is a pooled liquidity level farther out than the
+    raw TP3 R-target and no external level clears it, TP3 must NOT collapse
+    back behind TP2. Here TP2=145 (beyond raw 4R=140) with no external level
+    -> TP3 is parked half-R past TP2, never inverted."""
+    tp3, from_level = strat.compute_tp3("BUY", entry=100.0, risk=10.0, tp2_price=145.0, levels=[])
+    assert tp3 > 145.0            # strictly beyond TP2
+    assert tp3 == 150.0           # tp2 + 0.5R
+    assert from_level is False
+
+
+def test_compute_tp3_sell_stays_beyond_tp2_when_tp2_is_a_far_pooled_level():
+    tp3, from_level = strat.compute_tp3("SELL", entry=100.0, risk=10.0, tp2_price=55.0, levels=[])
+    assert tp3 < 55.0
+    assert tp3 == 50.0            # tp2 - 0.5R
+    assert from_level is False

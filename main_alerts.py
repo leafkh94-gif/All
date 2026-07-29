@@ -464,7 +464,7 @@ def maybe_record_daily_levels(feed, level_store, now_utc):
     today_key = now_utc.strftime("%Y-%m-%d")
     if now_utc.hour != 0:
         return
-    for instrument in cfg.INSTRUMENTS:
+    for instrument in cfg.ACTIVE_INSTRUMENTS:
         existing = level_store.get_daily_levels(instrument)
         if existing and existing.get("day_key") == today_key:
             continue
@@ -479,7 +479,7 @@ def maybe_record_weekly_levels(feed, level_store, now_utc):
     if now_utc.weekday() != 4 or now_utc.hour != 21:
         return
     week_key = now_utc.strftime("%G-W%V")
-    for instrument in cfg.INSTRUMENTS:
+    for instrument in cfg.ACTIVE_INSTRUMENTS:
         existing = level_store.get_weekly_levels(instrument)
         if existing and existing.get("week_key") == week_key:
             continue
@@ -767,7 +767,8 @@ def run():
 
     candidates = []
     diagnostics = {}
-    for instrument, meta in cfg.INSTRUMENTS.items():
+    for instrument in cfg.ACTIVE_INSTRUMENTS:
+        meta = cfg.INSTRUMENTS[instrument]
         try:
             market = build_market(feed, instrument, mode=mode)
             bars_diag = scan_diagnostics.bars_report(instrument, market["entry"], now)

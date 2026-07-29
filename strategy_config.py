@@ -44,6 +44,11 @@ CORRELATION_CLUSTER_WARNING = (
 US_INDEX_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "US_INDEX"]
 CRYPTO_INSTRUMENTS = [k for k, v in INSTRUMENTS.items() if v["class"] == "CRYPTO"]
 
+# Instruments the bot actively scans. Focused on the three US indices +
+# Bitcoin. The other symbols stay defined in INSTRUMENTS for config/lookups;
+# add them back here to re-activate. Every symbol must exist in INSTRUMENTS.
+ACTIVE_INSTRUMENTS = ["US500", "US100", "US30", "BTCUSD"]
+
 # ─────────────────────────────────────────────────────────────────────
 # 1.2  Architecture
 # ─────────────────────────────────────────────────────────────────────
