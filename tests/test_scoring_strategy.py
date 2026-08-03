@@ -286,11 +286,13 @@ def _ranging_market(quality):
 
 
 def test_score_candidate_loose_mode_lower_watch_threshold():
-    """A setup scoring ~58 (RANGING bias +5, quality 27) must be blocked under
-    the default 62 threshold but pass under loose mode's 55 threshold."""
+    """A setup scoring ~58 (RANGING bias +5, quality 31) must be blocked under
+    the default 62 threshold but pass under loose mode's 55 threshold. US500 is
+    an index, so the VWAP filter is gated off -- quality is set so the total
+    still lands at 58 without any volume-derived contribution."""
     import contextlib
     import datetime as dt
-    market, candidate = _ranging_market(quality=27)
+    market, candidate = _ranging_market(quality=31)
     now = dt.datetime(2026, 1, 1, 12, 45, tzinfo=dt.timezone.utc)
     with contextlib.ExitStack() as stack:
         _patch_qualifying_stack(stack)
@@ -404,6 +406,9 @@ def test_score_candidate_applies_whale_flow_bonus_for_btcusd_only():
 
     with contextlib.ExitStack() as stack:
         _patch_qualifying_stack(stack)
+        # Neutralise the VWAP filter (itself crypto-gated) so the only remaining
+        # crypto-vs-index difference is the whale-flow bonus we're isolating.
+        stack.enter_context(patch.object(strat, "vwap_filter_score", return_value=0))
         stack.enter_context(patch.object(
             strat.whale_tracker, "whale_flow_bonus", return_value=(8, "whale_accumulation")))
         btc_result = strat.score_candidate(

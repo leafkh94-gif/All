@@ -572,17 +572,29 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     bias_pts, bias_tag = daily_bias_score(htf, direction)
     total += bias_pts
     breakdown["daily_bias"] = bias_tag
-    total += vwap_filter_score(df_entry, direction, now_utc)
+
+    # Volume-derived factors (anchored VWAP filter + volume-profile bonus) are
+    # only meaningful where the volume feed is meaningful. On CFD index
+    # instruments the "volume" is broker tick-count on a synthetic price, so
+    # these factors are noise there and must never influence the decision --
+    # they are applied to CRYPTO (BTCUSD) only, and even there only as small
+    # confirmations, never a primary driver.
+    is_crypto = instrument_class == "CRYPTO"
+    if is_crypto:
+        total += vwap_filter_score(df_entry, direction, now_utc)
 
     kz_pts, kz_name = market_sessions.killzone_bonus(now_utc, instrument_class)
     total += kz_pts
     breakdown["killzone"] = kz_name
 
     total += ind.round_number_bonus(candidate["sweep_price"], instrument_class)
-    poc, va_low, va_high = ind.volume_profile_zones(df_entry)
-    vp_pts, vp_tag = ind.volume_profile_bonus(candidate["sweep_price"], poc, va_low, va_high)
-    total += vp_pts
-    breakdown["volume_profile"] = vp_tag
+    if is_crypto:
+        poc, va_low, va_high = ind.volume_profile_zones(df_entry)
+        vp_pts, vp_tag = ind.volume_profile_bonus(candidate["sweep_price"], poc, va_low, va_high)
+        total += vp_pts
+        breakdown["volume_profile"] = vp_tag
+    else:
+        breakdown["volume_profile"] = None
     total += choppy_market_penalty(df_entry)
 
     spike_penalty = recent_spike_penalty(df_entry, a, candidate["pattern"])
