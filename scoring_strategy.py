@@ -107,7 +107,7 @@ def _wick_stats(candle):
     return rng, upper, lower
 
 
-def detect_liquidity_sweep_bos(df, lookback=20):
+def detect_liquidity_sweep_bos(df, lookback=cfg.LIQUIDITY_SWEEP_LOOKBACK):
     if len(df) < lookback + 3:
         return None
     a = ind.atr(df).iloc[-1]
@@ -136,18 +136,20 @@ def detect_sd_rejection(df, lookback=20):
     rng, upper, lower = _wick_stats(last)
     if rng <= 0:
         return None
-    if lower / rng > 0.6 and last["c"] > last["o"]:
-        quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 20 + (lower / rng - 0.6) / 0.4 * 18))
+    wick = cfg.SD_REJECTION_WICK_RATIO
+    span = max(1.0 - wick, 1e-9)
+    if lower / rng > wick and last["c"] > last["o"]:
+        quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 20 + (lower / rng - wick) / span * 18))
         return {"pattern": "SD_REJECTION", "direction": "BUY",
                 "sweep_price": float(last["l"]), "leg_extreme": float(last["l"]), "quality": quality}
-    if upper / rng > 0.6 and last["c"] < last["o"]:
-        quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 20 + (upper / rng - 0.6) / 0.4 * 18))
+    if upper / rng > wick and last["c"] < last["o"]:
+        quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 20 + (upper / rng - wick) / span * 18))
         return {"pattern": "SD_REJECTION", "direction": "SELL",
                 "sweep_price": float(last["h"]), "leg_extreme": float(last["h"]), "quality": quality}
     return None
 
 
-def detect_head_shoulders(df, lookback=30, tolerance=0.2):
+def detect_head_shoulders(df, lookback=30, tolerance=cfg.HEAD_SHOULDERS_TOLERANCE):
     if len(df) < lookback:
         return None
     window = df.tail(lookback).reset_index(drop=True)
@@ -194,11 +196,12 @@ def detect_flag(df, lookback=15):
         return None
     consolidation = df["c"].iloc[-(lookback + 1):-1]
     tightness = consolidation.std() / a
-    if tightness > 0.5:
+    tight_max = cfg.FLAG_TIGHTNESS_MAX
+    if tightness > tight_max:
         return None
     last = df.iloc[-1]
     cons_high, cons_low = consolidation.max() + consolidation.std(), consolidation.min() - consolidation.std()
-    quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 22 + (0.5 - tightness) / 0.5 * 16))
+    quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 22 + (tight_max - tightness) / tight_max * 16))
     if last["c"] > cons_high:
         return {"pattern": "FLAG", "direction": "BUY", "sweep_price": float(cons_high),
                 "leg_extreme": float(cons_high), "quality": quality}
@@ -208,7 +211,7 @@ def detect_flag(df, lookback=15):
     return None
 
 
-def detect_news_retest(df, lookback=15, spike_mult=cfg.NEWS_SPIKE_ATR_MULT):
+def detect_news_retest(df, lookback=15, spike_mult=cfg.NEWS_RETEST_SPIKE_MULT):
     if len(df) < lookback + 2:
         return None
     a = ind.atr(df).iloc[-1]
@@ -225,9 +228,10 @@ def detect_news_retest(df, lookback=15, spike_mult=cfg.NEWS_SPIKE_ATR_MULT):
     midpoint = (spike["h"] + spike["l"]) / 2
     last = df.iloc[-1]
     proximity = abs(last["c"] - midpoint) / a
-    if proximity > 0.5:
+    prox_max = cfg.NEWS_RETEST_PROXIMITY
+    if proximity > prox_max:
         return None
-    quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 24 + (0.5 - proximity) / 0.5 * 14))
+    quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 24 + (prox_max - proximity) / prox_max * 14))
     direction = "BUY" if spike["c"] > spike["o"] else "SELL"
     leg_extreme = float(spike["l"]) if direction == "BUY" else float(spike["h"])
     return {"pattern": "NEWS_RETEST", "direction": direction, "sweep_price": float(midpoint),

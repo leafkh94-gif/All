@@ -757,3 +757,16 @@ def test_compute_tp3_sell_stays_beyond_tp2_when_tp2_is_a_far_pooled_level():
     assert tp3 < 55.0
     assert tp3 == 50.0            # tp2 - 0.5R
     assert from_level is False
+
+
+def test_detect_sd_rejection_fires_on_looser_wick():
+    """v-loosen: a rejection wick of ~0.56 of the candle range now qualifies
+    (was rejected under the old 0.60 floor). Confirms the looser detector
+    speaks on borderline structure instead of 'no pattern detected'."""
+    import pandas as pd
+    rows = [{"o": 100, "h": 100.2, "l": 99.8, "c": 100} for _ in range(20)]
+    rows.append({"o": 100.0, "h": 101.2, "l": 98.5, "c": 101.0})  # lower wick ~0.556 of range
+    df = pd.DataFrame(rows)
+    res = strat.detect_sd_rejection(df)
+    assert res is not None
+    assert res["pattern"] == "SD_REJECTION" and res["direction"] == "BUY"

@@ -60,6 +60,19 @@ SCAN_INTERVAL_MINUTES = 15
 PATTERN_QUALITY_BASE_MAX = 38
 PATTERN_QUALITY_BONUS_MAX = 10
 
+# ── Detector sensitivity (how readily each of the 5 patterns fires) ──
+# Loosened so the detectors speak more often on ordinary price action --
+# they were returning "no pattern detected" on most candles. Higher
+# sensitivity = more candidates, hence more alerts (and more that don't
+# clear the score threshold). This changes only WHAT counts as a pattern,
+# never the scoring itself.
+SD_REJECTION_WICK_RATIO = 0.5        # min rejection-wick fraction of candle range (was 0.6)
+HEAD_SHOULDERS_TOLERANCE = 0.35      # shoulder-symmetry tolerance (was 0.2)
+FLAG_TIGHTNESS_MAX = 0.8             # max consolidation std/ATR to count as a flag (was 0.5)
+NEWS_RETEST_SPIKE_MULT = 2.0         # min spike range in ATRs (was 2.5); separate from the spike-penalty constant
+NEWS_RETEST_PROXIMITY = 0.7          # max distance (in ATR) from spike midpoint on retest (was 0.5)
+LIQUIDITY_SWEEP_LOOKBACK = 15        # bars back for the swept swing high/low (was 20)
+
 TECHNICAL_CONFIRM_ALL_ALIGNED = 10   # 2-3 of RSI/MACD/EMA aligned
 TECHNICAL_CONFIRM_ONE_ALIGNED = 4
 TECHNICAL_CONFIRM_NONE_ALIGNED = 0
