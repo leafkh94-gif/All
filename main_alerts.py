@@ -118,9 +118,17 @@ class ActiveEntryTracker:
         }
         save_json(self.path, self._data)
 
-    def _cancel(self, instrument, reason):
+    def _cancel(self, instrument, entry, reason, now_utc):
         del self._data[instrument]
         save_json(self.path, self._data)
+        _append_trade_log({
+            "instrument": instrument,
+            "pattern": entry.get("pattern"),
+            "direction": entry["direction"],
+            "outcome": "no_fill_" + reason.lower(),
+            "r_multiple": 0.0,
+            "closed_at": now_utc.isoformat(),
+        })
         send_telegram(
             f"⌛ {instrument} entry cancelled ({reason}).\n"
             f"{_CANCEL_MESSAGES.get(reason, '')}\n"
@@ -152,7 +160,7 @@ class ActiveEntryTracker:
                 sweep_violated = (direction == "BUY" and price < leg_origin) or (
                     direction == "SELL" and price > leg_origin)
                 if sweep_violated:
-                    self._cancel(instrument, "SWEEP_VIOLATED")
+                    self._cancel(instrument, e, "SWEEP_VIOLATED", now_utc)
                     continue
 
             if leg_origin is not None and leg_end is not None:
@@ -160,7 +168,7 @@ class ActiveEntryTracker:
                 left_without_us = (direction == "BUY" and price > leg_end + leg_size) or (
                     direction == "SELL" and price < leg_end - leg_size)
                 if left_without_us:
-                    self._cancel(instrument, "LEFT_WITHOUT_US")
+                    self._cancel(instrument, e, "LEFT_WITHOUT_US", now_utc)
                     continue
 
             if now_utc - alert_time > timedelta(minutes=cfg.PENDING_ORDER_MAX_MINUTES):
@@ -170,6 +178,14 @@ class ActiveEntryTracker:
                     f"{_format_duration(cfg.PENDING_ORDER_MAX_MINUTES)}.\n"
                     f"Setup cancelled. No action needed."
                 )
+                _append_trade_log({
+                    "instrument": instrument,
+                    "pattern": e.get("pattern"),
+                    "direction": e["direction"],
+                    "outcome": "no_fill_expired",
+                    "r_multiple": 0.0,
+                    "closed_at": now_utc.isoformat(),
+                })
                 del self._data[instrument]
                 save_json(self.path, self._data)
 
@@ -590,6 +606,91 @@ def maybe_send_weekly_performance_report(main_state, now_utc, path=None):
     main_state["last_weekly_report_week"] = week_key
 
 
+_OUTCOME_LABELS = {
+    "tp3_runner_complete":       "All 3 targets hit",
+    "runner_stopped":            "TP1 + TP2 hit, runner stopped at TP1",
+    "breakeven_after_tp1":       "TP1 hit, rest closed at breakeven",
+    "session_cutoff_runner":     "TP1 + TP2 banked, closed at session end",
+    "session_cutoff_after_tp1":  "TP1 banked, closed at session end",
+    "session_cutoff_before_tp1": "Closed at session end",
+    "stop_before_tp1":           "Stop loss hit — no profit",
+    "no_fill_expired":           "Price never reached our entry",
+    "no_fill_sweep_violated":    "Cancelled — key level was broken",
+    "no_fill_left_without_us":   "Price moved away without filling",
+}
+
+
+def daily_digest_text(now_utc, path=None):
+    """Plain-English market-close summary of today's alert outcomes."""
+    entries = load_json(path or TRADE_LOG_PATH).get("entries", [])
+    today = now_utc.strftime("%Y-%m-%d")
+    today_entries = []
+    for e in entries:
+        try:
+            closed_at = datetime.fromisoformat(e["closed_at"])
+            if closed_at.tzinfo is None:
+                closed_at = closed_at.replace(tzinfo=timezone.utc)
+            if closed_at.strftime("%Y-%m-%d") == today:
+                today_entries.append(e)
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    lines = [f"📅 Daily Summary — {now_utc.strftime('%d %b %Y')}", ""]
+    if not today_entries:
+        lines.append("No alerts concluded today.")
+        return "\n".join(lines)
+
+    no_fill = [e for e in today_entries if e.get("outcome", "").startswith("no_fill_")]
+    filled = [e for e in today_entries if not e.get("outcome", "").startswith("no_fill_")]
+    wins = [e for e in filled if e.get("r_multiple", 0) > 0]
+    losses = [e for e in filled if e.get("r_multiple", 0) <= 0]
+
+    if wins:
+        lines.append("✅ Took profit:")
+        for e in wins:
+            label = _OUTCOME_LABELS.get(e.get("outcome", ""), e.get("outcome", ""))
+            lines.append(f"   {e['instrument']} {e.get('direction', '')} — {label}  (+{e['r_multiple']:.1f}R)")
+        lines.append("")
+
+    if losses:
+        lines.append("❌ Stopped out (no profit):")
+        for e in losses:
+            label = _OUTCOME_LABELS.get(e.get("outcome", ""), e.get("outcome", ""))
+            lines.append(f"   {e['instrument']} {e.get('direction', '')} — {label}  ({e['r_multiple']:+.1f}R)")
+        lines.append("")
+
+    if no_fill:
+        lines.append("⏳ Never entered (price didn't reach our entry):")
+        for e in no_fill:
+            label = _OUTCOME_LABELS.get(e.get("outcome", ""), e.get("outcome", ""))
+            lines.append(f"   {e['instrument']} {e.get('direction', '')} — {label}")
+        lines.append("")
+
+    parts = []
+    if wins:
+        parts.append(f"{len(wins)} win{'s' if len(wins) != 1 else ''}")
+    if losses:
+        parts.append(f"{len(losses)} loss{'es' if len(losses) != 1 else ''}")
+    if no_fill:
+        parts.append(f"{len(no_fill)} never filled")
+    lines.append(f"Bottom line: {', '.join(parts)}.")
+    if filled:
+        total_r = sum(e.get("r_multiple", 0) for e in filled)
+        lines.append(f"Net result: {total_r:+.1f}R")
+    return "\n".join(lines)
+
+
+def maybe_send_daily_digest(main_state, now_utc, path=None):
+    """Fires once per day at 18:30 UTC alongside the hard flat."""
+    if (now_utc.hour, now_utc.minute) < (cfg.HARD_FLAT_UTC_HOUR, cfg.HARD_FLAT_UTC_MINUTE):
+        return
+    today_key = now_utc.strftime("%Y-%m-%d")
+    if main_state.get("last_daily_digest_date") == today_key:
+        return
+    send_telegram(daily_digest_text(now_utc, path=path))
+    main_state["last_daily_digest_date"] = today_key
+
+
 def maybe_send_health_check(main_state, watch_tracker, now_utc):
     last = main_state.get("last_health_check_time")
     if last and now_utc - datetime.fromisoformat(last) <= timedelta(hours=cfg.HEALTH_CHECK_INTERVAL_HOURS):
@@ -738,6 +839,7 @@ def run():
     maybe_record_daily_levels(feed, level_store, now)
     maybe_record_weekly_levels(feed, level_store, now)
     maybe_send_weekly_performance_report(main_state, now)
+    maybe_send_daily_digest(main_state, now)
 
     def rescorer(direction, instrument, now_utc):
         market = build_market(feed, instrument, mode=mode)
