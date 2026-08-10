@@ -5,6 +5,15 @@ from strategy import modes
 from strategy import scan_diagnostics
 
 
+class _FakeFeedBase:
+    """Base for test fake feeds — provides get_candles from get_current_price."""
+    def get_candles(self, instrument, timeframe, n=2):
+        p = self.get_current_price(instrument)
+        if p is None:
+            return []
+        return [{"o": p, "h": p, "l": p, "c": p}]
+
+
 def test_hard_flat_active_after_1830_us_index():
     t = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
     assert ma.hard_flat_active(t, "US500") is True
@@ -63,7 +72,7 @@ def test_active_entry_tracker_touch_removes_without_message(tmp_path, monkeypatc
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0}, now)
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 4999.0  # price traded down through the BUY limit entry
 
@@ -123,7 +132,7 @@ def test_active_entry_tracker_touch_hands_off_to_open_tracker(tmp_path, monkeypa
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
                  "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "pattern": "SD_REJECTION"}, now)
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 4999.0  # traded down through the BUY limit entry -> filled
 
@@ -144,7 +153,7 @@ def test_open_trade_tracker_tp1_hit_closes_half_and_moves_stop_to_breakeven(tmp_
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
                  "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "tp3": 5080.0}, now)
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 5041.0  # price reached TP1
 
@@ -164,7 +173,7 @@ def test_open_trade_tracker_stop_hit_before_tp1_closes_full_position(tmp_path, m
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
                  "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "tp3": 5080.0, "pattern": "FLAG"}, now)
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 4979.0  # price hit the original stop before TP1
 
@@ -190,7 +199,7 @@ def test_open_trade_tracker_tp2_hit_moves_to_runner_phase_not_a_final_close(tmp_
     tracker._data["US500"]["stop_loss"] = 5000.0  # already at breakeven
     tracker._data["US500"]["locked_r"] = 1.0  # as if TP1 had already fired at 5040
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 5061.0  # price reached TP2
 
@@ -215,7 +224,7 @@ def test_open_trade_tracker_tp3_hit_after_tp2_closes_runner(tmp_path, monkeypatc
     tracker._data["US500"]["stop_loss"] = 5040.0  # at TP1, as if TP2 already fired
     tracker._data["US500"]["locked_r"] = 2.5
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 5081.0  # price reached TP3
 
@@ -239,7 +248,7 @@ def test_open_trade_tracker_runner_stopped_after_tp2(tmp_path, monkeypatch):
     tracker._data["US500"]["stop_loss"] = 5040.0  # at TP1
     tracker._data["US500"]["locked_r"] = 2.5
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 5039.0  # pulled back to the TP1-level runner stop
 
@@ -262,7 +271,7 @@ def test_open_trade_tracker_breakeven_stop_after_tp1_closes_remainder(tmp_path, 
     tracker._data["US500"]["stop_loss"] = 5000.0  # breakeven
     tracker._data["US500"]["locked_r"] = 1.0  # as if TP1 had already fired at 5040
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 4999.0  # pulled back to breakeven stop after TP1
 
@@ -286,7 +295,7 @@ def test_open_trade_tracker_session_cutoff_closes_every_instrument_including_btc
     tracker.add({"instrument": "BTCUSD", "direction": "BUY", "entry_price": 60000.0,
                  "stop_loss": 59000.0, "tp1": 61000.0, "tp2": 62000.0, "tp3": 63000.0}, now)
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 5010.0 if instrument == "US500" else 60100.0  # neither TP/stop touched
 
@@ -306,7 +315,7 @@ def test_open_trade_tracker_swing_mode_holds_through_session_cutoff(tmp_path, mo
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0,
                  "stop_loss": 4980.0, "tp1": 5040.0, "tp2": 5060.0, "tp3": 5080.0}, now)
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 5010.0  # neither TP/stop touched
 
@@ -327,7 +336,7 @@ def test_open_trade_tracker_session_cutoff_after_tp1_blends_locked_r(tmp_path, m
     tracker._data["US500"]["stop_loss"] = 5000.0
     tracker._data["US500"]["locked_r"] = 1.0
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 5030.0  # short of TP2, above breakeven, when cutoff hits
 
@@ -346,7 +355,7 @@ def test_active_entry_tracker_expires_after_2_hours(tmp_path, monkeypatch):
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
     tracker.add({"instrument": "US500", "direction": "BUY", "entry_price": 5000.0}, now)
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 5050.0  # never touched the entry
 
@@ -362,7 +371,7 @@ def test_active_entry_tracker_expiry_is_flat_90_minutes_regardless_of_mode(monke
     monkeypatch.setattr(ma, "send_telegram", lambda text: None)
     now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_current_price(self, instrument):
             return 5050.0  # never touched the entry
 
@@ -385,7 +394,7 @@ def test_active_entry_tracker_expiry_is_flat_90_minutes_regardless_of_mode(monke
 def test_build_market_fast_mode_requests_5min_entry():
     requested = {}
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_candles(self, instrument, interval, n=60):
             requested[interval] = requested.get(interval, 0) + 1
             return []
@@ -400,7 +409,7 @@ def test_build_market_fast_mode_requests_5min_entry():
 def test_build_market_defaults_to_15min_entry():
     requested = {}
 
-    class FakeFeed:
+    class FakeFeed(_FakeFeedBase):
         def get_candles(self, instrument, interval, n=60):
             requested[interval] = requested.get(interval, 0) + 1
             return []

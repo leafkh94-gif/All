@@ -8,14 +8,19 @@ Adds two new pattern types that the original 5 detectors don't cover:
 Also provides improved swing detection with alternating-elimination,
 which produces cleaner market structure than the raw fractal approach.
 """
+import logging
 import pandas as pd
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 try:
     from smartmoneyconcepts import smc
     SMC_AVAILABLE = True
 except ImportError:
     SMC_AVAILABLE = False
+    logger.warning("smartmoneyconcepts not installed — ORDER_BLOCK, CHOCH_REVERSAL, "
+                   "SMC_LIQUIDITY_SWEEP detectors disabled")
 
 import strategy_config as cfg
 
@@ -109,15 +114,35 @@ def detect_order_block(candles, swing_length=None):
                           22 + min(8, strength / 100 * 8) + min(8, displacement * 4)))
 
         direction = "BUY" if is_bullish else "SELL"
+        ob_mid = (ob_top + ob_bottom) / 2
+        if is_bullish:
+            smc_entry = float(ob_mid)
+            smc_stop = float(ob_bottom - cfg.SL_BUFFER_ATR_MULT * current_atr)
+        else:
+            smc_entry = float(ob_mid)
+            smc_stop = float(ob_top + cfg.SL_BUFFER_ATR_MULT * current_atr)
+        smc_risk = abs(smc_entry - smc_stop)
+        if smc_risk <= 0:
+            continue
+        if is_bullish:
+            smc_tp1 = float(smc_entry + cfg.TP1_R_MULT * smc_risk)
+        else:
+            smc_tp1 = float(smc_entry - cfg.TP1_R_MULT * smc_risk)
+
         candidate = {
             "pattern": "ORDER_BLOCK",
             "direction": direction,
             "sweep_price": float(ob_bottom if is_bullish else ob_top),
             "leg_extreme": float(ob_bottom if is_bullish else ob_top),
             "quality": quality,
+            "quality_max": cfg.PATTERN_QUALITY_BASE_MAX,
             "ob_top": float(ob_top),
             "ob_bottom": float(ob_bottom),
             "ob_strength": float(strength),
+            "smc_entry": smc_entry,
+            "smc_stop": smc_stop,
+            "smc_tp1": smc_tp1,
+            "smc_entry_basis": "OB midpoint",
         }
 
         if best is None or quality > best["quality"]:
@@ -173,14 +198,33 @@ def detect_choch_reversal(candles, swing_length=None):
         quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX,
                           26 + min(12, max(0, (cfg.SMC_CHOCH_MAX_RECENCY - recency)) * 2)))
 
+        direction = "BUY" if is_bullish else "SELL"
+        smc_entry = float(level)
+        if is_bullish:
+            smc_stop = float(level - cfg.SL_BUFFER_ATR_MULT * current_atr)
+        else:
+            smc_stop = float(level + cfg.SL_BUFFER_ATR_MULT * current_atr)
+        smc_risk = abs(smc_entry - smc_stop)
+        if smc_risk <= 0:
+            continue
+        if is_bullish:
+            smc_tp1 = float(smc_entry + cfg.TP1_R_MULT * smc_risk)
+        else:
+            smc_tp1 = float(smc_entry - cfg.TP1_R_MULT * smc_risk)
+
         return {
             "pattern": "CHOCH_REVERSAL",
-            "direction": "BUY" if is_bullish else "SELL",
+            "direction": direction,
             "sweep_price": float(level),
             "leg_extreme": float(level),
             "quality": quality,
+            "quality_max": cfg.PATTERN_QUALITY_BASE_MAX,
             "choch_level": float(level),
             "broken_index": int(broken_idx),
+            "smc_entry": smc_entry,
+            "smc_stop": smc_stop,
+            "smc_tp1": smc_tp1,
+            "smc_entry_basis": "CHOCH level",
         }
 
     return None
@@ -235,12 +279,30 @@ def detect_smc_liquidity_sweep(candles, swing_length=None):
         quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX,
                           24 + min(14, depth * 10)))
 
+        smc_entry = float(level)
+        if direction == "BUY":
+            smc_stop = float(level - cfg.SL_BUFFER_ATR_MULT * current_atr)
+        else:
+            smc_stop = float(level + cfg.SL_BUFFER_ATR_MULT * current_atr)
+        smc_risk = abs(smc_entry - smc_stop)
+        if smc_risk <= 0:
+            continue
+        if direction == "BUY":
+            smc_tp1 = float(smc_entry + cfg.TP1_R_MULT * smc_risk)
+        else:
+            smc_tp1 = float(smc_entry - cfg.TP1_R_MULT * smc_risk)
+
         return {
             "pattern": "SMC_LIQUIDITY_SWEEP",
             "direction": direction,
             "sweep_price": float(level),
             "leg_extreme": float(level),
             "quality": quality,
+            "quality_max": cfg.PATTERN_QUALITY_BASE_MAX,
+            "smc_entry": smc_entry,
+            "smc_stop": smc_stop,
+            "smc_tp1": smc_tp1,
+            "smc_entry_basis": "swept liquidity level",
         }
 
     return None

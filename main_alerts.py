@@ -151,8 +151,15 @@ class ActiveEntryTracker:
                 continue
             direction = e["direction"]
 
-            touched = (direction == "BUY" and price <= e["entry_price"]) or (
-                direction == "SELL" and price >= e["entry_price"])
+            candles = feed.get_candles(instrument, "15min", n=2)
+            if candles:
+                bar_high = candles[-1]["h"]
+                bar_low = candles[-1]["l"]
+            else:
+                bar_high = bar_low = price
+
+            touched = (direction == "BUY" and bar_low <= e["entry_price"]) or (
+                direction == "SELL" and bar_high >= e["entry_price"])
             if touched:
                 del self._data[instrument]
                 save_json(self.path, self._data)
@@ -306,15 +313,28 @@ class OpenTradeTracker:
             entry_price, initial_risk = t["entry_price"], t["initial_risk"]
             closed_this_cycle = False
 
-            excursion = (price - entry_price) if is_buy else (entry_price - price)
-            if excursion > t.get("mfe", 0.0):
-                t["mfe"] = excursion
-            if excursion < t.get("mae", 0.0):
-                t["mae"] = excursion
+            candles = feed.get_candles(instrument, "15min", n=2)
+            if candles:
+                bar_high = candles[-1]["h"]
+                bar_low = candles[-1]["l"]
+            else:
+                bar_high = bar_low = price
+
+            mfe_price = bar_high if is_buy else bar_low
+            mae_price = bar_low if is_buy else bar_high
+            mfe_excursion = (mfe_price - entry_price) if is_buy else (entry_price - mfe_price)
+            mae_excursion = (mae_price - entry_price) if is_buy else (entry_price - mae_price)
+            if mfe_excursion > t.get("mfe", 0.0):
+                t["mfe"] = mfe_excursion
+            if mae_excursion < t.get("mae", 0.0):
+                t["mae"] = mae_excursion
+            save_json(self.path, self._data)
 
             if not t["tp1_hit"]:
-                hit_tp1 = price >= t["tp1"] if is_buy else price <= t["tp1"]
-                hit_stop = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
+                hit_tp1 = bar_high >= t["tp1"] if is_buy else bar_low <= t["tp1"]
+                hit_stop = bar_low <= t["stop_loss"] if is_buy else bar_high >= t["stop_loss"]
+                if hit_tp1 and hit_stop:
+                    hit_tp1 = False
                 if hit_tp1:
                     t["tp1_hit"] = True
                     t["locked_r"] = 0.5 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp1"])
@@ -332,8 +352,10 @@ class OpenTradeTracker:
                     send_telegram(f"🛑 {instrument} stop loss hit @ {t['stop_loss']}. Full position closed.")
                     closed_this_cycle = True
             elif not t["tp2_hit"]:
-                hit_tp2 = price >= t["tp2"] if is_buy else price <= t["tp2"]
-                hit_be = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
+                hit_tp2 = bar_high >= t["tp2"] if is_buy else bar_low <= t["tp2"]
+                hit_be = bar_low <= t["stop_loss"] if is_buy else bar_high >= t["stop_loss"]
+                if hit_tp2 and hit_be:
+                    hit_tp2 = False
                 if hit_tp2:
                     t["tp2_hit"] = True
                     t["locked_r"] += 0.3 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp2"])
@@ -354,8 +376,8 @@ class OpenTradeTracker:
                     )
                     closed_this_cycle = True
             else:
-                hit_tp3 = price >= t["tp3"] if is_buy else price <= t["tp3"]
-                hit_runner_stop = price <= t["stop_loss"] if is_buy else price >= t["stop_loss"]
+                hit_tp3 = bar_high >= t["tp3"] if is_buy else bar_low <= t["tp3"]
+                hit_runner_stop = bar_low <= t["stop_loss"] if is_buy else bar_high >= t["stop_loss"]
                 if hit_tp3:
                     r = t["locked_r"] + 0.2 * _r_multiple(t["direction"], entry_price, initial_risk, t["tp3"])
                     self._close(instrument, t, now_utc, "tp3_runner_complete", r)
@@ -475,9 +497,9 @@ def format_watch_alert(scored, expires_at, mode=None):
 def format_aplus_alert(scored, now_utc, mode=None):
     expiry = now_utc + timedelta(minutes=cfg.PENDING_ORDER_MAX_MINUTES)
     entry_basis = scored.get("entry_basis", "50% leg retrace")
-    tp1_basis = scored.get("tp1_basis", "2.0R")
-    tp2_note = "  (session/PDH-PDL level)" if scored.get("tp2_capped") else "  (1.8R fallback)"
-    tp3_note = "  (external level)" if scored.get("tp3_capped") else "  (2.8R fallback)"
+    tp1_basis = scored.get("tp1_basis", f"{cfg.TP1_R_MULT:.1f}R")
+    tp2_note = "  (session/PDH-PDL level)" if scored.get("tp2_capped") else f"  ({cfg.TP2_R_MULT:.1f}R fallback)"
+    tp3_note = "  (external level)" if scored.get("tp3_capped") else f"  ({cfg.TP3_R_MULT:.1f}R fallback)"
     risk = abs(scored["entry_price"] - scored["stop_loss"])
     return (
         f"🟢 A+ SIGNAL — {scored['instrument']}\n\n"
@@ -492,6 +514,7 @@ def format_aplus_alert(scored, now_utc, mode=None):
         f"📋 Reason: {_pattern_name(scored['breakdown']['pattern'])} at {_level_description(scored)}\n"
         f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}"
         f"{_format_timeframes(scored)}\n\n"
+        f"📐 Position size: your_risk_$ / {risk:g} = lots/units\n\n"
         f"After TP1 → SL to breakeven. After TP2 → SL to TP1, runner (20%) targets TP3.\n"
         f"18:00 UTC → get ready to close manually. 18:30 UTC hard flat → close all remaining."
         f"{_correlation_tag(scored['instrument'])}"

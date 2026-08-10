@@ -228,7 +228,10 @@ def test_expired_entry_logs_no_fill(tmp_path):
     class _DummyFeed:
         def get_current_price(self, instrument):
             return 5430.0  # above entry but not touching for BUY (entry=5420 is limit buy so BUY fills when price <= entry)
-            # Actually for BUY: touched = price <= entry_price = 5430 <= 5420 → False. Good.
+
+        def get_candles(self, instrument, timeframe, n=2):
+            p = self.get_current_price(instrument)
+            return [{"o": p, "h": p, "l": p, "c": p}]
 
     import main_alerts as ma
     orig_send = ma.send_telegram
