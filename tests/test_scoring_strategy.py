@@ -303,7 +303,7 @@ def test_score_candidate_loose_mode_lower_watch_threshold():
             "US500", "US_INDEX", candidate, market, now, _fake_level_store(), mode=modes.LOOSE)
     assert default_result is None
     assert loose_result is not None
-    assert loose_result["score"] == 58
+    assert loose_result["score"] == 60
 
 
 def test_score_candidate_diagnostic_blocked_message_reflects_mode_threshold():
@@ -536,31 +536,31 @@ def test_compute_stop_applies_round_number_offset_when_too_close():
     assert stop == raw - strat.cfg.ROUND_NUMBER_OFFSET_ATR_MULT * 10.0
 
 
-def test_compute_tp1_raw_two_r_without_exception_candidates():
+def test_compute_tp1_raw_without_exception_candidates():
     tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=[])
-    assert tp1 == 120.0   # 2.0R first target (book's 2:1)
-    assert basis == "2.0R"
+    assert tp1 == 115.0   # 1.5R first target
+    assert basis == "1.5R"
 
 
-def test_compute_tp1_swing_exception_inside_16_20_r_window():
-    swing_prices = [117.0]  # 1.7R from entry -- inside [1.6R, 2.0R)
+def test_compute_tp1_swing_exception_inside_exception_window():
+    swing_prices = [113.0]  # 1.3R from entry -- inside [1.2R, 1.5R)
     tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=swing_prices)
-    assert tp1 == 117.0
+    assert tp1 == 113.0
     assert basis == "FVG/swing exception"
 
 
 def test_compute_tp1_fvg_exception_uses_near_edge():
-    fvg_zones = [{"direction": "BULLISH", "bottom": 117.0, "top": 119.0, "index": 0}]
+    fvg_zones = [{"direction": "BULLISH", "bottom": 113.0, "top": 115.0, "index": 0}]
     tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=fvg_zones, swing_prices=[])
-    assert tp1 == 117.0  # near edge (bottom) for a BUY, inside [1.6R, 2.0R)
+    assert tp1 == 113.0  # near edge (bottom) for a BUY, inside [1.2R, 1.5R)
     assert basis == "FVG/swing exception"
 
 
 def test_compute_tp1_ignores_candidates_outside_the_window():
-    swing_prices = [114.0]  # 1.4R -- below the 1.6R floor
+    swing_prices = [110.0]  # 1.0R -- below the 1.2R floor
     tp1, basis = strat.compute_tp1("BUY", entry=100.0, risk=10.0, fvg_zones=[], swing_prices=swing_prices)
-    assert tp1 == 120.0
-    assert basis == "2.0R"
+    assert tp1 == 115.0
+    assert basis == "1.5R"
 
 
 def test_compute_tp2_uses_nearest_level_ahead():
@@ -637,9 +637,9 @@ def test_worked_example_us100_long():
     assert risk == 60.0
 
     tp1, _ = strat.compute_tp1("BUY", entry, risk, fvg_zones=[], swing_prices=[])
-    assert tp1 == 27020.0   # entry + 2.0R (2:1 first target)
+    assert tp1 == 26990.0   # entry + 1.5R first target
 
-    # A pooled level beyond TP1 (27020) caps TP2 there; else the 3.0R fallback.
+    # A pooled level beyond TP1 (26990) caps TP2 there; else the 3.0R fallback.
     tp2_with_pdh, from_level = strat.compute_tp2("BUY", entry, risk, levels=[27050.0], tp1_price=tp1)
     assert tp2_with_pdh == 27050.0 and from_level is True
     tp2_fallback, from_level = strat.compute_tp2("BUY", entry, risk, levels=[])
@@ -665,7 +665,7 @@ def test_worked_example_eurusd_long():
     assert round(risk, 5) == 0.00260
 
     tp1, _ = strat.compute_tp1("BUY", entry, risk, fvg_zones=[], swing_prices=[])
-    assert round(tp1, 5) == 1.18220   # entry + 2.0R
+    assert round(tp1, 5) == 1.18090   # entry + 1.5R
 
     tp3, from_level = strat.compute_tp3("BUY", entry, risk, tp2_price=entry, levels=[])
     assert round(tp3, 5) == 1.18740   # entry + 4.0R

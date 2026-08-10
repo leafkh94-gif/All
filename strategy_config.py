@@ -59,6 +59,7 @@ SCAN_INTERVAL_MINUTES = 15
 # ─────────────────────────────────────────────────────────────────────
 PATTERN_QUALITY_BASE_MAX = 38
 PATTERN_QUALITY_BONUS_MAX = 10
+PATTERN_QUALITY_NORMALIZED_MAX = 40   # all detector qualities are mapped to [0, 40] before scoring
 
 # ── Detector sensitivity (how readily each of the 5 patterns fires) ──
 # Loosened so the detectors speak more often on ordinary price action --
@@ -94,6 +95,8 @@ SCALP_FVG_MIN_ATR = 0.10             # min FVG gap size (in ATR) — filters noi
 SCALP_ENTRY_FIB = 0.50               # retrace ratio on the displacement leg
 SCALP_STOP_ATR_BUFFER = 0.20         # stop buffer behind sweep extreme (< 0.5 intentionally)
 SCALP_TP1_R_MULT = 1.0               # 1R first target → breakeven fast (spec says do NOT use 2.0)
+SCALP_TP2_R_MULT = 1.5               # 1.5R second tier (between TP1=1R and TP3=2R)
+SCALP_TP_FINAL_R_MULT = 2.0          # 2R runner target
 SCALP_BOS_MAX_BARS = 5               # max bars from sweep to BOS close
 SCALP_ENTRY_MAX_BARS = 8             # max bars from BOS to entry trigger
 SCALP_MAX_SPREAD_R_FRAC = 0.15       # skip if spread > 15% of R
@@ -191,12 +194,11 @@ ROUND_NUMBER_OFFSET_TABLE = {
     "A50":    (50, 5),
 }
 
-# TP1 raised to a 2:1 reward-to-risk first target (per "How to Find the
-# Perfect Entry" -- the first meaningful target should justify the risk).
-# TP2/TP3 fallbacks bumped above it so the three targets stay ordered.
-TP1_R_MULT = 2.0
-TP1_EXCEPTION_MIN_R = 1.6            # an unfilled FVG/minor swing in [1.6R, 2.0R) overrides raw TP1
-TP1_EXCEPTION_MAX_R = 2.0
+# TP1 at 1.5R — balances reward against M15 pullback frequency. The old
+# 2.0R rarely filled before stop, so breakeven protection never kicked in.
+TP1_R_MULT = 1.5
+TP1_EXCEPTION_MIN_R = 1.2            # an unfilled FVG/minor swing in [1.2R, 1.5R) overrides raw TP1
+TP1_EXCEPTION_MAX_R = 1.5
 TP2_R_MULT = 3.0                     # fallback when no liquidity level sits beyond TP1
 TP3_R_MULT = 4.0                     # fallback (also the ceiling vs. any external level beyond TP2)
 

@@ -142,11 +142,13 @@ def detect_sd_rejection(df, lookback=20):
     if lower / rng > wick and last["c"] > last["o"]:
         quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 20 + (lower / rng - wick) / span * 18))
         return {"pattern": "SD_REJECTION", "direction": "BUY",
-                "sweep_price": float(last["l"]), "leg_extreme": float(last["l"]), "quality": quality}
+                "sweep_price": float(last["l"]), "leg_extreme": float(last["l"]), "quality": quality,
+                "quality_max": cfg.PATTERN_QUALITY_BASE_MAX}
     if upper / rng > wick and last["c"] < last["o"]:
         quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 20 + (upper / rng - wick) / span * 18))
         return {"pattern": "SD_REJECTION", "direction": "SELL",
-                "sweep_price": float(last["h"]), "leg_extreme": float(last["h"]), "quality": quality}
+                "sweep_price": float(last["h"]), "leg_extreme": float(last["h"]), "quality": quality,
+                "quality_max": cfg.PATTERN_QUALITY_BASE_MAX}
     return None
 
 
@@ -163,7 +165,8 @@ def detect_head_shoulders(df, lookback=30, tolerance=cfg.HEAD_SHOULDERS_TOLERANC
             if symmetry > (1 - tolerance):
                 quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 25 + symmetry * 13))
                 return {"pattern": "HEAD_SHOULDERS", "direction": "SELL",
-                        "sweep_price": float(head[1]), "leg_extreme": float(head[1]), "quality": quality}
+                        "sweep_price": float(head[1]), "leg_extreme": float(head[1]), "quality": quality,
+                        "quality_max": cfg.PATTERN_QUALITY_BASE_MAX}
     ls = _swings(window, "low")
     if len(ls) >= 3:
         l_sh, head, r_sh = ls[-3], ls[-2], ls[-1]
@@ -172,7 +175,8 @@ def detect_head_shoulders(df, lookback=30, tolerance=cfg.HEAD_SHOULDERS_TOLERANC
             if symmetry > (1 - tolerance):
                 quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 25 + symmetry * 13))
                 return {"pattern": "HEAD_SHOULDERS", "direction": "BUY",
-                        "sweep_price": float(head[1]), "leg_extreme": float(head[1]), "quality": quality}
+                        "sweep_price": float(head[1]), "leg_extreme": float(head[1]), "quality": quality,
+                        "quality_max": cfg.PATTERN_QUALITY_BASE_MAX}
     return None
 
 
@@ -205,10 +209,12 @@ def detect_flag(df, lookback=15):
     quality = int(min(cfg.PATTERN_QUALITY_BASE_MAX, 22 + (tight_max - tightness) / tight_max * 16))
     if last["c"] > cons_high:
         return {"pattern": "FLAG", "direction": "BUY", "sweep_price": float(cons_high),
-                "leg_extreme": float(cons_high), "quality": quality}
+                "leg_extreme": float(cons_high), "quality": quality,
+                "quality_max": cfg.PATTERN_QUALITY_BASE_MAX}
     if last["c"] < cons_low:
         return {"pattern": "FLAG", "direction": "SELL", "sweep_price": float(cons_low),
-                "leg_extreme": float(cons_low), "quality": quality}
+                "leg_extreme": float(cons_low), "quality": quality,
+                "quality_max": cfg.PATTERN_QUALITY_BASE_MAX}
     return None
 
 
@@ -236,7 +242,8 @@ def detect_news_retest(df, lookback=15, spike_mult=cfg.NEWS_RETEST_SPIKE_MULT):
     direction = "BUY" if spike["c"] > spike["o"] else "SELL"
     leg_extreme = float(spike["l"]) if direction == "BUY" else float(spike["h"])
     return {"pattern": "NEWS_RETEST", "direction": direction, "sweep_price": float(midpoint),
-            "leg_extreme": leg_extreme, "quality": quality}
+            "leg_extreme": leg_extreme, "quality": quality,
+            "quality_max": cfg.PATTERN_QUALITY_BASE_MAX}
 
 
 def _scalp_swings(df, kind, window=cfg.SCALP_SWING_LOOKBACK):
@@ -469,15 +476,17 @@ def _scalp_gate_sequence(df, direction, atr_val):
         return None
 
     tp1 = entry_price + cfg.SCALP_TP1_R_MULT * risk if is_buy else entry_price - cfg.SCALP_TP1_R_MULT * risk
-    tp_final = entry_price + 2.0 * risk if is_buy else entry_price - 2.0 * risk
+    tp2 = entry_price + cfg.SCALP_TP2_R_MULT * risk if is_buy else entry_price - cfg.SCALP_TP2_R_MULT * risk
+    tp_final = entry_price + cfg.SCALP_TP_FINAL_R_MULT * risk if is_buy else entry_price - cfg.SCALP_TP_FINAL_R_MULT * risk
 
     # Quality based on how many confirmations we got
+    scalp_quality_max = 35
     quality = 28
     if has_fvg:
         quality += 4
     if disp_found:
         quality += 3
-    quality = min(cfg.PATTERN_QUALITY_BASE_MAX, quality)
+    quality = min(scalp_quality_max, quality)
 
     return {
         "pattern": "SCALP_SWEEP_BOS",
@@ -485,10 +494,12 @@ def _scalp_gate_sequence(df, direction, atr_val):
         "sweep_price": float(liq_level),
         "leg_extreme": sweep_extreme,
         "quality": quality,
+        "quality_max": scalp_quality_max,
         "has_fvg": has_fvg,
         "scalp_entry": round(entry_price, 5),
         "scalp_stop": round(stop, 5),
         "scalp_tp1": round(tp1, 5),
+        "scalp_tp2": round(tp2, 5),
         "scalp_tp_final": round(tp_final, 5),
         "scalp_leg_origin": sweep_extreme,
         "scalp_leg_end": bos_close,
@@ -498,7 +509,6 @@ def _scalp_gate_sequence(df, direction, atr_val):
 
 
 PATTERN_DETECTORS = [
-    detect_liquidity_sweep_bos,
     detect_sd_rejection,
     detect_head_shoulders,
     detect_flag,
@@ -507,19 +517,32 @@ PATTERN_DETECTORS = [
 ]
 
 
+def _normalized_quality(candidate):
+    """Quality as a fraction of the detector's ceiling, for fair cross-detector
+    comparison (a scalp at 35/35 should beat an SD_REJECTION at 35/38)."""
+    qmax = candidate.get("quality_max", cfg.PATTERN_QUALITY_BASE_MAX)
+    return candidate["quality"] / qmax if qmax > 0 else 0
+
+
 def find_candidate(entry_candles):
     """Run all pattern detectors — the scalp detector (strict 6-gate),
-    3 SMC-library detectors, plus the original 5 — and return the
-    highest-quality match."""
+    3 SMC-library detectors, plus the original 4 — and return the
+    highest-quality match (normalized across detector ceilings)."""
     df = _df(entry_candles)
     best = None
+    best_norm = -1
     for detector in PATTERN_DETECTORS:
         result = detector(df)
-        if result and (best is None or result["quality"] > best["quality"]):
-            best = result
+        if result:
+            norm = _normalized_quality(result)
+            if norm > best_norm:
+                best = result
+                best_norm = norm
     smc_result = find_smc_candidate(entry_candles)
-    if smc_result and (best is None or smc_result["quality"] > best["quality"]):
-        best = smc_result
+    if smc_result:
+        norm = _normalized_quality(smc_result)
+        if norm > best_norm:
+            best = smc_result
     return best
 
 
@@ -833,8 +856,11 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
                      "score": None, "htf_bias": htf, "blocked": "invalid ATR"}
         return None
 
-    breakdown = {"pattern": candidate["pattern"], "pattern_quality": candidate["quality"]}
-    total = candidate["quality"]
+    quality_max = candidate.get("quality_max", cfg.PATTERN_QUALITY_BASE_MAX)
+    normalized_quality = round(candidate["quality"] / quality_max * cfg.PATTERN_QUALITY_NORMALIZED_MAX) if quality_max > 0 else 0
+    breakdown = {"pattern": candidate["pattern"], "pattern_quality": candidate["quality"],
+                 "pattern_quality_normalized": normalized_quality}
+    total = normalized_quality
 
     total += technical_confirm_score(df_entry, direction)
     bias_pts, bias_tag = daily_bias_score(htf, direction)
@@ -922,7 +948,23 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
 
     spread = market["entry"][-1].get("spread") or 0.0
 
+    # TP2/TP3 liquidity pools (shared by SMC and generic exit paths)
+    if instrument == "BTCUSD":
+        d_open = market_sessions.daily_open(market["entry"], now_utc)
+        w_open = market_sessions.weekly_open(market["entry"], now_utc)
+        tp2_pool = [lvl for lvl in (pdh, pdl, d_open, w_open) if lvl is not None]
+    else:
+        asian_h, asian_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.ASIAN_SESSION)
+        london_h, london_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.LONDON_SESSION)
+        ny_h, ny_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.NY_SESSION)
+        tp2_pool = [lvl for lvl in (pdh, pdl, asian_h, asian_l, london_h, london_l, ny_h, ny_l) if lvl is not None]
+        tp2_pool += [z["price"] for z in eqh_eql_zones]
+    h4_swings = [p for _, p in _swings(_df(market["h4"]), "high" if direction == "BUY" else "low")]
+    tp3_pool = [lvl for lvl in (pwh, pwl) if lvl is not None] + h4_swings
+
     is_scalp = candidate["pattern"] == "SCALP_SWEEP_BOS"
+    _SMC_PATTERNS = {"ORDER_BLOCK", "CHOCH_REVERSAL", "SMC_LIQUIDITY_SWEEP"}
+    is_smc = candidate["pattern"] in _SMC_PATTERNS and candidate.get("smc_entry") is not None
 
     if is_scalp:
         entry = candidate["scalp_entry"]
@@ -941,15 +983,40 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
                          "blocked": f"spread {spread:.2f} exceeds {cfg.SCALP_MAX_SPREAD_R_FRAC*100:.0f}% of R ({risk:.2f})"}
             return None
         tp1 = candidate["scalp_tp1"]
-        tp_final = candidate["scalp_tp_final"]
+        tp2 = candidate["scalp_tp2"]
+        tp3 = candidate["scalp_tp_final"]
         leg_origin = candidate["scalp_leg_origin"]
         leg_end = candidate["scalp_leg_end"]
         exits = {
             "entry_price": round(entry, 5), "stop_loss": round(stop, 5),
-            "tp1": round(tp1, 5), "tp2": round(tp_final, 5), "tp3": round(tp_final, 5),
+            "tp1": round(tp1, 5), "tp2": round(tp2, 5), "tp3": round(tp3, 5),
             "entry_basis": "scalp 50% FVG retrace", "tp1_basis": f"{cfg.SCALP_TP1_R_MULT:.1f}R (scalp)",
             "tp2_capped": False, "tp3_capped": False,
             "leg_origin": round(leg_origin, 5), "leg_end": round(leg_end, 5),
+        }
+    elif is_smc:
+        entry = candidate["smc_entry"]
+        stop = candidate["smc_stop"]
+        risk = abs(entry - stop)
+        if risk <= 0:
+            if diagnostic:
+                return {"instrument": instrument, "direction": direction, "pattern": candidate["pattern"],
+                         "score": int(round(total)), "htf_bias": htf,
+                         "blocked": "non-positive risk (SMC entry/stop construction failed)"}
+            return None
+        tp1 = candidate["smc_tp1"]
+        tp1_basis = f"{cfg.TP1_R_MULT:.1f}R (SMC)"
+        entry_basis = candidate.get("smc_entry_basis", "SMC level")
+        tp2, tp2_from_level = compute_tp2(direction, entry, risk, tp2_pool, tp1_price=tp1)
+        tp3, tp3_from_level = compute_tp3(direction, entry, risk, tp2, tp3_pool)
+        leg_origin = candidate.get("leg_extreme", entry)
+        leg_end = tp1
+        exits = {
+            "entry_price": round(entry, 5), "stop_loss": round(stop, 5),
+            "tp1": round(tp1, 5), "tp2": round(tp2, 5), "tp3": round(tp3, 5),
+            "entry_basis": entry_basis, "tp1_basis": tp1_basis,
+            "tp2_capped": tp2_from_level, "tp3_capped": tp3_from_level,
+            "leg_origin": round(float(leg_origin), 5), "leg_end": round(float(leg_end), 5),
         }
     else:
         leg = find_leg(market["entry"], direction)
@@ -976,21 +1043,7 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
 
         m15_swing_prices = [p for _, p in _swings(df_entry, "high" if direction == "BUY" else "low")]
         tp1, tp1_basis = compute_tp1(direction, entry, risk, m15_fvg_zones, m15_swing_prices)
-
-        if instrument == "BTCUSD":
-            d_open = market_sessions.daily_open(market["entry"], now_utc)
-            w_open = market_sessions.weekly_open(market["entry"], now_utc)
-            tp2_pool = [lvl for lvl in (pdh, pdl, d_open, w_open) if lvl is not None]
-        else:
-            asian_h, asian_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.ASIAN_SESSION)
-            london_h, london_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.LONDON_SESSION)
-            ny_h, ny_l = market_sessions.session_range(market["entry"], now_utc, *market_sessions.NY_SESSION)
-            tp2_pool = [lvl for lvl in (pdh, pdl, asian_h, asian_l, london_h, london_l, ny_h, ny_l) if lvl is not None]
-            tp2_pool += [z["price"] for z in eqh_eql_zones]
         tp2, tp2_from_level = compute_tp2(direction, entry, risk, tp2_pool, tp1_price=tp1)
-
-        h4_swings = [p for _, p in _swings(_df(market["h4"]), "high" if direction == "BUY" else "low")]
-        tp3_pool = [lvl for lvl in (pwh, pwl) if lvl is not None] + h4_swings
         tp3, tp3_from_level = compute_tp3(direction, entry, risk, tp2, tp3_pool)
 
         exits = {
