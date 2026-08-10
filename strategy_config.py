@@ -80,6 +80,24 @@ SMC_CHOCH_MAX_RECENCY = 10           # CHOCH break must be within this many bars
 SMC_LIQUIDITY_RANGE_PCT = 0.01       # 1% of total range for grouping swing levels as "equal"
 SMC_SWEEP_RECENCY = 5                # swept liquidity must be within this many bars
 
+# ── Scalp detector: Sweep → Displacement → BOS → FVG/50% Entry ──────
+# Strict 6-gate structural detector (scalp_detector_spec v1.0). All gates
+# must pass in order. Fixes the LIQUIDITY_SWEEP_BOS bug: the old detector
+# fires on sweep+rejection alone without a real BOS close.
+SCALP_SWING_LOOKBACK = 2              # fractal window for micro-structure swings
+SCALP_EQ_TOL_ATR = 0.10              # tolerance for "equal" highs/lows (in ATR)
+SCALP_SWEEP_MIN_PEN_ATR = 0.05       # min penetration beyond liquidity level (in ATR)
+SCALP_SWEEP_REJECTION_RATIO = 0.50   # min wick-to-range ratio for sweep rejection shape
+SCALP_DISP_BODY_RATIO = 0.60         # min body/range ratio for displacement candle
+SCALP_DISP_MIN_ATR = 0.80            # min displacement body size (in ATR)
+SCALP_FVG_MIN_ATR = 0.10             # min FVG gap size (in ATR) — filters noise gaps
+SCALP_ENTRY_FIB = 0.50               # retrace ratio on the displacement leg
+SCALP_STOP_ATR_BUFFER = 0.20         # stop buffer behind sweep extreme (< 0.5 intentionally)
+SCALP_TP1_R_MULT = 1.0               # 1R first target → breakeven fast (spec says do NOT use 2.0)
+SCALP_BOS_MAX_BARS = 5               # max bars from sweep to BOS close
+SCALP_ENTRY_MAX_BARS = 8             # max bars from BOS to entry trigger
+SCALP_MAX_SPREAD_R_FRAC = 0.15       # skip if spread > 15% of R
+
 TECHNICAL_CONFIRM_ALL_ALIGNED = 10   # 2-3 of RSI/MACD/EMA aligned
 TECHNICAL_CONFIRM_ONE_ALIGNED = 4
 TECHNICAL_CONFIRM_NONE_ALIGNED = 0
