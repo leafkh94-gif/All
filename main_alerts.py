@@ -104,7 +104,7 @@ class ActiveEntryTracker:
         return instrument in self._data
 
     def add(self, scored, now_utc):
-        self._data[scored["instrument"]] = {
+        record = {
             "direction": scored["direction"],
             "entry_price": scored["entry_price"],
             "stop_loss": scored.get("stop_loss"),
@@ -116,6 +116,11 @@ class ActiveEntryTracker:
             "pattern": scored.get("pattern"),
             "alert_time": now_utc.isoformat(),
         }
+        if scored.get("pattern") == "SCALP_SWEEP_BOS":
+            for k in ("has_fvg", "scalp_leg_origin", "scalp_structure_level", "scalp_bos_close"):
+                if scored.get(k) is not None:
+                    record[k] = scored[k]
+        self._data[scored["instrument"]] = record
         save_json(self.path, self._data)
 
     def _cancel(self, instrument, entry, reason, now_utc):
@@ -231,7 +236,7 @@ class OpenTradeTracker:
     def add(self, scored, now_utc):
         entry_price = scored["entry_price"]
         stop_loss = scored["stop_loss"]
-        self._data[scored["instrument"]] = {
+        record = {
             "direction": scored["direction"],
             "pattern": scored.get("pattern"),
             "entry_price": entry_price,
@@ -248,17 +253,31 @@ class OpenTradeTracker:
             "mfe": 0.0,
             "mae": 0.0,
         }
+        if scored.get("pattern") == "SCALP_SWEEP_BOS":
+            record["has_fvg"] = scored.get("has_fvg")
+            record["sweep_extreme"] = scored.get("scalp_leg_origin")
+            record["structure_level"] = scored.get("scalp_structure_level")
+            record["bos_close"] = scored.get("scalp_bos_close")
+            record["leg_origin"] = scored.get("leg_origin")
+            record["leg_end"] = scored.get("leg_end")
+        self._data[scored["instrument"]] = record
         save_json(self.path, self._data)
 
     def _close(self, instrument, t, now_utc, outcome, r_multiple):
         del self._data[instrument]
         save_json(self.path, self._data)
-        _append_trade_log({
+        log_entry = {
             "instrument": instrument, "pattern": t.get("pattern"), "direction": t["direction"],
             "outcome": outcome, "r_multiple": round(r_multiple, 2), "closed_at": now_utc.isoformat(),
             "mfe": round(t.get("mfe", 0.0), 5),
             "mae": round(t.get("mae", 0.0), 5),
-        }, path=self.trade_log_path)
+        }
+        if t.get("pattern") == "SCALP_SWEEP_BOS":
+            for k in ("has_fvg", "sweep_extreme", "structure_level", "bos_close",
+                       "leg_origin", "leg_end", "entry_price", "initial_risk"):
+                if t.get(k) is not None:
+                    log_entry[k] = t[k]
+        _append_trade_log(log_entry, path=self.trade_log_path)
 
     def _maybe_trail_runner_stop(self, instrument, t, feed):
         """Runner-phase (post-TP2) optional trail: move SL to the most
