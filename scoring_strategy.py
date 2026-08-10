@@ -19,6 +19,7 @@ import scoring_indicators as ind
 import strategy_config as cfg
 from strategy import modes
 from strategy import whale_tracker
+from strategy.smc_detector import find_smc_candidate
 
 STATE_DIR = "state"
 PENDING_APLUS_PATH = os.path.join(STATE_DIR, "pending_aplus.json")
@@ -248,14 +249,20 @@ PATTERN_DETECTORS = [
 
 
 def find_candidate(entry_candles):
-    """Run all 5 pattern detectors on the entry-timeframe candles and return the
-    highest-quality match, or None."""
+    """Run all pattern detectors — the 3 SMC-library detectors (Order Block,
+    CHOCH, enhanced liquidity sweep) plus the original 5 — and return the
+    highest-quality match. SMC patterns tend to score higher because they
+    encode institutional footprints, but a strong classic pattern still wins
+    on quality alone."""
     df = _df(entry_candles)
     best = None
     for detector in PATTERN_DETECTORS:
         result = detector(df)
         if result and (best is None or result["quality"] > best["quality"]):
             best = result
+    smc_result = find_smc_candidate(entry_candles)
+    if smc_result and (best is None or smc_result["quality"] > best["quality"]):
+        best = smc_result
     return best
 
 

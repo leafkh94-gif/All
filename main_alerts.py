@@ -375,6 +375,22 @@ class OpenTradeTracker:
 # ─────────────────────────────────────────────────────────────────────
 # Alert formatting (Section 3.3 initial WATCH send, Section 7 A+ format)
 # ─────────────────────────────────────────────────────────────────────
+_PATTERN_DISPLAY = {
+    "LIQUIDITY_SWEEP_BOS": "Liquidity Sweep + BOS",
+    "SD_REJECTION": "Supply/Demand Rejection",
+    "HEAD_SHOULDERS": "Head & Shoulders",
+    "FLAG": "Flag Breakout",
+    "NEWS_RETEST": "News Retest",
+    "ORDER_BLOCK": "Order Block (SMC)",
+    "CHOCH_REVERSAL": "Change of Character",
+    "SMC_LIQUIDITY_SWEEP": "Liquidity Sweep (SMC)",
+}
+
+
+def _pattern_name(raw):
+    return _PATTERN_DISPLAY.get(raw, raw)
+
+
 def _level_description(scored):
     b = scored["breakdown"]
     if b.get("pdh_pdl"):
@@ -443,7 +459,7 @@ def format_aplus_alert(scored, now_utc, mode=None):
         f"TP2:        {scored['tp2']}{tp2_note}   ← close 30%, SL to TP1\n"
         f"TP3:        {scored['tp3']}{tp3_note}   ← runner 20%, trail after TP2\n\n"
         f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(cfg.PENDING_ORDER_MAX_MINUTES)})\n\n"
-        f"📋 Reason: {scored['breakdown']['pattern']} at {_level_description(scored)}\n"
+        f"📋 Reason: {_pattern_name(scored['breakdown']['pattern'])} at {_level_description(scored)}\n"
         f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}"
         f"{_format_timeframes(scored)}\n\n"
         f"After TP1 → SL to breakeven. After TP2 → SL to TP1, runner (20%) targets TP3.\n"
