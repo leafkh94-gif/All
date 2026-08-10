@@ -245,6 +245,8 @@ class OpenTradeTracker:
             "locked_r": 0.0,
             "warned_1800": False,
             "opened_at": now_utc.isoformat(),
+            "mfe": 0.0,
+            "mae": 0.0,
         }
         save_json(self.path, self._data)
 
@@ -254,6 +256,8 @@ class OpenTradeTracker:
         _append_trade_log({
             "instrument": instrument, "pattern": t.get("pattern"), "direction": t["direction"],
             "outcome": outcome, "r_multiple": round(r_multiple, 2), "closed_at": now_utc.isoformat(),
+            "mfe": round(t.get("mfe", 0.0), 5),
+            "mae": round(t.get("mae", 0.0), 5),
         }, path=self.trade_log_path)
 
     def _maybe_trail_runner_stop(self, instrument, t, feed):
@@ -282,6 +286,12 @@ class OpenTradeTracker:
             is_buy = t["direction"] == "BUY"
             entry_price, initial_risk = t["entry_price"], t["initial_risk"]
             closed_this_cycle = False
+
+            excursion = (price - entry_price) if is_buy else (entry_price - price)
+            if excursion > t.get("mfe", 0.0):
+                t["mfe"] = excursion
+            if excursion < t.get("mae", 0.0):
+                t["mae"] = excursion
 
             if not t["tp1_hit"]:
                 hit_tp1 = price >= t["tp1"] if is_buy else price <= t["tp1"]
@@ -384,6 +394,7 @@ _PATTERN_DISPLAY = {
     "ORDER_BLOCK": "Order Block (SMC)",
     "CHOCH_REVERSAL": "Change of Character",
     "SMC_LIQUIDITY_SWEEP": "Liquidity Sweep (SMC)",
+    "SCALP_SWEEP_BOS": "Scalp Sweep + BOS",
 }
 
 
