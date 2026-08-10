@@ -73,6 +73,13 @@ NEWS_RETEST_SPIKE_MULT = 2.0         # min spike range in ATRs (was 2.5); separa
 NEWS_RETEST_PROXIMITY = 0.7          # max distance (in ATR) from spike midpoint on retest (was 0.5)
 LIQUIDITY_SWEEP_LOOKBACK = 15        # bars back for the swept swing high/low (was 20)
 
+# ── SMC library integration (Order Block + CHOCH + enhanced liquidity) ──
+SMC_SWING_LENGTH = 7                  # swing detection window (doubled internally by the library); 7 ≈ 1h45m on M15
+SMC_OB_MAX_DISTANCE_ATR = 4.0        # max distance (in ATR) from current price to an unmitigated OB
+SMC_CHOCH_MAX_RECENCY = 10           # CHOCH break must be within this many bars of the latest candle
+SMC_LIQUIDITY_RANGE_PCT = 0.01       # 1% of total range for grouping swing levels as "equal"
+SMC_SWEEP_RECENCY = 5                # swept liquidity must be within this many bars
+
 TECHNICAL_CONFIRM_ALL_ALIGNED = 10   # 2-3 of RSI/MACD/EMA aligned
 TECHNICAL_CONFIRM_ONE_ALIGNED = 4
 TECHNICAL_CONFIRM_NONE_ALIGNED = 0
