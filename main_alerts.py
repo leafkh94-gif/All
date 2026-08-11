@@ -36,9 +36,14 @@ MODE_STATE_PATH = os.path.join(STATE_DIR, "mode.json")
 # Telegram
 # ─────────────────────────────────────────────────────────────────────
 def send_telegram(text):
-    requests.post(
-        f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-        json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}, timeout=20)
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+            json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}, timeout=20)
+    except requests.RequestException as e:
+        # A transient Telegram error (429/5xx/network) must not raise out of a
+        # scan and drop the remaining instruments' alerts. Log and move on.
+        print(f"[telegram] send failed: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────
