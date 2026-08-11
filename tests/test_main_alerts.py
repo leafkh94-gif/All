@@ -707,3 +707,18 @@ def test_format_alert_without_timeframes_omits_section():
     scored = {"instrument": "US500", "direction": "BUY", "entry_price": 5400.0, "score": 66}
     body = ma.format_watch_alert(scored, dt.datetime(2026, 7, 1, 16, 0, tzinfo=dt.timezone.utc))
     assert "Timeframes" not in body
+
+
+def test_send_telegram_swallows_request_exception(monkeypatch):
+    """A transient Telegram error must not raise out of the scan and drop the
+    remaining instruments' alerts."""
+    import requests
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
+
+    def boom(*a, **k):
+        raise requests.ConnectionError("network is down")
+
+    monkeypatch.setattr(ma.requests, "post", boom)
+    # Should not raise.
+    ma.send_telegram("hello")
