@@ -5,6 +5,7 @@ Kept independent of scoring logic; only responsible for market data (Section 1.2
 import json
 import os
 import time
+from datetime import datetime
 
 import requests
 
@@ -113,6 +114,14 @@ class CapitalFeed:
             # Capital.com's price objects may also carry an "ask" alongside
             "spread": _implied_spread(c),
         } for c in data]
+        # Guarantee chronological (oldest-first) order. Capital.com does not
+        # reliably return prices oldest-first, and every consumer treats
+        # candles[-1] / .iloc[-1] as the latest bar (and daily[-2] as the
+        # previous day), so an unsorted feed would silently invert the read.
+        try:
+            candles.sort(key=lambda k: datetime.fromisoformat(str(k["t"]).replace("Z", "+00:00")))
+        except Exception:
+            candles.sort(key=lambda k: str(k["t"]))
         if candles:
             with open(p, "w") as f:
                 json.dump(candles, f)

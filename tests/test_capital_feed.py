@@ -69,6 +69,29 @@ def test_get_candles_prefers_snapshot_time_utc_when_present(tmp_path, monkeypatc
     assert candles[0]["t"] == "2026-01-01T04:00:00"
 
 
+def test_get_candles_sorts_unsorted_response_oldest_first(tmp_path, monkeypatch):
+    """Capital.com does not guarantee oldest-first ordering; the feed must
+    sort so candles[-1] is always the latest bar."""
+    feed = CapitalFeed(api_key="k", email="e", password="p", cache_dir=str(tmp_path))
+    feed._cst, feed._token = "cst", "token"
+    feed._epics["US500"] = "EPIC"
+
+    # Return candles out of order: minute 2, then 0, then 1.
+    prices = [_price(2), _price(0), _price(1)]
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        return FakeResponse(prices)
+
+    monkeypatch.setattr("strategy.capital_feed.requests.get", fake_get)
+
+    candles = feed.get_candles("US500", "1h", n=3)
+    assert [c["t"] for c in candles] == [
+        "2026-01-01T00:00:00",
+        "2026-01-01T00:01:00",
+        "2026-01-01T00:02:00",
+    ]
+
+
 def test_get_candles_falls_back_to_snapshot_time_without_utc_field(tmp_path, monkeypatch):
     feed = CapitalFeed(api_key="k", email="e", password="p", cache_dir=str(tmp_path))
     feed._cst, feed._token = "cst", "token"
