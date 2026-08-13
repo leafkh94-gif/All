@@ -37,6 +37,29 @@ def ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
 
+def sma(series, period):
+    return series.rolling(period).mean()
+
+
+def zero_lag_sma(series, period):
+    # ZLSMA = 2 * SMA(n) - SMA(SMA(n), n) -- classic zero-lag correction that
+    # removes half the SMA's phase delay by subtracting an SMA of the SMA.
+    s = sma(series, period)
+    return 2 * s - sma(s, period)
+
+
+def donchian_channels(df, period=20):
+    """Turtle Trade Channel: rolling highest-high / lowest-low bands.
+
+    Returned bands include the current bar so `upper.iloc[-1]` is the highest
+    high of the last `period` bars (i.e. the level price is testing right
+    now), which is what the Golden Trio entry-side proximity check needs."""
+    upper = df["h"].rolling(period).max()
+    lower = df["l"].rolling(period).min()
+    mid = (upper + lower) / 2
+    return upper, lower, mid
+
+
 def rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)

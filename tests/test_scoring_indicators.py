@@ -19,6 +19,35 @@ def test_rsi_low_for_strong_downtrend():
     assert ind.rsi(df["c"]).iloc[-1] < 30
 
 
+def test_sma_matches_rolling_mean():
+    candles = make_candles(30, start_price=100.0, step=1.0, noise=0.0)
+    df = pd.DataFrame(candles)
+    s = ind.sma(df["c"], 5)
+    # Simple manual check on the last bar.
+    manual = df["c"].iloc[-5:].mean()
+    assert abs(s.iloc[-1] - manual) < 1e-9
+
+
+def test_zero_lag_sma_leads_ordinary_sma_in_a_trend():
+    # In a monotonic uptrend, ZLSMA should sit above the plain SMA because
+    # it corrects for the SMA's lag.
+    candles = make_candles(80, start_price=100.0, step=1.0, noise=0.0)
+    df = pd.DataFrame(candles)
+    s = ind.sma(df["c"], 20)
+    z = ind.zero_lag_sma(df["c"], 20)
+    assert z.iloc[-1] > s.iloc[-1]
+
+
+def test_donchian_channels_bracket_recent_range():
+    candles = make_candles(30, start_price=100.0, step=0.5, noise=2.0)
+    df = pd.DataFrame(candles)
+    upper, lower, mid = ind.donchian_channels(df, period=20)
+    window = df.iloc[-20:]
+    assert abs(upper.iloc[-1] - window["h"].max()) < 1e-9
+    assert abs(lower.iloc[-1] - window["l"].min()) < 1e-9
+    assert lower.iloc[-1] < mid.iloc[-1] < upper.iloc[-1]
+
+
 def test_atr_positive_when_ranges_exist():
     candles = make_candles(30, start_price=100.0, step=0.5, noise=1.0)
     df = pd.DataFrame(candles)

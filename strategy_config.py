@@ -290,6 +290,21 @@ ATR_TOO_VOLATILE_PENALTY = -10
 ENTRY_EXPIRY_HOURS = 2
 
 # ─────────────────────────────────────────────────────────────────────
+# 8.  Golden Trio strategy (gold-only signal source)
+# ─────────────────────────────────────────────────────────────────────
+GT_RSI_PERIOD = 14
+GT_RSI_OVERSOLD = 20
+GT_RSI_OVERBOUGHT = 80
+GT_RSI_CONFIRM_LEVEL = 40   # cross-up trigger for BUY; 60 (=100-40) for SELL
+GT_RSI_OVERSOLD_LOOKBACK = 3
+GT_ZLSMA_PERIOD = 50
+GT_ZLSMA_SLOPE_LOOKBACK = 30   # trend context, not reactive to the pullback itself
+GT_TURTLE_PERIOD = 20
+GT_PROXIMITY_ATR_MULT = 0.75   # "close to" Turtle band, in ATR units
+GT_SL_BUFFER_ATR_MULT = 0.25
+GT_QUALITY_MAX = 40
+
+# ─────────────────────────────────────────────────────────────────────
 # 9.1  Core principles
 # ─────────────────────────────────────────────────────────────────────
 ALERT_ONLY = True  # never executes trades
