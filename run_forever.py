@@ -111,7 +111,7 @@ def status_text():
     main_state = ma.load_json(ma.MAIN_STATE_PATH)
     watches = ma.load_json(os.path.join(ma.STATE_DIR, "watches.json"))
     open_trades = ma.load_json(ma.OPEN_TRADES_PATH)
-    pending = strat.PendingAPlusStore().all()
+    pending = dict(strat.PendingAPlusStore().items())
     mode_name = main_state.get("last_scan_mode") or ma.load_active_mode().name
     daily_loss = main_state.get("daily_loss_total", 0.0)
     limit = ma.cfg.DAILY_LOSS_LIMIT_USD

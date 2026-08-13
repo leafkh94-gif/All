@@ -8,16 +8,14 @@ Distinguish WHY the scanner reports "no pattern detected":
   2) TOLERANCE prob -> enough fresh data, but detectors are too tight and
                        rejected every near-miss candidate.
 
-MIN_BARS_NEEDED is the max of the 5 real pattern detectors' own minimums in
-scoring_strategy.py (detect_liquidity_sweep_bos >=23, detect_sd_rejection
->=20, detect_head_shoulders >=30, detect_flag >=16, detect_news_retest >=17)
--- head_shoulders' lookback=30 is the strictest, so that's the bar the
-scanner needs to clear for every detector to at least have a chance to run.
+MIN_BARS_NEEDED is set to the Golden Trio detector's requirement: ZLSMA(50)
+is an SMA-of-SMA so it needs at least ~100 bars to stabilise, plus a small
+head for the RSI oversold-lookback window. 110 gives comfortable slack.
 """
 
 from datetime import datetime, timezone
 
-MIN_BARS_NEEDED = 30
+MIN_BARS_NEEDED = 110
 
 # An M15 candle older than this many minutes means the feed is stale for
 # this instrument (common on indices at a session open, e.g. Monday).
