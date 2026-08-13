@@ -5,7 +5,7 @@ Kept independent of scoring logic; only responsible for market data (Section 1.2
 import json
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 import requests
 
@@ -15,9 +15,6 @@ CAPITAL_BASE = os.environ.get(
     "CAPITAL_BASE_URL", "https://demo-api-capital.backend-capital.com/api/v1")
 
 RESOLUTION = {"15min": "MINUTE_15", "5min": "MINUTE_5", "1h": "HOUR", "4h": "HOUR_4", "daily": "DAY"}
-# Minutes per bar -- used to size an explicit from/to window so Capital.com
-# actually returns the full `max=n` history instead of silently capping at ~80.
-RESOLUTION_MINUTES = {"15min": 15, "5min": 5, "1h": 60, "4h": 240, "daily": 1440}
 CACHE_TTL = {"15min": 0, "5min": 0, "1h": 3600, "4h": 14400, "daily": 3600}
 
 CACHE_DIR = ".cache"
@@ -104,15 +101,13 @@ class CapitalFeed:
             self._epics[instrument] = epic
 
         res = RESOLUTION[interval]
-        # Capital.com's /prices/{epic} silently caps at ~80 bars when only
-        # `max` is passed; supplying an explicit `from`/`to` window that
-        # spans (bar_minutes * n * 3) makes it actually return the full n
-        # (the 3x buffer covers weekend/session gaps for FX/gold).
-        bar_minutes = RESOLUTION_MINUTES.get(interval, 15)
-        now = datetime.now(timezone.utc).replace(microsecond=0)
-        frm = (now - timedelta(minutes=bar_minutes * n * 3)).strftime("%Y-%m-%dT%H:%M:%S")
-        to = now.strftime("%Y-%m-%dT%H:%M:%S")
-        params = {"resolution": res, "max": n, "from": frm, "to": to}
+        # PR #49 tried to add an explicit from/to window because /prices/{epic}
+        # capped at ~80 bars when only `max` was passed. That backfired:
+        # Capital.com returned the FIRST n bars starting at `from` (5 days ago)
+        # instead of the LAST n ending at `to`, producing 160 bars all >=48h
+        # old. Since PR #50 already reduced ZLSMA to 30 (only needs ~70 bars),
+        # the 80-bar cap is fine; use plain `max` and get fresh bars.
+        params = {"resolution": res, "max": n}
         r = requests.get(f"{CAPITAL_BASE}/prices/{epic}", headers=self._headers(),
                           params=params, timeout=20)
         if r.status_code == 401:  # session expired — re-auth once

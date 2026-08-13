@@ -48,7 +48,10 @@ jobs:
             bot-cache
       - run: pip install -r requirements.txt
       - name: Run bot (real-time relay, ~5h40m)
-        run: python run_forever.py
+        # -u disables stdout buffering so [capital_feed] resolved / scan
+        # diagnostics show up in the Actions log in real time instead of
+        # only after buffer flushes (or process exit).
+        run: python -u run_forever.py
         env:
           MAX_RUNTIME_MINUTES: "340"
           CAPITAL_API_KEY:    ${{ secrets.CAPITAL_API_KEY }}
