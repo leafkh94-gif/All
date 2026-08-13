@@ -574,7 +574,7 @@ def test_no_pattern_blocked_message_includes_bars_diagnostic():
     bars_diag = scan_diagnostics.bars_report("XAUUSD", too_few_candles, now)
     blocked = f"no pattern detected ({bars_diag.split(': ', 1)[1]})"
     assert "no pattern detected" in blocked
-    assert "10/110 bars" in blocked
+    assert "10/70 bars" in blocked
     assert "data problem" in blocked
 
 
