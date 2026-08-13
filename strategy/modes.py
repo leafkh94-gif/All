@@ -1,9 +1,7 @@
 """
-Trading modes — user-selectable profiles layered on top of strategy_config.py.
-
-STANDARD is derived from strategy_config so it can never silently drift from
-the bot's default (and only) behavior before modes existed. LOOSE and FAST
-are variants built via ._replace(), documented in the plan this implements.
+Trading mode config. Only STANDARD survives now that the bot is gold-only on
+one strategy. Kept as a NamedTuple + registry so run_forever.py's /mode
+command handling and every mode= call site continues to work unmodified.
 """
 from typing import NamedTuple
 
@@ -40,47 +38,7 @@ STANDARD = ModeConfig(
     session_cutoff_enabled=True,
 )
 
-# Same 15-min pacing as standard; only the alert gates move (relative gap
-# sizes preserved: WATCH-to-A+ and WATCH-to-collapse are both still 13/7).
-LOOSE = STANDARD._replace(
-    name="loose",
-    watch_min_score=55,
-    aplus_min_score=68,
-    watch_collapse_score=48,
-    atr_low_percentile=5,
-    atr_high_percentile=85,
-)
-
-# Shorter entry timeframe + faster cadence; every wall-clock timing field is
-# scaled by the same 5/15 ratio as the timeframe change, which preserves each
-# lifecycle's underlying candle count (16 candles to WATCH expiry, 3 candles
-# between updates, 8 candles to entry expiry) rather than the raw hour figure.
-FAST = STANDARD._replace(
-    name="fast",
-    entry_timeframe="5min",
-    scan_interval_minutes=5,
-    watch_expiry_minutes=80,
-    watch_update_interval_minutes=15,
-    entry_expiry_minutes=40,
-)
-
-# Genuine swing-trading tier (1h entries, holds intentionally across session
-# boundaries -- see the swing-trader definition this implements). Timing
-# fields scaled by the same 60/15 ratio as the timeframe change, preserving
-# the same 16/3/8-candle lifecycle counts as STANDARD. Score thresholds and
-# ATR percentile band are left at STANDARD's (self-normalizing either way),
-# matching FAST's reasoning.
-SWING = STANDARD._replace(
-    name="swing",
-    entry_timeframe="1h",
-    scan_interval_minutes=60,
-    watch_expiry_minutes=960,
-    watch_update_interval_minutes=180,
-    entry_expiry_minutes=480,
-    session_cutoff_enabled=False,
-)
-
-MODES = {"standard": STANDARD, "loose": LOOSE, "fast": FAST, "swing": SWING}
+MODES = {"standard": STANDARD}
 DEFAULT_MODE = "standard"
 
 

@@ -18,7 +18,6 @@ import strategy_config as cfg
 from strategy import modes
 from strategy import news_calendar
 from strategy import economic_calendar
-from strategy import whale_tracker
 from strategy import scan_diagnostics
 from strategy.capital_feed import CapitalFeed
 from strategy.watch_tracker import WatchTracker
@@ -432,15 +431,7 @@ class OpenTradeTracker:
 # Alert formatting (Section 3.3 initial WATCH send, Section 7 A+ format)
 # ─────────────────────────────────────────────────────────────────────
 _PATTERN_DISPLAY = {
-    "LIQUIDITY_SWEEP_BOS": "Liquidity Sweep + BOS",
-    "SD_REJECTION": "Supply/Demand Rejection",
-    "HEAD_SHOULDERS": "Head & Shoulders",
-    "FLAG": "Flag Breakout",
-    "NEWS_RETEST": "News Retest",
-    "ORDER_BLOCK": "Order Block (SMC)",
-    "CHOCH_REVERSAL": "Change of Character",
-    "SMC_LIQUIDITY_SWEEP": "Liquidity Sweep (SMC)",
-    "SCALP_SWEEP_BOS": "Scalp Sweep + BOS",
+    "GOLDEN_TRIO": "Golden Trio (Turtle + RSI + ZLSMA)",
 }
 
 
@@ -448,81 +439,54 @@ def _pattern_name(raw):
     return _PATTERN_DISPLAY.get(raw, raw)
 
 
-def _level_description(scored):
-    b = scored["breakdown"]
-    if b.get("pdh_pdl"):
-        return f"{b['pdh_pdl']} sweep"
-    if b.get("weekly_sweep"):
-        return f"{b['weekly_sweep']} sweep"
-    if b.get("eqh_eql"):
-        return "EQH/EQL liquidity zone"
-    if b.get("fvg"):
-        return "FVG retest zone"
-    return "key level"
-
-
-def _correlation_tag(instrument):
-    return f"\n{cfg.CORRELATION_CLUSTER_WARNING}" if instrument in cfg.CORRELATION_CLUSTER else ""
-
-
-_TF_ARROW = {"up": "▲", "down": "▼", "flat": "▬"}
-_TF_MARK = {"aligned": "✅ aligned", "against": "⚠️ against", "flat": "➖ flat"}
-
-
-def _format_timeframes(scored):
-    """Informational 15m / 1h / 4h trend read-out vs the trade direction.
-    Empty string if the scored dict has no timeframe data (older callers)."""
-    tf = scored.get("timeframes")
-    if not tf:
-        return ""
-    lines = [f"\n📊 Timeframes vs {scored['direction']}:"]
-    for label in ("15m", "1h", "4h"):
-        d = tf.get(label)
-        if not d:
-            continue
-        lines.append(f"   {label:>3}: {_TF_ARROW.get(d['trend'], '')} {d['trend']}  ({_TF_MARK.get(d['agree'], d['agree'])})")
-    return "\n".join(lines)
+def _breakdown_summary(scored):
+    parts = [f"{tag} {pts:+d}" for tag, pts in scored.get("breakdown", []) if pts]
+    return " · ".join(parts)
 
 
 def format_watch_alert(scored, expires_at, mode=None):
     m = mode or modes.STANDARD
-    entry_basis = scored.get("entry_basis", "50% leg retrace")
     return (
         f"⚡ WATCH — {scored['instrument']}\n"
-        f"Potential setup forming.\n"
+        f"Potential {_pattern_name(scored['pattern'])} forming.\n"
         f"Direction: {scored['direction']}\n"
-        f"Entry zone: {scored['entry_price']}  ({entry_basis})\n"
-        f"Score: {scored['score']}/100\n"
+        f"Entry zone: {scored['entry_price']:g}\n"
+        f"Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}\n"
         f"Expires: {expires_at.strftime('%H:%M')} UTC ({_format_duration(m.watch_expiry_minutes)})"
-        f"{_format_timeframes(scored)}"
-        f"{_correlation_tag(scored['instrument'])}"
     )
 
 
 def format_aplus_alert(scored, now_utc, mode=None):
     expiry = now_utc + timedelta(minutes=cfg.PENDING_ORDER_MAX_MINUTES)
-    entry_basis = scored.get("entry_basis", "50% leg retrace")
-    tp1_basis = scored.get("tp1_basis", f"{cfg.TP1_R_MULT:.1f}R")
-    tp2_note = "  (session/PDH-PDL level)" if scored.get("tp2_capped") else f"  ({cfg.TP2_R_MULT:.1f}R fallback)"
-    tp3_note = "  (external level)" if scored.get("tp3_capped") else f"  ({cfg.TP3_R_MULT:.1f}R fallback)"
     risk = abs(scored["entry_price"] - scored["stop_loss"])
+    rsi = scored.get("rsi")
+    zlsma = scored.get("zlsma")
+    lower = scored.get("turtle_lower")
+    upper = scored.get("turtle_upper")
+    diag_bits = []
+    if rsi is not None:
+        diag_bits.append(f"RSI {rsi:.1f}")
+    if zlsma is not None:
+        diag_bits.append(f"ZLSMA {zlsma:g}")
+    if lower is not None and upper is not None:
+        diag_bits.append(f"Turtle {lower:g}–{upper:g}")
+    diag_line = "   " + " · ".join(diag_bits) + "\n" if diag_bits else ""
     return (
         f"🟢 A+ SIGNAL — {scored['instrument']}\n\n"
         f"Direction:  {scored['direction']}\n"
-        f"Entry:      {scored['entry_price']}  ({entry_basis})\n"
-        f"Stop Loss:  {scored['stop_loss']}  (behind sweep wick + buffer)\n"
+        f"Entry:      {scored['entry_price']:g}\n"
+        f"Stop Loss:  {scored['stop_loss']:g}  (behind the reversal wick + buffer)\n"
         f"Risk (R):   {risk:g}\n"
-        f"TP1:        {scored['tp1']}  ({tp1_basis})   ← close 50%, SL to breakeven\n"
-        f"TP2:        {scored['tp2']}{tp2_note}   ← close 30%, SL to TP1\n"
-        f"TP3:        {scored['tp3']}{tp3_note}   ← runner 20%, trail after TP2\n\n"
+        f"TP1:        {scored['tp1']:g}   ← close 50%, SL to breakeven\n"
+        f"TP2:        {scored['tp2']:g}   ← close 30%, SL to TP1\n"
+        f"TP3:        {scored['tp3']:g}   (opposite Turtle band)  ← runner 20%\n\n"
         f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(cfg.PENDING_ORDER_MAX_MINUTES)})\n\n"
-        f"📋 Reason: {_pattern_name(scored['breakdown']['pattern'])} at {_level_description(scored)}\n"
-        f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}"
-        f"{_format_timeframes(scored)}\n\n"
+        f"📋 Reason: {_pattern_name(scored['pattern'])}\n"
+        f"{diag_line}"
+        f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}  |  {_breakdown_summary(scored)}\n\n"
         f"📐 Position size: your_risk_$ / {risk:g} = lots/units\n\n"
         f"After TP1 → SL to breakeven. After TP2 → SL to TP1, runner (20%) targets TP3.\n"
         f"18:00 UTC → get ready to close manually. 18:30 UTC hard flat → close all remaining."
-        f"{_correlation_tag(scored['instrument'])}"
     )
 
 
@@ -599,9 +563,9 @@ def build_market(feed, instrument, mode=None):
 # Section 5.6 — 3-candle confirmation for pending A+ setups
 # ─────────────────────────────────────────────────────────────────────
 def evaluate_pending_confirmations(pending_store, feed, level_store, now_utc, entry_tracker, main_state,
-                                    mode=None, whale_transactions=None):
+                                    mode=None):
     m = mode or modes.STANDARD
-    for instrument, scored in list(pending_store.all().items()):
+    for instrument, scored in pending_store.items():
         market = build_market(feed, instrument, mode=m)
         last_closed = market["entry"][-1]
         direction = scored["direction"]
@@ -616,8 +580,7 @@ def evaluate_pending_confirmations(pending_store, feed, level_store, now_utc, en
             cls = cfg.INSTRUMENTS[instrument]["class"]
             rescored = strat.score_candidate(
                 instrument, cls, candidate, market, now_utc, level_store,
-                confirmation_bonus=cfg.CONFIRMATION_CANDLE_BONUS, mode=m,
-                whale_transactions=whale_transactions)
+                pending_store=pending_store, mode=m)
 
         if rescored and rescored["score"] >= m.aplus_min_score:
             send_telegram(format_aplus_alert(rescored, now_utc, mode=m))
@@ -774,24 +737,6 @@ def maybe_send_health_check(main_state, watch_tracker, now_utc):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Correlation dedup — US indices are highly correlated; BTC is exempt (Section 1.5)
-# ─────────────────────────────────────────────────────────────────────
-def dedup_us_index_candidates(candidates):
-    by_direction = {}
-    keep = []
-    for instrument, scored in candidates:
-        cls = cfg.INSTRUMENTS[instrument]["class"]
-        if cls != "US_INDEX":
-            keep.append((instrument, scored))
-            continue
-        key = scored["direction"]
-        if key not in by_direction or scored["score"] > by_direction[key][1]["score"]:
-            by_direction[key] = (instrument, scored)
-    keep.extend(by_direction.values())
-    return keep
-
-
-# ─────────────────────────────────────────────────────────────────────
 # Main loop
 # ─────────────────────────────────────────────────────────────────────
 def daily_reset_if_needed(main_state, now_utc):
@@ -897,10 +842,6 @@ def run():
     suppress_new_alerts = (breaker_tripped or manual_blackout_active(main_state, now)
                            or news_blackout or econ_blackout)
 
-    # BTCUSD-only whale-flow confirmation bonus (see strategy/whale_tracker.py).
-    # Returns [] when WHALE_MONITORED_ADDRESSES is unset -- a pure no-op until then.
-    whale_transactions = whale_tracker.fetch_recent_whale_transactions(now)
-
     feed = CapitalFeed()
     feed.open_session()
     feed.resolve_epics()
@@ -921,8 +862,7 @@ def run():
         if not candidate or candidate["direction"] != direction:
             return None
         cls = cfg.INSTRUMENTS[instrument]["class"]
-        return strat.score_candidate(instrument, cls, candidate, market, now_utc, level_store, mode=mode,
-                                      whale_transactions=whale_transactions)
+        return strat.score_candidate(instrument, cls, candidate, market, now_utc, level_store, mode=mode)
 
     def on_upgrade(scored, now_utc):
         entry_tracker.add(scored, now_utc)
@@ -937,8 +877,7 @@ def run():
     watch_tracker.evaluate_all(now)
     open_trade_tracker.evaluate_all(now, feed, mode=mode)
     entry_tracker.evaluate_all(now, feed, mode=mode, open_tracker=open_trade_tracker)
-    evaluate_pending_confirmations(pending_store, feed, level_store, now, entry_tracker, main_state, mode=mode,
-                                    whale_transactions=whale_transactions)
+    evaluate_pending_confirmations(pending_store, feed, level_store, now, entry_tracker, main_state, mode=mode)
     maybe_send_health_check(main_state, watch_tracker, now)
 
     candidates = []
@@ -963,19 +902,20 @@ def run():
                                             "blocked": f"no pattern detected ({bars_diag.split(': ', 1)[1]})"}
                 continue
             scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store,
-                                            diagnostic=True, mode=mode, whale_transactions=whale_transactions)
+                                            mode=mode)
+            if scored is None:
+                diagnostics[instrument] = {"pattern": candidate["pattern"], "direction": candidate["direction"],
+                                            "score": None, "blocked": "H4 bias opposes entry direction"}
+                continue
             diagnostics[instrument] = {"pattern": scored["pattern"], "direction": scored["direction"],
-                                        "score": scored["score"], "blocked": scored["blocked"]}
-            if scored["blocked"] is None:
-                candidates.append((instrument, scored))
+                                        "score": scored["score"], "blocked": None}
+            candidates.append((instrument, scored))
         except Exception:
             # One instrument's scoring must never take down the scan for the
             # other three, or block an already-collected qualifying alert.
             print(f"[{instrument}] scoring failed:\n{traceback.format_exc()}")
             diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,
                                         "blocked": "internal error (see logs)"}
-
-    candidates = dedup_us_index_candidates(candidates)
 
     for instrument, scored in candidates:
         if suppress_new_alerts:

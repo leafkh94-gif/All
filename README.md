@@ -1,8 +1,14 @@
-# Trading Alert Bot
+# Gold Alert Bot — Golden Trio
 
-Alert-only trading bot for US500 / US100 / US30 / BTCUSD (Capital.com CFDs).
-Scans every 15 minutes, scores setups on a 100-point engine, and sends
-WATCH ⚡ / A+ 🟢 alerts to Telegram. **It suggests. It never executes trades.**
+Alert-only trading bot for **XAUUSD (Gold)** on Capital.com CFDs.
+Scans every 15 minutes on one strategy — **The Golden Trio**: Turtle Trade
+Channel + RSI (14) + Zero Lag SMA (50) — and sends WATCH ⚡ / A+ 🟢 alerts
+to Telegram. **It suggests. It never executes trades.**
+
+Signals fire on RSI oversold/overbought reversals at the Turtle band,
+gated by ZLSMA trend slope. TP1 = 1R, TP2 = midpoint to opposite band,
+TP3 = opposite band. Best on the 15-min timeframe during the London/NY
+overlap (13:00-16:00 UTC), which is gold's prime liquidity window.
 
 ## How to run it (real-time mode — recommended)
 

@@ -31,10 +31,10 @@ def test_next_scan_timestamp_respects_explicit_interval_override():
 
 
 def test_next_scan_timestamp_uses_active_mode_when_no_override(monkeypatch):
-    monkeypatch.setattr(ma, "load_active_mode", lambda: modes.FAST)
+    monkeypatch.setattr(ma, "load_active_mode", lambda: modes.STANDARD)
     ts = 1782907653
     nxt = rf.next_scan_timestamp(ts)
-    assert nxt % (5 * 60) == 0
+    assert nxt % (15 * 60) == 0
 
 
 def test_handle_command_status_replies(monkeypatch, tmp_path):
@@ -75,16 +75,6 @@ def test_handle_command_mode_shows_current(monkeypatch):
     monkeypatch.setattr(ma, "load_active_mode", lambda: modes.STANDARD)
     rf.handle_command("/mode")
     assert any("standard" in m for m in sent)
-    assert any("loose" in m and "fast" in m for m in sent)
-
-
-def test_handle_command_mode_switches_and_persists(monkeypatch):
-    sent, saved = [], []
-    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
-    monkeypatch.setattr(ma, "save_active_mode_name", lambda name: saved.append(name))
-    rf.handle_command("/mode fast")
-    assert saved == ["fast"]
-    assert any("fast" in m for m in sent)
 
 
 def test_handle_command_mode_rejects_unknown_name(monkeypatch):
@@ -94,19 +84,6 @@ def test_handle_command_mode_rejects_unknown_name(monkeypatch):
     rf.handle_command("/mode bogus")
     assert saved == []
     assert any("Unknown mode" in m for m in sent)
-
-
-def test_handle_command_mode_switches_to_swing(monkeypatch):
-    sent, saved = [], []
-    monkeypatch.setattr(rf, "reply", lambda text: sent.append(text))
-    monkeypatch.setattr(ma, "save_active_mode_name", lambda name: saved.append(name))
-    rf.handle_command("/mode swing")
-    assert saved == ["swing"]
-    assert any("swing" in m for m in sent)
-
-
-def test_help_text_mentions_swing_mode():
-    assert "swing" in rf.help_text()
 
 
 def test_handle_command_loss_logs_and_confirms(monkeypatch, tmp_path):

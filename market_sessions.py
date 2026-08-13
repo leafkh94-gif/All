@@ -25,18 +25,19 @@ from datetime import datetime, time, timezone
 # shows where these instruments actually score well.
 KILLZONES = [
     ("ASIAN_SESSION",   time(0, 0),  time(6, 0),
-        {"US_INDEX": 2,  "CRYPTO": 3,  "FOREX": 3,  "FOREX_JPY": 10, "ASIA_INDEX": 12}),
+        {"COMMODITY": 2}),
     ("LONDON_PRE_KILL", time(6, 0),  time(7, 0),
-        {"US_INDEX": 6,  "CRYPTO": 4,  "FOREX": 6,  "FOREX_JPY": 6,  "ASIA_INDEX": 4}),
+        {"COMMODITY": 6}),
     ("LONDON_KILLZONE", time(7, 0),  time(8, 30),
-        {"US_INDEX": 12, "CRYPTO": 6,  "FOREX": 12, "FOREX_JPY": 12, "ASIA_INDEX": 4}),
+        {"COMMODITY": 12}),
     ("NY_PRE_MARKET",   time(11, 30), time(12, 30),
-        {"US_INDEX": 6,  "CRYPTO": 6,  "FOREX": 6,  "FOREX_JPY": 6,  "ASIA_INDEX": 2}),
-    ("NY_KILLZONE",     time(12, 30), time(14, 0),
-        {"US_INDEX": 12, "CRYPTO": 10, "FOREX": 12, "FOREX_JPY": 10, "ASIA_INDEX": 2}),
+        {"COMMODITY": 8}),
+    # 13:00-16:00 UTC London/NY overlap is gold's prime liquidity window.
+    ("NY_KILLZONE",     time(12, 30), time(16, 0),
+        {"COMMODITY": 12}),
 ]
 
-DEAD_ZONE_PENALTY = {"US_INDEX": -4, "CRYPTO": -2, "FOREX": -3, "FOREX_JPY": -3, "ASIA_INDEX": -4}
+DEAD_ZONE_PENALTY = {"COMMODITY": -4}
 
 
 def killzone_bonus(now_utc, instrument_class):
@@ -45,8 +46,12 @@ def killzone_bonus(now_utc, instrument_class):
     t = now_utc.time()
     for name, start, end, bonuses in KILLZONES:
         if start <= t < end:
-            return bonuses.get(instrument_class, bonuses["US_INDEX"]), name
-    return DEAD_ZONE_PENALTY.get(instrument_class, DEAD_ZONE_PENALTY["US_INDEX"]), "DEAD_ZONE"
+            return bonuses.get(instrument_class, 0), name
+    return DEAD_ZONE_PENALTY.get(instrument_class, 0), "DEAD_ZONE"
+
+
+# Alias kept because scoring_strategy references it by the more descriptive name.
+killzone_score = killzone_bonus
 
 
 # ─────────────────────────────────────────────────────────────────────
