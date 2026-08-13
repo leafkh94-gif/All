@@ -65,11 +65,23 @@ class CapitalFeed:
         markets = r.json().get("markets", [])
         if not markets:
             raise ValueError(f"No markets found for {search_term!r}")
-        return markets[0]["epic"]
+        # Prefer markets that are currently tradeable and whose symbol/instrumentName
+        # matches the search term exactly -- Capital.com's search returns a mixed
+        # list (spot, futures, ETFs, mini-contracts) and markets[0] is often a
+        # delayed or non-primary feed. Fall back to markets[0] if nothing better.
+        preferred = [
+            m for m in markets
+            if m.get("marketStatus") == "TRADEABLE"
+            and (m.get("symbol", "").upper() == search_term.upper()
+                 or m.get("instrumentName", "").upper() == search_term.upper())
+        ]
+        chosen = preferred[0] if preferred else markets[0]
+        return chosen["epic"]
 
     def resolve_epics(self):
         for key, meta in cfg.INSTRUMENTS.items():
             self._epics[key] = self.find_epic(meta["search"])
+            print(f"[capital_feed] resolved {key} ({meta['search']!r}) -> {self._epics[key]}")
         return dict(self._epics)
 
     def _cache_path(self, instrument, interval, n):

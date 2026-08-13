@@ -7,7 +7,10 @@ Single instrument (XAUUSD), single strategy (Golden Trio: Turtle+RSI+ZLSMA).
 # 1.1  Instrument
 # ─────────────────────────────────────────────────────────────────────
 INSTRUMENTS = {
-    "XAUUSD": {"name": "Gold", "search": "Gold", "class": "COMMODITY"},
+    # "Gold" alone matched a stale/non-primary feed (last candle ~48h old).
+    # "XAUUSD" is Capital.com's canonical symbol for spot gold and returns
+    # the live tradeable epic.
+    "XAUUSD": {"name": "Gold", "search": "XAUUSD", "class": "COMMODITY"},
 }
 ACTIVE_INSTRUMENTS = ["XAUUSD"]
 
