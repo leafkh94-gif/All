@@ -112,15 +112,18 @@ def find_golden_trio_candidate(candles):
         if not _rsi_crosses_level(rsi_series, confirm_level, side):
             continue
 
-        # ZLSMA trend gate. "Price clearly above ZLSMA" is a trend-context
-        # filter, not a candle-close test -- during a bounce off the lower
-        # Turtle band, close can still sit below a slow 50-period average.
-        # Slope over the last N bars gives the same signal without vetoing
-        # every valid reversal.
-        zlsma_slope = curr_zlsma - zlsma.iloc[-cfg.GT_ZLSMA_SLOPE_LOOKBACK]
-        if side == "BUY" and zlsma_slope <= 0:
+        # ZLSMA trend-context gate. Strict "close above ZLSMA now" would veto
+        # every reversal (a bar bouncing off the lower band is by definition
+        # below a slow MA); strict "slope up" catches the pullback that
+        # preceded the reversal. Compromise: require that in the last
+        # GT_ZLSMA_SLOPE_LOOKBACK bars, price spent at least one bar on the
+        # trend side of ZLSMA -- i.e. we're reversing back into an established
+        # trend, not counter-trend into fresh territory.
+        window = df["c"].iloc[-cfg.GT_ZLSMA_SLOPE_LOOKBACK:]
+        zlsma_window = zlsma.iloc[-cfg.GT_ZLSMA_SLOPE_LOOKBACK:]
+        if side == "BUY" and not (window > zlsma_window).any():
             continue
-        if side == "SELL" and zlsma_slope >= 0:
+        if side == "SELL" and not (window < zlsma_window).any():
             continue
 
         if not _bar_tested_band(df, band, side, curr_atr, cfg.GT_PROXIMITY_ATR_MULT):

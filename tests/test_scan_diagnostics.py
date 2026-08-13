@@ -26,9 +26,9 @@ def test_bars_report_none_data():
 def test_bars_report_too_few_bars_is_data_problem():
     candles = _fresh_bars(10)
     report = diag.bars_report("XAUUSD", candles)
-    assert "10/110 bars" in report
+    assert "10/70 bars" in report
     assert "data problem" in report
-    assert "short by 100" in report
+    assert "short by 60" in report
 
 
 def test_bars_report_stale_feed():

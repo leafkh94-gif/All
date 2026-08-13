@@ -97,8 +97,13 @@ GT_RSI_OVERSOLD = 20
 GT_RSI_OVERBOUGHT = 80
 GT_RSI_CONFIRM_LEVEL = 40   # cross-up trigger for BUY; 60 (=100-40) for SELL
 GT_RSI_OVERSOLD_LOOKBACK = 3
-GT_ZLSMA_PERIOD = 50
-GT_ZLSMA_SLOPE_LOOKBACK = 30
+GT_ZLSMA_PERIOD = 30           # spec calls for 50, but Capital.com's demo API
+                               # caps XAUUSD 15min at ~80 bars per request so
+                               # SMA-of-SMA(50) (needs ~100 bars) is unreachable.
+                               # 30 stabilises within ~60 bars; the rest of the
+                               # setup (RSI + Turtle) stays at spec.
+GT_ZLSMA_SLOPE_LOOKBACK = 15   # wide enough to see the trend context, small
+                               # enough to fit inside ZLSMA(30)'s valid window
 GT_TURTLE_PERIOD = 20
 GT_PROXIMITY_ATR_MULT = 0.75
 GT_SL_BUFFER_ATR_MULT = 0.25

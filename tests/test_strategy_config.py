@@ -27,5 +27,5 @@ def test_alert_only_flag_still_set():
 def test_golden_trio_constants_are_wired():
     assert cfg.GT_RSI_PERIOD == 14
     assert cfg.GT_RSI_OVERSOLD < cfg.GT_RSI_CONFIRM_LEVEL < cfg.GT_RSI_OVERBOUGHT
-    assert cfg.GT_ZLSMA_PERIOD == 50
+    assert cfg.GT_ZLSMA_PERIOD == 30
     assert cfg.GT_TURTLE_PERIOD == 20

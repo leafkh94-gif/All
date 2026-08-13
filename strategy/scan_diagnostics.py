@@ -8,14 +8,15 @@ Distinguish WHY the scanner reports "no pattern detected":
   2) TOLERANCE prob -> enough fresh data, but detectors are too tight and
                        rejected every near-miss candidate.
 
-MIN_BARS_NEEDED is set to the Golden Trio detector's requirement: ZLSMA(50)
-is an SMA-of-SMA so it needs at least ~100 bars to stabilise, plus a small
-head for the RSI oversold-lookback window. 110 gives comfortable slack.
+MIN_BARS_NEEDED is set to the Golden Trio detector's requirement: ZLSMA(30)
+is an SMA-of-SMA so it needs ~60 bars to stabilise, plus the RSI oversold
+lookback tail. 70 gives comfortable slack -- well within Capital.com's
+~80-bar cap per XAUUSD 15min request.
 """
 
 from datetime import datetime, timezone
 
-MIN_BARS_NEEDED = 110
+MIN_BARS_NEEDED = 70
 
 # An M15 candle older than this many minutes means the feed is stale for
 # this instrument (common on indices at a session open, e.g. Monday).
