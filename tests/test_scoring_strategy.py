@@ -59,11 +59,21 @@ def test_find_candidate_returns_none_on_flat_market():
 
 # ─── score_candidate ─────────────────────────────────────────────────
 
-def test_score_candidate_returns_none_when_htf_bias_opposes_direction():
+def test_score_candidate_applies_soft_penalty_when_htf_bias_opposes_direction():
+    """H4 opposition is a score penalty, not a hard block -- the counter-trend
+    setup can still fire if the rest of the scoring clears the WATCH threshold."""
     candidate = strat.find_candidate(_long_setup_candles())
-    market = _market(_long_setup_candles(), h4=trending_h4_candles(n=260, up=False))  # bearish H4
-    scored = strat.score_candidate("XAUUSD", "COMMODITY", candidate, market, _now(), _StubLevelStore())
-    assert scored is None
+    aligned_market = _market(_long_setup_candles())  # bullish H4 aligned with BUY
+    opposed_market = _market(_long_setup_candles(), h4=trending_h4_candles(n=260, up=False))
+
+    aligned = strat.score_candidate("XAUUSD", "COMMODITY", candidate, aligned_market, _now(), _StubLevelStore())
+    opposed = strat.score_candidate("XAUUSD", "COMMODITY", candidate, opposed_market, _now(), _StubLevelStore())
+
+    assert aligned is not None and opposed is not None
+    assert opposed["htf_bias"] == "BEAR"
+    assert opposed["score"] < aligned["score"]
+    assert aligned["score"] - opposed["score"] == abs(cfg.HTF_OPPOSED_PENALTY)
+    assert any(tag == "htf_opposed" for tag, _ in opposed["breakdown"])
 
 
 def test_score_candidate_returns_dict_with_expected_fields_on_aligned_bias():

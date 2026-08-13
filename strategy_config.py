@@ -35,6 +35,13 @@ WATCH_MIN_SCORE = 62
 WATCH_MAX_SCORE = 74
 APLUS_MIN_SCORE = 75
 
+# Soft penalty when H4 bias opposes the entry direction. -15 leaves plenty
+# of room to still WATCH a strong setup (base 60 + full quality 40 - 15 = 85)
+# but reliably knocks a mediocre one below the 62 threshold. Change to 0 to
+# make counter-trend setups fully first-class again, or lower (e.g. -25) to
+# make the block nearly hard.
+HTF_OPPOSED_PENALTY = -15
+
 DAILY_LOSS_LIMIT_USD = 20.0
 DAILY_LOSS_BREAKER_DURATION_DAYS = 14
 
