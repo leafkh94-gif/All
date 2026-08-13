@@ -551,9 +551,12 @@ def maybe_record_weekly_levels(feed, level_store, now_utc):
 # ─────────────────────────────────────────────────────────────────────
 def build_market(feed, instrument, mode=None):
     m = mode or modes.STANDARD
+    # Golden Trio needs at least 110 bars (ZLSMA(50) is SMA-of-SMA -> ~100
+    # bars to stabilise, plus the RSI oversold-lookback tail). 160 gives
+    # comfortable slack over the scan_diagnostics MIN_BARS_NEEDED threshold.
     return {
-        "entry": feed.get_candles(instrument, m.entry_timeframe, n=80),
-        "m15": feed.get_candles(instrument, "15min", n=60),
+        "entry": feed.get_candles(instrument, m.entry_timeframe, n=160),
+        "m15": feed.get_candles(instrument, "15min", n=160),
         "h1": feed.get_candles(instrument, "1h", n=160),
         "h4": feed.get_candles(instrument, "4h", n=260),
     }
