@@ -13,7 +13,7 @@ from main_alerts import (
     TRADE_LOG_MAX_ENTRIES,
 )
 
-_NOW = dt.datetime(2026, 8, 5, 18, 30, tzinfo=dt.timezone.utc)
+_NOW = dt.datetime(2026, 8, 5, 23, 59, tzinfo=dt.timezone.utc)
 _TODAY = "2026-08-05"
 
 

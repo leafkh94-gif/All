@@ -155,7 +155,7 @@ class ActiveEntryTracker:
                 continue
             direction = e["direction"]
 
-            candles = feed.get_candles(instrument, "15min", n=2)
+            candles = feed.get_candles(instrument, "5min", n=2)
             if candles:
                 bar_high = candles[-1]["h"]
                 bar_low = candles[-1]["l"]
@@ -294,12 +294,19 @@ class OpenTradeTracker:
         """Runner-phase (post-TP2) optional trail: move SL to the most
         recent confirmed M15 minor swing in the trade's favor, but only
         ever toward price, never away from it."""
-        candles = feed.get_candles(instrument, "15min", n=30)
+        candles = feed.get_candles(instrument, "5min", n=30)
         if not candles or len(candles) < 6:
             return
         df = pd.DataFrame(candles)
         is_buy = t["direction"] == "BUY"
-        swings = strat._swings(df, "low" if is_buy else "high", window=2)
+        # Inline minor-swing detection: a bar whose extreme beats both neighbours.
+        col = "l" if is_buy else "h"
+        swings = []
+        for i in range(2, len(df) - 2):
+            v = df[col].iloc[i]
+            seg = df[col].iloc[i - 2: i + 3]
+            if (is_buy and v == seg.min()) or (not is_buy and v == seg.max()):
+                swings.append((i, float(v)))
         if not swings:
             return
         _, latest_swing_price = swings[-1]
@@ -317,7 +324,7 @@ class OpenTradeTracker:
             entry_price, initial_risk = t["entry_price"], t["initial_risk"]
             closed_this_cycle = False
 
-            candles = feed.get_candles(instrument, "15min", n=2)
+            candles = feed.get_candles(instrument, "5min", n=2)
             if candles:
                 bar_high = candles[-1]["h"]
                 bar_low = candles[-1]["l"]
@@ -398,7 +405,11 @@ class OpenTradeTracker:
             if closed_this_cycle:
                 continue
 
-            if not t["warned_1800"] and (now_utc.hour, now_utc.minute) >= (
+            # Only warn about the upcoming hard flat if session_cutoff is
+            # actually on for this instrument -- 24/7 mode has no hard flat,
+            # so this reminder would be misleading.
+            session_cutoff = cfg.INSTRUMENT_PROFILES.get(instrument, {}).get("session_cutoff", False)
+            if session_cutoff and not t["warned_1800"] and (now_utc.hour, now_utc.minute) >= (
                     cfg.WARNING_UTC_HOUR, cfg.WARNING_UTC_MINUTE) and (now_utc.hour, now_utc.minute) < (
                     cfg.HARD_FLAT_UTC_HOUR, cfg.HARD_FLAT_UTC_MINUTE):
                 t["warned_1800"] = True
@@ -556,7 +567,7 @@ def build_market(feed, instrument, mode=None):
     # comfortable slack over the scan_diagnostics MIN_BARS_NEEDED threshold.
     return {
         "entry": feed.get_candles(instrument, m.entry_timeframe, n=160),
-        "m15": feed.get_candles(instrument, "15min", n=160),
+        "m5": feed.get_candles(instrument, "5min", n=160),
         "h1": feed.get_candles(instrument, "1h", n=160),
         "h4": feed.get_candles(instrument, "4h", n=260),
     }
@@ -903,6 +914,17 @@ def run():
             if not candidate:
                 diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,
                                             "blocked": f"no pattern detected ({bars_diag.split(': ', 1)[1]})"}
+                continue
+            # Spread guard: skip signals when the live spread is wider than
+            # MAX_SPREAD_POINTS. Every candle carries capital_feed's
+            # _implied_spread; the latest bar's spread is the freshest proxy
+            # available without a dedicated bid/offer snapshot API call.
+            latest_spread = market["entry"][-1].get("spread") if market["entry"] else None
+            max_spread_price = cfg.MAX_SPREAD_POINTS * cfg.POINT_VALUE
+            if latest_spread is not None and latest_spread > max_spread_price:
+                diagnostics[instrument] = {"pattern": candidate["pattern"],
+                                            "direction": candidate["direction"], "score": None,
+                                            "blocked": f"spread {latest_spread:g} > {max_spread_price:g}"}
                 continue
             scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store,
                                             mode=mode)

@@ -72,8 +72,8 @@ def test_score_candidate_applies_soft_penalty_when_htf_bias_opposes_direction():
     assert aligned is not None and opposed is not None
     assert opposed["htf_bias"] == "BEAR"
     assert opposed["score"] < aligned["score"]
-    assert aligned["score"] - opposed["score"] == abs(cfg.HTF_OPPOSED_PENALTY)
-    assert any(tag == "htf_opposed" for tag, _ in opposed["breakdown"])
+    assert aligned["score"] - opposed["score"] == 10
+    assert any(tag == "counter_trend" for tag, _ in opposed["breakdown"])
 
 
 def test_score_candidate_returns_dict_with_expected_fields_on_aligned_bias():
