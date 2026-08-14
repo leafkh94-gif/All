@@ -58,9 +58,8 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
       * Killzone bonus / dead-zone penalty from market_sessions
       * Round-number confluence on entry price
       * ATR sweet-spot penalty for dead/too-volatile regimes
-      * H4 opposing bias is a SOFT PENALTY -- the counter-trend setup can
-        still fire if the rest of the scoring is strong enough to clear the
-        WATCH / A+ thresholds after the deduction.
+      * H4 opposing bias is a SOFT PENALTY (-10) -- counter-trend setups
+        still fire so 24/7 both-direction alerts keep flowing.
     """
     if candidate is None:
         return None
@@ -76,8 +75,8 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     breakdown.append(("base", 60))
 
     if _opposes(bias, direction):
-        score += cfg.HTF_OPPOSED_PENALTY
-        breakdown.append(("htf_opposed", cfg.HTF_OPPOSED_PENALTY))
+        score -= 10
+        breakdown.append(("counter_trend", -10))
 
     quality_pts = candidate["quality"]  # already scaled 0..GT_QUALITY_MAX
     score += quality_pts

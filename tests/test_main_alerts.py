@@ -14,19 +14,17 @@ class _FakeFeedBase:
         return [{"o": p, "h": p, "l": p, "c": p}]
 
 
-def test_hard_flat_active_after_1830_gold():
-    t = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
-    assert ma.hard_flat_active(t, "XAUUSD") is True
+def test_hard_flat_inactive_24_7_because_session_cutoff_disabled():
+    # Small-scalp 24/7 mode: XAUUSD's INSTRUMENT_PROFILES sets
+    # session_cutoff=False, so no time of day forces a hard flat.
+    for hour in (0, 18, 23):
+        t = dt.datetime(2026, 7, 1, hour, 30, tzinfo=dt.timezone.utc)
+        assert ma.hard_flat_active(t, "XAUUSD") is False
 
 
-def test_hard_flat_inactive_before_1830_gold():
-    t = dt.datetime(2026, 7, 1, 18, 29, tzinfo=dt.timezone.utc)
-    assert ma.hard_flat_active(t, "XAUUSD") is False
-
-
-def test_hard_flat_still_applies_for_standard_mode_explicitly_passed():
-    t = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
-    assert ma.hard_flat_active(t, "XAUUSD", mode=modes.STANDARD) is True
+def test_hard_flat_still_disabled_for_standard_mode_explicitly_passed():
+    t = dt.datetime(2026, 7, 1, 23, 59, tzinfo=dt.timezone.utc)
+    assert ma.hard_flat_active(t, "XAUUSD", mode=modes.STANDARD) is False
 
 
 def test_active_entry_tracker_touch_removes_without_message(tmp_path, monkeypatch):
@@ -247,7 +245,9 @@ def test_open_trade_tracker_breakeven_stop_after_tp1_closes_remainder(tmp_path, 
     assert entry["r_multiple"] == 1.0  # locked 1.0 + 0.5 * 0
 
 
-def test_open_trade_tracker_session_cutoff_closes_gold(tmp_path, monkeypatch):
+def test_open_trade_tracker_holds_through_18_30_in_24_7_mode(tmp_path, monkeypatch):
+    """XAUUSD's session_cutoff=False -> the 18:30 hard-flat sweep does not
+    force-close open trades. This is the whole point of 24/7 mode."""
     sent = []
     monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
     tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
@@ -259,34 +259,11 @@ def test_open_trade_tracker_session_cutoff_closes_gold(tmp_path, monkeypatch):
         def get_current_price(self, instrument):
             return 2005.0  # neither TP/stop touched
 
-    past_hard_flat = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
-    tracker.evaluate_all(past_hard_flat, FakeFeed())
-    assert any("XAUUSD" in m and "hard flat" in m for m in sent)
-    assert "XAUUSD" not in tracker._data
-
-
-def test_open_trade_tracker_session_cutoff_after_tp1_blends_locked_r(tmp_path, monkeypatch):
-    sent = []
-    monkeypatch.setattr(ma, "send_telegram", lambda text: sent.append(text))
-    tracker = ma.OpenTradeTracker(path=str(tmp_path / "open_trades.json"), trade_log_path=str(tmp_path / "trade_log.json"))
-    now = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc)
-    tracker.add({"instrument": "XAUUSD", "direction": "BUY", "entry_price": 2000.0,
-                 "stop_loss": 1990.0, "tp1": 2015.0, "tp2": 2025.0, "tp3": 2040.0}, now)
-    tracker._data["XAUUSD"]["tp1_hit"] = True
-    tracker._data["XAUUSD"]["stop_loss"] = 2000.0
-    tracker._data["XAUUSD"]["locked_r"] = 1.0
-
-    class FakeFeed(_FakeFeedBase):
-        def get_current_price(self, instrument):
-            return 2020.0  # short of TP2 (2025), above breakeven, when cutoff hits
-
-    past_hard_flat = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
-    tracker.evaluate_all(past_hard_flat, FakeFeed())
-    entry = ma.load_json(tracker.trade_log_path)["entries"][0]
-    assert entry["outcome"] == "session_cutoff_after_tp1"
-    # locked 1.0 + 0.5 * (20/10) = 1.0 + 1.0 = 2.0
-    assert entry["r_multiple"] == 2.0
-    assert "XAUUSD" not in tracker._data
+    past_old_hard_flat = dt.datetime(2026, 7, 1, 18, 30, tzinfo=dt.timezone.utc)
+    tracker.evaluate_all(past_old_hard_flat, FakeFeed())
+    # No forced close, no "hard flat" message.
+    assert not any("hard flat" in m for m in sent)
+    assert "XAUUSD" in tracker._data
 
 
 def test_active_entry_tracker_expires_after_2_hours(tmp_path, monkeypatch):
@@ -324,7 +301,7 @@ def test_active_entry_tracker_expiry_is_flat_90_minutes(monkeypatch):
         assert "XAUUSD" not in tracker._data
 
 
-def test_build_market_defaults_to_15min_entry():
+def test_build_market_defaults_to_5min_entry():
     requested = {}
 
     class FakeFeed(_FakeFeedBase):
@@ -332,8 +309,8 @@ def test_build_market_defaults_to_15min_entry():
             requested[interval] = requested.get(interval, 0) + 1
             return []
 
-    ma.build_market(FakeFeed(), "US500")
-    assert "15min" in requested
+    ma.build_market(FakeFeed(), "XAUUSD")
+    assert "5min" in requested
 
 
 def test_load_active_mode_defaults_to_standard_with_no_state_file(tmp_path):

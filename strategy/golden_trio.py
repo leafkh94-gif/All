@@ -130,43 +130,56 @@ def find_golden_trio_candidate(candles):
             continue
 
         entry = curr_close
-        if side == "BUY":
-            raw_stop = _swing_low(df, GT_SL_SWING_LOOKBACK)
-            stop = raw_stop - cfg.GT_SL_BUFFER_ATR_MULT * curr_atr
-            if stop >= entry:
-                continue
-            risk = entry - stop
-            tp3 = opp_band
-            if tp3 <= entry:
-                continue
-            reward = tp3 - entry
+        if cfg.TARGET_MODE == "FIXED":
+            # Small-scalp fixed offsets. Bypasses Turtle-band structural
+            # targets; TP3 collapses to TP2 so the 3-tier tracker still works.
+            pt = cfg.POINT_VALUE
+            if side == "BUY":
+                stop = entry - cfg.FIXED_SL_POINTS * pt
+                tp1 = entry + cfg.FIXED_TP1_POINTS * pt
+                tp2 = entry + cfg.FIXED_TP2_POINTS * pt
+            else:
+                stop = entry + cfg.FIXED_SL_POINTS * pt
+                tp1 = entry - cfg.FIXED_TP1_POINTS * pt
+                tp2 = entry - cfg.FIXED_TP2_POINTS * pt
+            tp3 = tp2
+            risk = abs(entry - stop)
         else:
-            raw_stop = _swing_high(df, GT_SL_SWING_LOOKBACK)
-            stop = raw_stop + cfg.GT_SL_BUFFER_ATR_MULT * curr_atr
-            if stop <= entry:
-                continue
-            risk = stop - entry
-            tp3 = opp_band
-            if tp3 >= entry:
-                continue
-            reward = entry - tp3
+            if side == "BUY":
+                raw_stop = _swing_low(df, GT_SL_SWING_LOOKBACK)
+                stop = raw_stop - cfg.GT_SL_BUFFER_ATR_MULT * curr_atr
+                if stop >= entry:
+                    continue
+                risk = entry - stop
+                tp3 = opp_band
+                if tp3 <= entry:
+                    continue
+                reward = tp3 - entry
+            else:
+                raw_stop = _swing_high(df, GT_SL_SWING_LOOKBACK)
+                stop = raw_stop + cfg.GT_SL_BUFFER_ATR_MULT * curr_atr
+                if stop <= entry:
+                    continue
+                risk = stop - entry
+                tp3 = opp_band
+                if tp3 >= entry:
+                    continue
+                reward = entry - tp3
 
-        # Reject sub-1R setups outright -- the whole point of this strategy
-        # is bouncing all the way to the opposite Turtle band.
-        if reward < risk:
-            continue
+            # Reject sub-1R setups outright -- the whole point of this
+            # structural mode is bouncing all the way to the opposite band.
+            if reward < risk:
+                continue
 
-        # TP1 = min(1R, 33% of the way to the opposite band) so the tracker's
-        # 3-tier progression can't overshoot the runner target on close-band
-        # setups. TP2 = 66% of the way; TP3 = the band itself.
-        tp1_dist = min(cfg.TP1_R_MULT * risk, reward / 3)
-        tp2_dist = reward * 2 / 3
-        if side == "BUY":
-            tp1 = entry + tp1_dist
-            tp2 = entry + tp2_dist
-        else:
-            tp1 = entry - tp1_dist
-            tp2 = entry - tp2_dist
+            # TP1 = min(1R, 33% of way to opposite band); TP2 = 66%; TP3 = band.
+            tp1_dist = min(cfg.TP1_R_MULT * risk, reward / 3)
+            tp2_dist = reward * 2 / 3
+            if side == "BUY":
+                tp1 = entry + tp1_dist
+                tp2 = entry + tp2_dist
+            else:
+                tp1 = entry - tp1_dist
+                tp2 = entry - tp2_dist
 
         # Quality score components used by score_candidate():
         #   * up to 20 for RSI extremity distance from confirm level

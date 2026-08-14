@@ -21,7 +21,7 @@ def _long_setup_candles():
         c_next = price - 30.0
         candles.append({"o": price, "h": price + 0.3, "l": c_next - 0.3, "c": c_next, "v": None})
         price = c_next
-    trigger_close = price + 80.0
+    trigger_close = price + 120.0
     trigger_low = price - 0.5
     candles.append({"o": price, "h": trigger_close + 0.5, "l": trigger_low, "c": trigger_close, "v": None})
     return candles
@@ -35,7 +35,7 @@ def _short_setup_candles():
         c_next = price + 35.0
         candles.append({"o": price, "h": c_next + 0.3, "l": price - 0.3, "c": c_next, "v": None})
         price = c_next
-    trigger_close = price - 110.0
+    trigger_close = price - 160.0
     trigger_high = price + 0.5
     candles.append({"o": price, "h": trigger_high, "l": trigger_close - 0.5, "c": trigger_close, "v": None})
     return candles
@@ -64,7 +64,8 @@ def test_short_signal_fires_when_all_gates_align():
     result = find_golden_trio_candidate(_short_setup_candles())
     assert result is not None
     assert result["direction"] == "SELL"
-    assert result["tp3"] < result["tp2"] < result["tp1"] < result["entry_price"] < result["stop_loss"]
+    # In FIXED target mode tp3 collapses to tp2, so use <= not <
+    assert result["tp3"] <= result["tp2"] < result["tp1"] < result["entry_price"] < result["stop_loss"]
 
 
 def test_candidate_carries_diagnostic_indicator_values():

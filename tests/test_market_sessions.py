@@ -23,8 +23,9 @@ def test_asian_session_is_a_minor_bonus_for_gold():
     assert pts == 2
 
 
-def test_dead_zone_after_ny_killzone_ends():
-    assert ms.killzone_bonus(_t(16, 30), "COMMODITY") == (-4, "DEAD_ZONE")
+def test_dead_zone_after_ny_killzone_returns_zero_not_penalty():
+    # 24/7 mode: no dead-zone penalty, quiet hours just contribute 0.
+    assert ms.killzone_bonus(_t(16, 30), "COMMODITY") == (0, "DEAD_ZONE")
 
 
 def test_unknown_class_returns_zero_not_a_crash():

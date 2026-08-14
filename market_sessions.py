@@ -37,17 +37,21 @@ KILLZONES = [
         {"COMMODITY": 12}),
 ]
 
-DEAD_ZONE_PENALTY = {"COMMODITY": -4}
+# 24/7 small-scalp mode: quiet hours no longer penalise the score, they just
+# don't add a killzone bonus. Positive bonuses inside London/NY still apply.
+DEAD_ZONE_PENALTY = {"COMMODITY": 0}
 
 
 def killzone_bonus(now_utc, instrument_class):
     """Return (bonus_points, zone_name) for the given UTC time and instrument
-    class. Falls back to the dead-zone penalty outside all windows."""
+    class. Bonuses only apply inside a window; outside them the score is
+    unchanged (no dead-zone deduction)."""
     t = now_utc.time()
     for name, start, end, bonuses in KILLZONES:
         if start <= t < end:
-            return bonuses.get(instrument_class, 0), name
-    return DEAD_ZONE_PENALTY.get(instrument_class, 0), "DEAD_ZONE"
+            pts = bonuses.get(instrument_class, 0)
+            return max(0, pts), name
+    return 0, "DEAD_ZONE"
 
 
 # Alias kept because scoring_strategy references it by the more descriptive name.

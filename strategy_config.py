@@ -17,7 +17,20 @@ ACTIVE_INSTRUMENTS = ["XAUUSD"]
 # ─────────────────────────────────────────────────────────────────────
 # 1.2  Architecture
 # ─────────────────────────────────────────────────────────────────────
-SCAN_INTERVAL_MINUTES = 15
+SCAN_INTERVAL_MINUTES = 5
+
+# ─────────────────────────────────────────────────────────────────────
+# 1.2b  Small-scalp fixed-target mode
+# ─────────────────────────────────────────────────────────────────────
+# TARGET_MODE = "FIXED" bypasses golden_trio's structural stop/TP logic and
+# uses fixed point offsets instead. TARGET_MODE = "STRUCTURAL" (or anything
+# else) keeps the original Turtle-band-derived targets.
+TARGET_MODE = "FIXED"
+POINT_VALUE = 0.1        # price distance per "point" (0.1 -> 20pt=2usd; 1.0 -> 20usd)
+FIXED_SL_POINTS = 20
+FIXED_TP1_POINTS = 20
+FIXED_TP2_POINTS = 40
+MAX_SPREAD_POINTS = 0.5  # skip signal if live spread wider than this many points
 
 # ─────────────────────────────────────────────────────────────────────
 # 1.3  Round-number levels (gold trades in 50-dollar increments; 3 pts proximity)
@@ -30,17 +43,10 @@ ROUND_NUMBER_OFFSET_TABLE = {
 # ─────────────────────────────────────────────────────────────────────
 # 1.4  Alert thresholds (unchanged score bands so tracker/WATCH logic keeps working)
 # ─────────────────────────────────────────────────────────────────────
-NO_ALERT_MAX = 61          # score < 62 -> no alert
-WATCH_MIN_SCORE = 62
+NO_ALERT_MAX = 53          # score <= this -> no alert (was 61)
+WATCH_MIN_SCORE = 54       # loosened for 24/7 small-scalp cadence
 WATCH_MAX_SCORE = 74
 APLUS_MIN_SCORE = 75
-
-# Soft penalty when H4 bias opposes the entry direction. -15 leaves plenty
-# of room to still WATCH a strong setup (base 60 + full quality 40 - 15 = 85)
-# but reliably knocks a mediocre one below the 62 threshold. Change to 0 to
-# make counter-trend setups fully first-class again, or lower (e.g. -25) to
-# make the block nearly hard.
-HTF_OPPOSED_PENALTY = -15
 
 DAILY_LOSS_LIMIT_USD = 20.0
 DAILY_LOSS_BREAKER_DURATION_DAYS = 14
@@ -54,13 +60,14 @@ TP3_R_MULT = 4.0           # reference constant; actual TP3 = opposite Turtle ba
 
 PENDING_ORDER_MAX_MINUTES = 90       # 6 x M15 bars unfilled -> cancel (EXPIRED)
 
-HARD_FLAT_UTC_HOUR = 18
-HARD_FLAT_UTC_MINUTE = 30
+HARD_FLAT_UTC_HOUR = 23
+HARD_FLAT_UTC_MINUTE = 59
 WARNING_UTC_HOUR = 18
 WARNING_UTC_MINUTE = 0
 
+# session_cutoff=False -> 24/7 alerts, no forced hard-flat close
 INSTRUMENT_PROFILES = {
-    "XAUUSD": {"session_cutoff": True},
+    "XAUUSD": {"session_cutoff": False},
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -103,9 +110,9 @@ ENTRY_EXPIRY_HOURS = 2
 # 8.  Golden Trio strategy (Turtle Trade Channel + RSI + Zero Lag SMA)
 # ─────────────────────────────────────────────────────────────────────
 GT_RSI_PERIOD = 14
-GT_RSI_OVERSOLD = 20
-GT_RSI_OVERBOUGHT = 80
-GT_RSI_CONFIRM_LEVEL = 40   # cross-up trigger for BUY; 60 (=100-40) for SELL
+GT_RSI_OVERSOLD = 30
+GT_RSI_OVERBOUGHT = 70
+GT_RSI_CONFIRM_LEVEL = 45   # cross-up trigger for BUY; 55 (=100-45) for SELL
 GT_RSI_OVERSOLD_LOOKBACK = 3
 GT_ZLSMA_PERIOD = 30           # spec calls for 50, but Capital.com's demo API
                                # caps XAUUSD 15min at ~80 bars per request so
