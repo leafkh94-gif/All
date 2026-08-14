@@ -30,7 +30,8 @@ POINT_VALUE = 0.1        # price distance per "point" (0.1 -> 20pt=2usd; 1.0 -> 
 FIXED_SL_POINTS = 20
 FIXED_TP1_POINTS = 20
 FIXED_TP2_POINTS = 40
-MAX_SPREAD_POINTS = 0.5  # skip signal if live spread wider than this many points
+MAX_SPREAD_POINTS = 5.0  # skip signal if live spread wider than this many points
+                          # (at POINT_VALUE=0.1 -> $0.50 spread ceiling for gold)
 
 # ─────────────────────────────────────────────────────────────────────
 # 1.3  Round-number levels (gold trades in 50-dollar increments; 3 pts proximity)
