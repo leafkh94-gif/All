@@ -42,12 +42,26 @@ ROUND_NUMBER_OFFSET_TABLE = {
 }
 
 # ─────────────────────────────────────────────────────────────────────
-# 1.4  Alert thresholds (unchanged score bands so tracker/WATCH logic keeps working)
+# 1.4  Alert thresholds -- score starts at 0 now (no base-60 crutch); every
+# component has to earn its points, so these thresholds mean "actual signal
+# quality" instead of "cleared the artificial floor".
 # ─────────────────────────────────────────────────────────────────────
-NO_ALERT_MAX = 53          # score <= this -> no alert (was 61)
-WATCH_MIN_SCORE = 54       # loosened for 24/7 small-scalp cadence
+NO_ALERT_MAX = 54
+WATCH_MIN_SCORE = 55
 WATCH_MAX_SCORE = 74
 APLUS_MIN_SCORE = 75
+
+# Score budget (rewritten from base-60 model). Max ≈ 100.
+SCORE_RSI_CONFIRM_MAX = 30      # sequenced RSI reversal quality
+SCORE_TURTLE_MAX = 20           # proximity to Turtle band (0.5*ATR tight)
+SCORE_ZLSMA_ALIGNED = 20        # ZLSMA slope aligned with entry direction
+SCORE_ZLSMA_FLAT = 0            # flat slope contributes nothing (blocks A+)
+SCORE_H4_ALIGNED = 15
+SCORE_H4_FLAT = 0
+SCORE_H4_OPPOSED = -15          # opposed EMA slope; also blocks A+
+SCORE_KILLZONE_MAX = 10
+SCORE_ROUND_NUMBER = 5
+SCORE_ATR_SWEET_SPOT_PENALTY = -10
 
 DAILY_LOSS_LIMIT_USD = 20.0
 DAILY_LOSS_BREAKER_DURATION_DAYS = 14
@@ -111,11 +125,17 @@ ENTRY_EXPIRY_HOURS = 2
 # 8.  Golden Trio strategy (Turtle Trade Channel + RSI + Zero Lag SMA)
 # ─────────────────────────────────────────────────────────────────────
 GT_RSI_PERIOD = 14
-GT_RSI_OVERSOLD = 40
-GT_RSI_OVERBOUGHT = 60
-GT_RSI_CONFIRM_LEVEL = 50   # cross-up trigger for BUY; 50 (=100-50) for SELL
-                            # Any RSI midline cross qualifies at this setting.
-GT_RSI_OVERSOLD_LOOKBACK = 3
+# Sequenced RSI confirmation (hard gate). For BUY:
+#   1. RSI <= GT_RSI_DIP_LEVEL at some bar in the last GT_RSI_DIP_LOOKBACK
+#   2. Then RSI rose for GT_RSI_RISE_BARS consecutive bars after that dip
+#   3. Trigger bar closes above GT_RSI_CONFIRM_LEVEL (from below)
+#   4. Trigger bar body is bullish (close > open) -- confirms the reversal
+# SELL mirrors: RSI >= 100-GT_RSI_DIP_LEVEL, then fell for GT_RSI_RISE_BARS,
+# closes below 100-GT_RSI_CONFIRM_LEVEL, bearish body.
+GT_RSI_DIP_LEVEL = 45
+GT_RSI_DIP_LOOKBACK = 5
+GT_RSI_RISE_BARS = 3
+GT_RSI_CONFIRM_LEVEL = 50
 GT_ZLSMA_PERIOD = 30           # spec calls for 50, but Capital.com's demo API
                                # caps XAUUSD 15min at ~80 bars per request so
                                # SMA-of-SMA(50) (needs ~100 bars) is unreachable.
@@ -124,9 +144,28 @@ GT_ZLSMA_PERIOD = 30           # spec calls for 50, but Capital.com's demo API
 GT_ZLSMA_SLOPE_LOOKBACK = 15   # wide enough to see the trend context, small
                                # enough to fit inside ZLSMA(30)'s valid window
 GT_TURTLE_PERIOD = 20
-GT_PROXIMITY_ATR_MULT = 1.5
+# Tightened band-proximity: 0.5 ATR (was 1.5). Recent-bar extreme must touch
+# the band this close for it to count as "supported by / rejected at" the band.
+GT_PROXIMITY_ATR_MULT = 0.5
 GT_SL_BUFFER_ATR_MULT = 0.25
 GT_QUALITY_MAX = 40
+
+# ZLSMA direction thresholds (fraction of ATR change over slope lookback):
+#   |slope| <  GT_ZLSMA_FLAT_ATR_FRAC  -> flat  (WATCH ok, A+ blocked)
+#   slope aligns with direction        -> aligned (full points)
+#   slope opposes direction            -> against (no signal at all)
+GT_ZLSMA_FLAT_ATR_FRAC = 0.15
+
+# Chop/range-compression filter. If the last GT_CHOP_LOOKBACK bars' range
+# fits inside GT_CHOP_MIN_RANGE_ATR * ATR, the market is chopping and no
+# signal fires (avoids the RSI-flip-flop BUY/SELL churn).
+GT_CHOP_LOOKBACK = 20
+GT_CHOP_MIN_RANGE_ATR = 3.0
+
+# Cooldown between alerts to prevent duplicate/flip-flop spam.
+COOLDOWN_SAME_DIRECTION_MINUTES = 30
+COOLDOWN_SAME_DIRECTION_POINTS = 30    # override cooldown if price moved this far
+COOLDOWN_OPPOSITE_DIRECTION_MINUTES = 60
 
 # ─────────────────────────────────────────────────────────────────────
 # 9.1  Core principles

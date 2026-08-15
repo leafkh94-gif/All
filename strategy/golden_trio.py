@@ -1,20 +1,31 @@
-"""Golden Trio strategy — the sole signal source for the gold-only bot.
+"""Golden Trio strategy — sequenced RSI reversal at a Turtle band, ZLSMA
+direction filter, chop-market rejection. The candidate this returns is
+scored downstream in scoring_strategy.score_candidate.
 
-Combines three ingredients to filter chop:
-  * Turtle Trade Channels (Donchian) — dynamic support/resistance
-  * RSI oversold/overbought + confirmation cross — momentum reversal
-  * Zero Lag SMA(50) — trend gate
+Hard gates (return None if any fails):
+  1. Not chop (recent range >= GT_CHOP_MIN_RANGE_ATR * ATR)
+  2. Sequenced RSI reversal:
+     BUY -> RSI dipped <= GT_RSI_DIP_LEVEL in last GT_RSI_DIP_LOOKBACK bars,
+     then rose for GT_RSI_RISE_BARS consecutive bars, trigger bar closes
+     above GT_RSI_CONFIRM_LEVEL from below, trigger body is bullish.
+     SELL mirrors on the opposite side.
+  3. Turtle band tested: the trigger bar's extreme (low for BUY, high for
+     SELL) sits within GT_PROXIMITY_ATR_MULT * ATR of the band.
+  4. ZLSMA slope is not against the direction. Slope classifies as:
+       aligned / flat / against
+     - against -> None (never fires)
+     - flat -> allowed but scored as flat downstream (blocks A+)
+     - aligned -> full points downstream
 
-Long fires when all four gates align:
-  1. RSI dipped below GT_RSI_OVERSOLD in the last GT_RSI_OVERSOLD_LOOKBACK bars
-  2. RSI crosses up through GT_RSI_CONFIRM_LEVEL on the trigger bar
-  3. Close > ZLSMA(50)
-  4. Close within GT_PROXIMITY_ATR_MULT * ATR of the lower Turtle band
+Component quality scores handed to the scorer:
+  - rsi_confirm_quality: 0..SCORE_RSI_CONFIRM_MAX based on how deep the dip
+    was and how clean the rise sequence was
+  - turtle_quality: 0..SCORE_TURTLE_MAX based on how tightly the trigger
+    bar's extreme hugged the band
+  - zlsma_status: "aligned" | "flat"
 
-Short mirrors on the opposite side (RSI>OVERBOUGHT, cross down through
-100-CONFIRM_LEVEL, close<ZLSMA, close near upper Turtle band).
-
-Returned candidate dict shape matches what score_candidate() consumes.
+Fixed target mode (cfg.TARGET_MODE == "FIXED") produces stop/TP1/TP2/TP3
+at fixed point offsets; structural mode uses Turtle-band-derived targets.
 """
 import pandas as pd
 
@@ -24,61 +35,125 @@ import strategy_config as cfg
 PATTERN_NAME = "GOLDEN_TRIO"
 
 
-def _last_two(series):
-    return series.iloc[-2], series.iloc[-1]
+# ─────────────────────────────────────────────────────────────────────
+# Sequenced RSI reversal gate
+# ─────────────────────────────────────────────────────────────────────
+def _rsi_reversal_sequence(rsi_series, side):
+    """Return (fires: bool, quality: 0..1, extreme_value: float) describing
+    the reversal quality on the trigger bar.
 
+    BUY sequence:
+      1. RSI dipped <= GT_RSI_DIP_LEVEL somewhere in the last
+         GT_RSI_DIP_LOOKBACK bars (excluding trigger).
+      2. Trigger bar's RSI crosses UP through GT_RSI_CONFIRM_LEVEL.
+      3. Recovery: bar[-2] RSI > the recent dip value (RSI is climbing
+         back, not still falling into the trigger).
 
-def _rsi_dipped_recently(rsi_series, threshold, lookback, side):
-    window = rsi_series.iloc[-(lookback + 1):-1]  # excludes trigger bar itself
+    Quality: 0.5 baseline; +0.5 scaled by how deep the dip was.
+    SELL mirrors."""
+    lookback = cfg.GT_RSI_DIP_LOOKBACK
+    dip_level = cfg.GT_RSI_DIP_LEVEL
+    confirm = cfg.GT_RSI_CONFIRM_LEVEL
+
+    prev, curr = float(rsi_series.iloc[-2]), float(rsi_series.iloc[-1])
+
     if side == "BUY":
-        return (window < threshold).any()
-    return (window > threshold).any()
+        if not (prev < confirm <= curr):
+            return False, 0.0, 0.0
+        dip_window = rsi_series.iloc[-(lookback + 1):-1]
+        if dip_window.empty:
+            return False, 0.0, 0.0
+        dip_value = float(dip_window.min())
+        if dip_value > dip_level:
+            return False, 0.0, dip_value
+        # Recovery: bar-before-trigger RSI > recent dip (some climb has happened).
+        if prev <= dip_value:
+            return False, 0.0, dip_value
+        depth = max(0.0, dip_level - dip_value) / max(dip_level, 1e-6)
+        return True, min(1.0, 0.5 + 0.5 * depth), dip_value
+
+    # SELL mirror.
+    inv_confirm = 100 - confirm
+    inv_dip = 100 - dip_level
+    if not (prev > inv_confirm >= curr):
+        return False, 0.0, 0.0
+    peak_window = rsi_series.iloc[-(lookback + 1):-1]
+    if peak_window.empty:
+        return False, 0.0, 0.0
+    peak_value = float(peak_window.max())
+    if peak_value < inv_dip:
+        return False, 0.0, peak_value
+    if prev >= peak_value:
+        return False, 0.0, peak_value
+    depth = max(0.0, peak_value - inv_dip) / max(100 - inv_dip, 1e-6)
+    return True, min(1.0, 0.5 + 0.5 * depth), peak_value
 
 
-def _rsi_crosses_level(rsi_series, level, side):
-    prev, curr = _last_two(rsi_series)
-    if side == "BUY":
-        return prev < level <= curr
-    return prev > level >= curr
-
-
-def _bar_tested_band(df, band, side, atr_value, mult, lookback=3):
-    """True if any of the last `lookback` bars' extreme (low for BUY, high
-    for SELL) came within `mult * atr` of the Turtle band. This is the
-    "supported by / tested" condition -- a bullish reversal bar has a long
-    lower wick that touches the band while its close pulls away."""
+# ─────────────────────────────────────────────────────────────────────
+# Turtle band proximity
+# ─────────────────────────────────────────────────────────────────────
+def _turtle_proximity(df, band, side, atr_value):
+    """Return (fires: bool, quality: 0..1). Quality = 1 when the extreme
+    sits exactly on the band; 0 when it's at the loose-edge (proximity mult
+    times ATR away)."""
     if atr_value <= 0:
-        return False
+        return False, 0.0
+    tol = cfg.GT_PROXIMITY_ATR_MULT * atr_value
     if side == "BUY":
-        recent_low = df["l"].iloc[-lookback:].min()
-        return recent_low - band <= mult * atr_value
-    recent_high = df["h"].iloc[-lookback:].max()
-    return band - recent_high <= mult * atr_value
+        extreme = min(df["l"].iloc[-1], df["l"].iloc[-2])
+        distance = extreme - band  # positive means above the band
+    else:
+        extreme = max(df["h"].iloc[-1], df["h"].iloc[-2])
+        distance = band - extreme
+    if distance > tol:
+        return False, 0.0
+    # distance can be negative (wick pierced past band); clamp for quality.
+    d = max(0.0, distance)
+    return True, 1.0 - d / tol if tol > 0 else 1.0
 
 
-def _swing_low(df, lookback):
-    return df["l"].iloc[-lookback:].min()
+# ─────────────────────────────────────────────────────────────────────
+# ZLSMA slope classification
+# ─────────────────────────────────────────────────────────────────────
+def _zlsma_status(zlsma, atr_value, side):
+    """aligned | flat | against."""
+    slope = zlsma.iloc[-1] - zlsma.iloc[-cfg.GT_ZLSMA_SLOPE_LOOKBACK]
+    flat_threshold = cfg.GT_ZLSMA_FLAT_ATR_FRAC * atr_value
+    if abs(slope) < flat_threshold:
+        return "flat"
+    if side == "BUY":
+        return "aligned" if slope > 0 else "against"
+    return "aligned" if slope < 0 else "against"
 
 
-def _swing_high(df, lookback):
-    return df["h"].iloc[-lookback:].max()
+# ─────────────────────────────────────────────────────────────────────
+# Chop filter
+# ─────────────────────────────────────────────────────────────────────
+def _is_chop(df, atr_value):
+    """True when the recent range is compressed into fewer than
+    GT_CHOP_MIN_RANGE_ATR ATRs. That means the market is going sideways
+    and any RSI midline cross is a coin flip."""
+    if atr_value <= 0:
+        return True
+    window = df.iloc[-cfg.GT_CHOP_LOOKBACK:]
+    if len(window) < cfg.GT_CHOP_LOOKBACK:
+        return True
+    range_ = float(window["h"].max() - window["l"].min())
+    return (range_ / atr_value) < cfg.GT_CHOP_MIN_RANGE_ATR
 
 
-# Stop is placed just beyond the trigger bar's wick -- the bar itself carries
-# the long lower/upper wick that tested the Turtle band, so its extreme is the
-# right anchor. Widening the window past ~2 bars pulls stop back into the
-# pullback body, ballooning risk with no protective benefit.
-GT_SL_SWING_LOOKBACK = 2
-
-
+# ─────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────
 def find_golden_trio_candidate(candles):
-    """Return one candidate dict or None. `candles` is a list of dicts with
-    keys o/h/l/c (the standard project candle shape)."""
-    if not candles or len(candles) < max(
-        cfg.GT_ZLSMA_PERIOD * 2,  # ZLSMA is an SMA-of-SMA so needs 2x lookback
+    """Return one candidate dict or None. `candles` = list of {o,h,l,c,...}."""
+    warmup = max(
+        cfg.GT_ZLSMA_PERIOD * 2,
         cfg.GT_TURTLE_PERIOD,
-        cfg.GT_RSI_PERIOD + cfg.GT_RSI_OVERSOLD_LOOKBACK + 2,
-    ):
+        cfg.GT_RSI_PERIOD + cfg.GT_RSI_DIP_LOOKBACK + cfg.GT_RSI_RISE_BARS + 2,
+        cfg.GT_CHOP_LOOKBACK,
+    )
+    if not candles or len(candles) < warmup:
         return None
 
     df = pd.DataFrame(candles)
@@ -88,51 +163,46 @@ def find_golden_trio_candidate(candles):
     upper, lower, _mid = ind.donchian_channels(df, cfg.GT_TURTLE_PERIOD)
     atr_series = ind.atr(df)
 
-    if pd.isna(zlsma.iloc[-1]) or pd.isna(rsi_series.iloc[-1]) or pd.isna(zlsma.iloc[-cfg.GT_ZLSMA_SLOPE_LOOKBACK]):
+    if pd.isna(zlsma.iloc[-1]) or pd.isna(rsi_series.iloc[-1]):
+        return None
+    if pd.isna(zlsma.iloc[-cfg.GT_ZLSMA_SLOPE_LOOKBACK]):
         return None
 
-    curr_close = close.iloc[-1]
-    curr_zlsma = zlsma.iloc[-1]
-    curr_upper = upper.iloc[-1]
-    curr_lower = lower.iloc[-1]
-    curr_atr = atr_series.iloc[-1]
-    curr_rsi = rsi_series.iloc[-1]
+    curr_close = float(close.iloc[-1])
+    curr_open = float(df["o"].iloc[-1])
+    curr_atr = float(atr_series.iloc[-1])
+    curr_upper = float(upper.iloc[-1])
+    curr_lower = float(lower.iloc[-1])
+
+    # Global chop veto -- kills every direction, not per-side.
+    if _is_chop(df, curr_atr):
+        return None
 
     for side, band, opp_band in [("BUY", curr_lower, curr_upper), ("SELL", curr_upper, curr_lower)]:
-        dipped = _rsi_dipped_recently(
-            rsi_series,
-            cfg.GT_RSI_OVERSOLD if side == "BUY" else cfg.GT_RSI_OVERBOUGHT,
-            cfg.GT_RSI_OVERSOLD_LOOKBACK,
-            side,
-        )
-        if not dipped:
+        # Trigger bar body must confirm the direction.
+        if side == "BUY" and curr_close <= curr_open:
+            continue
+        if side == "SELL" and curr_close >= curr_open:
             continue
 
-        confirm_level = cfg.GT_RSI_CONFIRM_LEVEL if side == "BUY" else 100 - cfg.GT_RSI_CONFIRM_LEVEL
-        if not _rsi_crosses_level(rsi_series, confirm_level, side):
+        # Sequenced RSI gate.
+        fires, rsi_quality_frac, dip_value = _rsi_reversal_sequence(rsi_series, side)
+        if not fires:
             continue
 
-        # ZLSMA trend-context gate. Strict "close above ZLSMA now" would veto
-        # every reversal (a bar bouncing off the lower band is by definition
-        # below a slow MA); strict "slope up" catches the pullback that
-        # preceded the reversal. Compromise: require that in the last
-        # GT_ZLSMA_SLOPE_LOOKBACK bars, price spent at least one bar on the
-        # trend side of ZLSMA -- i.e. we're reversing back into an established
-        # trend, not counter-trend into fresh territory.
-        window = df["c"].iloc[-cfg.GT_ZLSMA_SLOPE_LOOKBACK:]
-        zlsma_window = zlsma.iloc[-cfg.GT_ZLSMA_SLOPE_LOOKBACK:]
-        if side == "BUY" and not (window > zlsma_window).any():
-            continue
-        if side == "SELL" and not (window < zlsma_window).any():
+        # Turtle band proximity gate.
+        band_ok, turtle_quality_frac = _turtle_proximity(df, band, side, curr_atr)
+        if not band_ok:
             continue
 
-        if not _bar_tested_band(df, band, side, curr_atr, cfg.GT_PROXIMITY_ATR_MULT):
+        # ZLSMA direction.
+        zlsma_status = _zlsma_status(zlsma, curr_atr, side)
+        if zlsma_status == "against":
             continue
 
+        # Build entry / SL / TPs.
         entry = curr_close
         if cfg.TARGET_MODE == "FIXED":
-            # Small-scalp fixed offsets. Bypasses Turtle-band structural
-            # targets; TP3 collapses to TP2 so the 3-tier tracker still works.
             pt = cfg.POINT_VALUE
             if side == "BUY":
                 stop = entry - cfg.FIXED_SL_POINTS * pt
@@ -145,33 +215,27 @@ def find_golden_trio_candidate(candles):
             tp3 = tp2
             risk = abs(entry - stop)
         else:
+            # Structural: SL just past the tested band + buffer; TPs scale
+            # by distance to opposite band.
             if side == "BUY":
-                raw_stop = _swing_low(df, GT_SL_SWING_LOOKBACK)
-                stop = raw_stop - cfg.GT_SL_BUFFER_ATR_MULT * curr_atr
+                stop = min(df["l"].iloc[-2:].min(), band) - cfg.GT_SL_BUFFER_ATR_MULT * curr_atr
                 if stop >= entry:
                     continue
-                risk = entry - stop
                 tp3 = opp_band
                 if tp3 <= entry:
                     continue
                 reward = tp3 - entry
             else:
-                raw_stop = _swing_high(df, GT_SL_SWING_LOOKBACK)
-                stop = raw_stop + cfg.GT_SL_BUFFER_ATR_MULT * curr_atr
+                stop = max(df["h"].iloc[-2:].max(), band) + cfg.GT_SL_BUFFER_ATR_MULT * curr_atr
                 if stop <= entry:
                     continue
-                risk = stop - entry
                 tp3 = opp_band
                 if tp3 >= entry:
                     continue
                 reward = entry - tp3
-
-            # Reject sub-1R setups outright -- the whole point of this
-            # structural mode is bouncing all the way to the opposite band.
+            risk = abs(entry - stop)
             if reward < risk:
                 continue
-
-            # TP1 = min(1R, 33% of way to opposite band); TP2 = 66%; TP3 = band.
             tp1_dist = min(cfg.TP1_R_MULT * risk, reward / 3)
             tp2_dist = reward * 2 / 3
             if side == "BUY":
@@ -181,15 +245,8 @@ def find_golden_trio_candidate(candles):
                 tp1 = entry - tp1_dist
                 tp2 = entry - tp2_dist
 
-        # Quality score components used by score_candidate():
-        #   * up to 20 for RSI extremity distance from confirm level
-        #   * up to 20 for tight proximity to the tested Turtle band
-        rsi_dist = abs(curr_rsi - confirm_level)
-        extremity_pts = min(20, round(rsi_dist / 20 * 20))
-        wick_extreme = df["l"].iloc[-3:].min() if side == "BUY" else df["h"].iloc[-3:].max()
-        wick_dist = abs(wick_extreme - band) / (cfg.GT_PROXIMITY_ATR_MULT * curr_atr)
-        proximity_pts = max(0, min(20, round((1 - wick_dist) * 20)))
-        quality = extremity_pts + proximity_pts
+        rsi_quality_pts = round(rsi_quality_frac * cfg.SCORE_RSI_CONFIRM_MAX)
+        turtle_quality_pts = round(turtle_quality_frac * cfg.SCORE_TURTLE_MAX)
 
         return {
             "pattern": PATTERN_NAME,
@@ -200,10 +257,11 @@ def find_golden_trio_candidate(candles):
             "tp2": float(tp2),
             "tp3": float(tp3),
             "risk": float(risk),
-            "quality": int(quality),
-            "quality_max": cfg.GT_QUALITY_MAX,
-            "rsi": float(curr_rsi),
-            "zlsma": float(curr_zlsma),
+            "rsi_quality": int(rsi_quality_pts),
+            "turtle_quality": int(turtle_quality_pts),
+            "zlsma_status": zlsma_status,
+            "rsi": float(rsi_series.iloc[-1]),
+            "zlsma": float(zlsma.iloc[-1]),
             "turtle_upper": float(curr_upper),
             "turtle_lower": float(curr_lower),
             "atr": float(curr_atr),
