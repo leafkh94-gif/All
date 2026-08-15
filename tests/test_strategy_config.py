@@ -26,6 +26,23 @@ def test_alert_only_flag_still_set():
 
 def test_golden_trio_constants_are_wired():
     assert cfg.GT_RSI_PERIOD == 14
-    assert cfg.GT_RSI_OVERSOLD < cfg.GT_RSI_CONFIRM_LEVEL < cfg.GT_RSI_OVERBOUGHT
+    assert cfg.GT_RSI_DIP_LEVEL < cfg.GT_RSI_CONFIRM_LEVEL
+    assert cfg.GT_RSI_DIP_LOOKBACK >= cfg.GT_RSI_RISE_BARS
     assert cfg.GT_ZLSMA_PERIOD == 30
     assert cfg.GT_TURTLE_PERIOD == 20
+    assert cfg.GT_CHOP_MIN_RANGE_ATR > 0
+
+
+def test_score_budget_thresholds_are_consistent():
+    # Base-0 model: WATCH threshold must be reachable from component
+    # maxes, and A+ threshold must be higher than WATCH.
+    max_score = (cfg.SCORE_RSI_CONFIRM_MAX + cfg.SCORE_TURTLE_MAX
+                 + cfg.SCORE_ZLSMA_ALIGNED + cfg.SCORE_H4_ALIGNED
+                 + cfg.SCORE_KILLZONE_MAX + cfg.SCORE_ROUND_NUMBER)
+    assert cfg.WATCH_MIN_SCORE < cfg.APLUS_MIN_SCORE <= max_score
+
+
+def test_cooldown_constants_are_positive():
+    assert cfg.COOLDOWN_SAME_DIRECTION_MINUTES > 0
+    assert cfg.COOLDOWN_OPPOSITE_DIRECTION_MINUTES > 0
+    assert cfg.COOLDOWN_SAME_DIRECTION_POINTS > 0

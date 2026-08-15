@@ -813,6 +813,53 @@ def record_win(amount, now_utc=None, path=None):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Duplicate / flip-flop cooldown -- prevent alert spam when the same
+# reversal setup keeps re-firing on consecutive bars.
+# ─────────────────────────────────────────────────────────────────────
+def _cooldown_key(instrument, direction):
+    return f"cooldown/{instrument}/{direction}"
+
+
+def cooldown_blocks_alert(main_state, instrument, direction, entry_price, now_utc):
+    """Return (blocked: bool, reason: str). Same-direction alerts within
+    COOLDOWN_SAME_DIRECTION_MINUTES are blocked unless price moved at least
+    COOLDOWN_SAME_DIRECTION_POINTS. Opposite-direction alerts within
+    COOLDOWN_OPPOSITE_DIRECTION_MINUTES are always blocked (kills the
+    BUY -> SELL flip-flop churn)."""
+    opposite = "SELL" if direction == "BUY" else "BUY"
+    price_moved_threshold = cfg.COOLDOWN_SAME_DIRECTION_POINTS * cfg.POINT_VALUE
+
+    # Same direction: only if within window AND price hasn't moved enough.
+    same = main_state.get(_cooldown_key(instrument, direction))
+    if same:
+        last_ts = datetime.fromisoformat(same["t"])
+        elapsed = (now_utc - last_ts).total_seconds() / 60
+        if elapsed < cfg.COOLDOWN_SAME_DIRECTION_MINUTES:
+            price_move = abs(entry_price - same["price"])
+            if price_move < price_moved_threshold:
+                return True, (f"same-direction cooldown ({elapsed:.0f}<{cfg.COOLDOWN_SAME_DIRECTION_MINUTES}m,"
+                              f" moved {price_move:g}<{price_moved_threshold:g})")
+
+    # Opposite direction: any alert within window is blocked (flip-flop).
+    other = main_state.get(_cooldown_key(instrument, opposite))
+    if other:
+        last_ts = datetime.fromisoformat(other["t"])
+        elapsed = (now_utc - last_ts).total_seconds() / 60
+        if elapsed < cfg.COOLDOWN_OPPOSITE_DIRECTION_MINUTES:
+            return True, (f"opposite-direction cooldown ({elapsed:.0f}<{cfg.COOLDOWN_OPPOSITE_DIRECTION_MINUTES}m,"
+                          f" last {opposite})")
+
+    return False, ""
+
+
+def record_alert_for_cooldown(main_state, instrument, direction, entry_price, now_utc):
+    main_state[_cooldown_key(instrument, direction)] = {
+        "t": now_utc.isoformat(),
+        "price": float(entry_price),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Manual blackout — user-declared "go quiet" window (e.g. ahead of known
 # news), separate from the self-reported loss breaker above.
 # ─────────────────────────────────────────────────────────────────────
@@ -928,13 +975,14 @@ def run():
                 continue
             scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store,
                                             mode=mode)
-            if scored is None:
-                diagnostics[instrument] = {"pattern": candidate["pattern"], "direction": candidate["direction"],
-                                            "score": None, "blocked": "H4 bias opposes entry direction"}
-                continue
-            diagnostics[instrument] = {"pattern": scored["pattern"], "direction": scored["direction"],
-                                        "score": scored["score"], "blocked": None}
-            candidates.append((instrument, scored))
+            diagnostics[instrument] = {
+                "pattern": scored["pattern"], "direction": scored["direction"],
+                "score": scored["score"], "tier": scored["tier"],
+                "zlsma": scored["zlsma_status"], "h4": scored["htf_bias"],
+                "blocked": None if scored["tier"] != "NONE" else "score below WATCH threshold",
+            }
+            if scored["tier"] != "NONE":
+                candidates.append((instrument, scored))
         except Exception:
             # One instrument's scoring must never take down the scan for the
             # other three, or block an already-collected qualifying alert.
@@ -944,27 +992,38 @@ def run():
 
     for instrument, scored in candidates:
         if suppress_new_alerts:
-            continue  # daily loss limit, manual /blackout, or news blackout — no new entries
+            continue  # daily loss limit, manual /blackout, or news blackout
 
-        if scored["score"] >= mode.aplus_min_score:
+        # Duplicate/flip-flop cooldown -- kills repeat alerts on the same
+        # reversal and BUY <-> SELL churn during chop.
+        blocked, reason = cooldown_blocks_alert(
+            main_state, instrument, scored["direction"], scored["entry_price"], now)
+        if blocked:
+            diagnostics[instrument] = {"pattern": scored["pattern"], "direction": scored["direction"],
+                                        "score": scored["score"], "blocked": reason}
+            continue
+
+        if scored.get("aplus_eligible"):
             if hard_flat_active(now, instrument, mode=mode):
-                continue  # no new entry alerts after 18:30 UTC, US indices
+                continue
             if watch_tracker.has_active(instrument) or pending_store.get(instrument):
                 continue
             if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
-                continue  # already a live pending entry or open trade on this instrument
-            # Section 5.6 — A+ waits for one candle's confirmation; WATCH stays instant.
+                continue
+            # A+ waits for one candle's confirmation; WATCH stays instant.
             pending_store.add(instrument, scored)
+            record_alert_for_cooldown(main_state, instrument, scored["direction"], scored["entry_price"], now)
             continue
 
         if scored["score"] >= mode.watch_min_score:
             if watch_tracker.has_active(instrument):
-                continue  # Section 3.4 cooldown — one active WATCH per instrument
+                continue
             if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
-                continue  # already a live pending entry or open trade on this instrument
+                continue
             expires_at = now + timedelta(minutes=mode.watch_expiry_minutes)
             send_telegram(format_watch_alert(scored, expires_at, mode=mode))
             watch_tracker.add(scored, now)
+            record_alert_for_cooldown(main_state, instrument, scored["direction"], scored["entry_price"], now)
 
     main_state["last_scan_time"] = now.strftime("%Y-%m-%d %H:%M UTC")
     main_state["last_scan_mode"] = mode.name
