@@ -111,9 +111,10 @@ ENTRY_EXPIRY_HOURS = 2
 # 8.  Golden Trio strategy (Turtle Trade Channel + RSI + Zero Lag SMA)
 # ─────────────────────────────────────────────────────────────────────
 GT_RSI_PERIOD = 14
-GT_RSI_OVERSOLD = 30
-GT_RSI_OVERBOUGHT = 70
-GT_RSI_CONFIRM_LEVEL = 45   # cross-up trigger for BUY; 55 (=100-45) for SELL
+GT_RSI_OVERSOLD = 40
+GT_RSI_OVERBOUGHT = 60
+GT_RSI_CONFIRM_LEVEL = 50   # cross-up trigger for BUY; 50 (=100-50) for SELL
+                            # Any RSI midline cross qualifies at this setting.
 GT_RSI_OVERSOLD_LOOKBACK = 3
 GT_ZLSMA_PERIOD = 30           # spec calls for 50, but Capital.com's demo API
                                # caps XAUUSD 15min at ~80 bars per request so
@@ -123,7 +124,7 @@ GT_ZLSMA_PERIOD = 30           # spec calls for 50, but Capital.com's demo API
 GT_ZLSMA_SLOPE_LOOKBACK = 15   # wide enough to see the trend context, small
                                # enough to fit inside ZLSMA(30)'s valid window
 GT_TURTLE_PERIOD = 20
-GT_PROXIMITY_ATR_MULT = 0.75
+GT_PROXIMITY_ATR_MULT = 1.5
 GT_SL_BUFFER_ATR_MULT = 0.25
 GT_QUALITY_MAX = 40
 
