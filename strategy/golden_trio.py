@@ -146,7 +146,15 @@ def _is_chop(df, atr_value):
 # Public API
 # ─────────────────────────────────────────────────────────────────────
 def find_golden_trio_candidate(candles):
-    """Return one candidate dict or None. `candles` = list of {o,h,l,c,...}."""
+    """Backwards-compatible wrapper: returns just the candidate dict (or None).
+    Prefer find_golden_trio_candidate_diag() for per-gate diagnostics."""
+    candidate, _reason = find_golden_trio_candidate_diag(candles)
+    return candidate
+
+
+def find_golden_trio_candidate_diag(candles):
+    """Return (candidate_or_None, block_reason). block_reason is a short
+    string naming the gate that killed every direction, or None on success."""
     warmup = max(
         cfg.GT_ZLSMA_PERIOD * 2,
         cfg.GT_TURTLE_PERIOD,
@@ -154,7 +162,7 @@ def find_golden_trio_candidate(candles):
         cfg.GT_CHOP_LOOKBACK,
     )
     if not candles or len(candles) < warmup:
-        return None
+        return None, f"warmup ({len(candles) if candles else 0}/{warmup} bars)"
 
     df = pd.DataFrame(candles)
     close = df["c"]
@@ -164,9 +172,9 @@ def find_golden_trio_candidate(candles):
     atr_series = ind.atr(df)
 
     if pd.isna(zlsma.iloc[-1]) or pd.isna(rsi_series.iloc[-1]):
-        return None
+        return None, "indicator NaN (needs more warmup)"
     if pd.isna(zlsma.iloc[-cfg.GT_ZLSMA_SLOPE_LOOKBACK]):
-        return None
+        return None, "ZLSMA slope window NaN"
 
     curr_close = float(close.iloc[-1])
     curr_open = float(df["o"].iloc[-1])
@@ -176,28 +184,35 @@ def find_golden_trio_candidate(candles):
 
     # Global chop veto -- kills every direction, not per-side.
     if _is_chop(df, curr_atr):
-        return None
+        recent_range = float(df["h"].iloc[-cfg.GT_CHOP_LOOKBACK:].max() - df["l"].iloc[-cfg.GT_CHOP_LOOKBACK:].min())
+        return None, f"chop veto (range {recent_range:.1f} < {cfg.GT_CHOP_MIN_RANGE_ATR}xATR={cfg.GT_CHOP_MIN_RANGE_ATR * curr_atr:.1f})"
 
+    per_side_reasons = []
     for side, band, opp_band in [("BUY", curr_lower, curr_upper), ("SELL", curr_upper, curr_lower)]:
         # Trigger bar body must confirm the direction.
         if side == "BUY" and curr_close <= curr_open:
+            per_side_reasons.append(f"{side}:body-not-bullish")
             continue
         if side == "SELL" and curr_close >= curr_open:
+            per_side_reasons.append(f"{side}:body-not-bearish")
             continue
 
         # Sequenced RSI gate.
         fires, rsi_quality_frac, dip_value = _rsi_reversal_sequence(rsi_series, side)
         if not fires:
+            per_side_reasons.append(f"{side}:rsi-seq")
             continue
 
         # Turtle band proximity gate.
         band_ok, turtle_quality_frac = _turtle_proximity(df, band, side, curr_atr)
         if not band_ok:
+            per_side_reasons.append(f"{side}:turtle")
             continue
 
         # ZLSMA direction.
         zlsma_status = _zlsma_status(zlsma, curr_atr, side)
         if zlsma_status == "against":
+            per_side_reasons.append(f"{side}:zlsma-against")
             continue
 
         # Build entry / SL / TPs.
@@ -265,6 +280,6 @@ def find_golden_trio_candidate(candles):
             "turtle_upper": float(curr_upper),
             "turtle_lower": float(curr_lower),
             "atr": float(curr_atr),
-        }
+        }, None
 
-    return None
+    return None, " | ".join(per_side_reasons) if per_side_reasons else "unknown"
