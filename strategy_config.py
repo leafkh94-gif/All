@@ -144,9 +144,11 @@ GT_ZLSMA_PERIOD = 30           # spec calls for 50, but Capital.com's demo API
 GT_ZLSMA_SLOPE_LOOKBACK = 15   # wide enough to see the trend context, small
                                # enough to fit inside ZLSMA(30)'s valid window
 GT_TURTLE_PERIOD = 20
-# Tightened band-proximity: 0.5 ATR (was 1.5). Recent-bar extreme must touch
-# the band this close for it to count as "supported by / rejected at" the band.
-GT_PROXIMITY_ATR_MULT = 0.5
+# Band-proximity in ATR. 0.5 was too tight on trend days (bar's extreme
+# usually sits >1 ATR from either band), producing no signals through
+# entire sessions. 1.0 lets pullback-to-band setups qualify without going
+# back to the noisy 1.5.
+GT_PROXIMITY_ATR_MULT = 1.0
 GT_SL_BUFFER_ATR_MULT = 0.25
 GT_QUALITY_MAX = 40
 
