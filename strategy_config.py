@@ -134,7 +134,11 @@ GT_RSI_PERIOD = 14
 # closes below 100-GT_RSI_CONFIRM_LEVEL, bearish body.
 GT_RSI_DIP_LEVEL = 48        # was 45; steady uptrends rarely dip below 45
 GT_RSI_DIP_LOOKBACK = 5
-GT_RSI_RISE_BARS = 2         # was 3; M5 rarely has 3 consecutive up bars
+GT_RSI_RISE_BARS = 1         # was 2; drops the sequencing requirement to a
+                             # single confirming bar so the strategy fires
+                             # during trend-continuation days, not only pure
+                             # reversals. Turtle proximity + ZLSMA direction
+                             # + chop veto still filter quality.
 GT_RSI_CONFIRM_LEVEL = 50
 GT_ZLSMA_PERIOD = 30           # spec calls for 50, but Capital.com's demo API
                                # caps XAUUSD 15min at ~80 bars per request so
