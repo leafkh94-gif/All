@@ -957,10 +957,14 @@ def run():
                 diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,
                                             "blocked": bars_diag.split(': ', 1)[1]}
                 continue
-            candidate = strat.find_candidate(market["entry"])
+            candidate, block_reason = strat.find_candidate_diag(market["entry"])
             if not candidate:
+                # block_reason names the specific gate that killed every
+                # direction: chop / rsi-seq / turtle / zlsma-against / body /
+                # warmup. Much more actionable than a generic "detectors too
+                # tight" line.
                 diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,
-                                            "blocked": f"no pattern detected ({bars_diag.split(': ', 1)[1]})"}
+                                            "blocked": f"blocked: {block_reason}"}
                 continue
             # Spread guard: skip signals when the live spread is wider than
             # MAX_SPREAD_POINTS. Every candle carries capital_feed's

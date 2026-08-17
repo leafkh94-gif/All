@@ -23,7 +23,7 @@ import pandas as pd
 import market_sessions
 import scoring_indicators as ind
 import strategy_config as cfg
-from strategy.golden_trio import find_golden_trio_candidate
+from strategy.golden_trio import find_golden_trio_candidate, find_golden_trio_candidate_diag
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -62,6 +62,12 @@ def _aligns(bias, direction):
 # ─────────────────────────────────────────────────────────────────────
 def find_candidate(entry_candles):
     return find_golden_trio_candidate(entry_candles)
+
+
+def find_candidate_diag(entry_candles):
+    """(candidate_or_None, block_reason_str). Preferred over find_candidate
+    when the caller wants to log which gate blocked."""
+    return find_golden_trio_candidate_diag(entry_candles)
 
 
 def score_candidate(instrument, instrument_class, candidate, market, now_utc, level_store,
