@@ -132,9 +132,9 @@ GT_RSI_PERIOD = 14
 #   4. Trigger bar body is bullish (close > open) -- confirms the reversal
 # SELL mirrors: RSI >= 100-GT_RSI_DIP_LEVEL, then fell for GT_RSI_RISE_BARS,
 # closes below 100-GT_RSI_CONFIRM_LEVEL, bearish body.
-GT_RSI_DIP_LEVEL = 45
+GT_RSI_DIP_LEVEL = 48        # was 45; steady uptrends rarely dip below 45
 GT_RSI_DIP_LOOKBACK = 5
-GT_RSI_RISE_BARS = 3
+GT_RSI_RISE_BARS = 2         # was 3; M5 rarely has 3 consecutive up bars
 GT_RSI_CONFIRM_LEVEL = 50
 GT_ZLSMA_PERIOD = 30           # spec calls for 50, but Capital.com's demo API
                                # caps XAUUSD 15min at ~80 bars per request so
