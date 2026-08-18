@@ -24,6 +24,7 @@ import market_sessions
 import scoring_indicators as ind
 import strategy_config as cfg
 from strategy.golden_trio import find_golden_trio_candidate, find_golden_trio_candidate_diag
+from strategy.smc_detector import find_smc_candidate
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -60,14 +61,74 @@ def _aligns(bias, direction):
 # ─────────────────────────────────────────────────────────────────────
 # Candidate discovery + scoring
 # ─────────────────────────────────────────────────────────────────────
+def _normalized_quality(cand):
+    if not cand:
+        return -1
+    qmax = cand.get("quality_max") or 40
+    q = cand.get("quality")
+    if q is None:
+        # Golden Trio uses rsi_quality + turtle_quality; sum them.
+        q = cand.get("rsi_quality", 0) + cand.get("turtle_quality", 0)
+        qmax = 50   # 30 + 20 budget
+    return (q / qmax) if qmax else 0
+
+
+def _add_fixed_targets_if_missing(cand):
+    """SMC detectors return sweep_price + direction; attach entry/stop/TPs
+    using the same FIXED offsets Golden Trio uses so score_candidate sees
+    a uniform candidate shape."""
+    if not cand or "entry_price" in cand:
+        return cand
+    if cfg.TARGET_MODE != "FIXED":
+        return cand   # structural SMC entry/exit not implemented here
+    entry = cand.get("sweep_price")
+    if entry is None:
+        return cand
+    pt = cfg.POINT_VALUE
+    if cand["direction"] == "BUY":
+        stop = entry - cfg.FIXED_SL_POINTS * pt
+        tp1 = entry + cfg.FIXED_TP1_POINTS * pt
+        tp2 = entry + cfg.FIXED_TP2_POINTS * pt
+    else:
+        stop = entry + cfg.FIXED_SL_POINTS * pt
+        tp1 = entry - cfg.FIXED_TP1_POINTS * pt
+        tp2 = entry - cfg.FIXED_TP2_POINTS * pt
+    cand["entry_price"] = float(entry)
+    cand["stop_loss"] = float(stop)
+    cand["tp1"] = float(tp1)
+    cand["tp2"] = float(tp2)
+    cand["tp3"] = float(tp2)
+    cand["risk"] = abs(float(entry) - float(stop))
+    return cand
+
+
 def find_candidate(entry_candles):
-    return find_golden_trio_candidate(entry_candles)
+    """Run both detectors; return the candidate with the higher normalized
+    quality. Ties broken by GT preference (mean-reversion is the primary)."""
+    gt = find_golden_trio_candidate(entry_candles)
+    smc = _add_fixed_targets_if_missing(find_smc_candidate(entry_candles))
+    if not gt and not smc:
+        return None
+    if not smc:
+        return gt
+    if not gt:
+        return smc
+    return smc if _normalized_quality(smc) > _normalized_quality(gt) else gt
 
 
 def find_candidate_diag(entry_candles):
-    """(candidate_or_None, block_reason_str). Preferred over find_candidate
-    when the caller wants to log which gate blocked."""
-    return find_golden_trio_candidate_diag(entry_candles)
+    """(candidate_or_None, block_reason_str). Runs both detectors; reports
+    which one fired, or the GT block reason if neither did."""
+    smc = _add_fixed_targets_if_missing(find_smc_candidate(entry_candles))
+    gt, gt_reason = find_golden_trio_candidate_diag(entry_candles)
+    if smc and gt:
+        winner = smc if _normalized_quality(smc) > _normalized_quality(gt) else gt
+        return winner, None
+    if smc:
+        return smc, None
+    if gt:
+        return gt, None
+    return None, f"GT: {gt_reason} | SMC: none"
 
 
 def score_candidate(instrument, instrument_class, candidate, market, now_utc, level_store,
@@ -78,27 +139,36 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
 
     direction = candidate["direction"]
     bias = htf_bias(market.get("h4") or [])
-    zlsma_status = candidate["zlsma_status"]
+    zlsma_status = candidate.get("zlsma_status")  # SMC candidates don't set this
 
     score = 0
     breakdown = []
+    is_smc = candidate["pattern"] in ("ORDER_BLOCK", "CHOCH_REVERSAL", "SMC_LIQUIDITY_SWEEP")
 
-    # 1. Sequenced RSI reversal quality (0..30)
-    rsi_pts = candidate.get("rsi_quality", 0)
-    score += rsi_pts
-    breakdown.append(("rsi_confirm", rsi_pts))
+    if is_smc:
+        # Normalize SMC's 0..38 quality to the 0..50 (RSI+Turtle) budget so
+        # the two detectors are comparable at the score level.
+        smc_q = candidate.get("quality", 0)
+        smc_pts = int(round(smc_q / 38 * 50))
+        score += smc_pts
+        breakdown.append((f"smc_{candidate['pattern'].lower()}", smc_pts))
+    else:
+        # 1. Sequenced RSI reversal quality (0..30)
+        rsi_pts = candidate.get("rsi_quality", 0)
+        score += rsi_pts
+        breakdown.append(("rsi_confirm", rsi_pts))
 
-    # 2. Turtle band proximity quality (0..20)
-    turtle_pts = candidate.get("turtle_quality", 0)
-    score += turtle_pts
-    breakdown.append(("turtle_location", turtle_pts))
+        # 2. Turtle band proximity quality (0..20)
+        turtle_pts = candidate.get("turtle_quality", 0)
+        score += turtle_pts
+        breakdown.append(("turtle_location", turtle_pts))
 
-    # 3. ZLSMA direction (0 or +20; flat contributes 0 and blocks A+)
-    if zlsma_status == "aligned":
-        score += cfg.SCORE_ZLSMA_ALIGNED
-        breakdown.append(("zlsma_aligned", cfg.SCORE_ZLSMA_ALIGNED))
-    else:  # "flat" -- "against" already vetoed by golden_trio
-        breakdown.append(("zlsma_flat", 0))
+        # 3. ZLSMA direction (0 or +20; flat contributes 0 and blocks A+)
+        if zlsma_status == "aligned":
+            score += cfg.SCORE_ZLSMA_ALIGNED
+            breakdown.append(("zlsma_aligned", cfg.SCORE_ZLSMA_ALIGNED))
+        else:  # "flat" -- "against" already vetoed by golden_trio
+            breakdown.append(("zlsma_flat", 0))
 
     # 4. H4 bias
     if _aligns(bias, direction):
@@ -134,11 +204,12 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
 
     score = max(0, min(100, score))
 
-    # A+ gate: score threshold AND all quality conditions.
+    # A+ gate: score threshold + not-opposed H4. GT candidates additionally
+    # need aligned ZLSMA; SMC candidates are exempt from that (different model).
     aplus_eligible = (
         score >= cfg.APLUS_MIN_SCORE
-        and zlsma_status == "aligned"
         and not _opposes(bias, direction)
+        and (is_smc or zlsma_status == "aligned")
     )
     tier = "A+" if aplus_eligible else ("WATCH" if score >= cfg.WATCH_MIN_SCORE else "NONE")
 
