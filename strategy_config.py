@@ -166,7 +166,10 @@ GT_ZLSMA_FLAT_ATR_FRAC = 0.15
 # fits inside GT_CHOP_MIN_RANGE_ATR * ATR, the market is chopping and no
 # signal fires (avoids the RSI-flip-flop BUY/SELL churn).
 GT_CHOP_LOOKBACK = 20
-GT_CHOP_MIN_RANGE_ATR = 3.0
+GT_CHOP_MIN_RANGE_ATR = 2.0  # was 3.0; 3x ATR range over 5 hours (20 M15 bars)
+                              # is stricter than gold typically hits outside
+                              # strong-trend days. 2x still filters truly flat
+                              # markets but allows normal-session movement.
 
 # Cooldown between alerts to prevent duplicate/flip-flop spam.
 COOLDOWN_SAME_DIRECTION_MINUTES = 30
