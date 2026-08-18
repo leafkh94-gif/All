@@ -301,7 +301,7 @@ def test_active_entry_tracker_expiry_is_flat_90_minutes(monkeypatch):
         assert "XAUUSD" not in tracker._data
 
 
-def test_build_market_defaults_to_5min_entry():
+def test_build_market_defaults_to_15min_entry():
     requested = {}
 
     class FakeFeed(_FakeFeedBase):
@@ -310,7 +310,7 @@ def test_build_market_defaults_to_5min_entry():
             return []
 
     ma.build_market(FakeFeed(), "XAUUSD")
-    assert "5min" in requested
+    assert "15min" in requested
 
 
 def test_load_active_mode_defaults_to_standard_with_no_state_file(tmp_path):

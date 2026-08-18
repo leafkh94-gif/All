@@ -8,17 +8,17 @@ import run_forever as rf
 from strategy import modes
 
 
-def test_next_scan_timestamp_lands_on_5min_boundary():
+def test_next_scan_timestamp_lands_on_15min_boundary():
     ts = 1782907653  # arbitrary; verify alignment property, not a constant
     nxt = rf.next_scan_timestamp(ts)
     assert nxt > ts
-    assert nxt % (5 * 60) == 0
-    assert nxt - ts <= 5 * 60
+    assert nxt % (15 * 60) == 0
+    assert nxt - ts <= 15 * 60
 
 
 def test_next_scan_timestamp_on_exact_boundary_moves_forward():
-    boundary = (1782907653 // 300 + 1) * 300
-    assert rf.next_scan_timestamp(boundary) == boundary + 300
+    boundary = (1782907653 // 900 + 1) * 900
+    assert rf.next_scan_timestamp(boundary) == boundary + 900
 
 
 def test_next_scan_timestamp_respects_explicit_interval_override():

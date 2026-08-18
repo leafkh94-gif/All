@@ -3,7 +3,7 @@ from strategy import modes
 
 
 def test_standard_mode_matches_current_cfg_constants():
-    assert modes.STANDARD.entry_timeframe == "5min"
+    assert modes.STANDARD.entry_timeframe == "15min"
     assert modes.STANDARD.scan_interval_minutes == cfg.SCAN_INTERVAL_MINUTES
     assert modes.STANDARD.watch_min_score == cfg.WATCH_MIN_SCORE
     assert modes.STANDARD.aplus_min_score == cfg.APLUS_MIN_SCORE
