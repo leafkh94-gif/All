@@ -155,7 +155,7 @@ class ActiveEntryTracker:
                 continue
             direction = e["direction"]
 
-            candles = feed.get_candles(instrument, "5min", n=2)
+            candles = feed.get_candles(instrument, "15min", n=2)
             if candles:
                 bar_high = candles[-1]["h"]
                 bar_low = candles[-1]["l"]
@@ -294,7 +294,7 @@ class OpenTradeTracker:
         """Runner-phase (post-TP2) optional trail: move SL to the most
         recent confirmed M15 minor swing in the trade's favor, but only
         ever toward price, never away from it."""
-        candles = feed.get_candles(instrument, "5min", n=30)
+        candles = feed.get_candles(instrument, "15min", n=30)
         if not candles or len(candles) < 6:
             return
         df = pd.DataFrame(candles)
@@ -324,7 +324,7 @@ class OpenTradeTracker:
             entry_price, initial_risk = t["entry_price"], t["initial_risk"]
             closed_this_cycle = False
 
-            candles = feed.get_candles(instrument, "5min", n=2)
+            candles = feed.get_candles(instrument, "15min", n=2)
             if candles:
                 bar_high = candles[-1]["h"]
                 bar_low = candles[-1]["l"]
@@ -567,7 +567,7 @@ def build_market(feed, instrument, mode=None):
     # comfortable slack over the scan_diagnostics MIN_BARS_NEEDED threshold.
     return {
         "entry": feed.get_candles(instrument, m.entry_timeframe, n=160),
-        "m5": feed.get_candles(instrument, "5min", n=160),
+        "m15": feed.get_candles(instrument, "15min", n=160),
         "h1": feed.get_candles(instrument, "1h", n=160),
         "h4": feed.get_candles(instrument, "4h", n=260),
     }
