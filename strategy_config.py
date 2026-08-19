@@ -151,7 +151,11 @@ GT_ZLSMA_SLOPE_LOOKBACK = 15   # wide enough to see the trend context, small
 # Uses the `smartmoneyconcepts` library for Order Block / CHOCH / Liquidity
 # Sweep detection. Either detector can fire an alert; the one with higher
 # quality wins if both fire on the same scan.
-SMC_SWING_LENGTH = 5              # M15 swing detection window (smaller = more responsive)
+SMC_SWING_LENGTH = 3              # was 5; on M15 gold, 5 bars (~2.5h each side)
+                                  # filtered out most mid-range swings so SMC
+                                  # was silent for hours. 3 (~45min each side)
+                                  # still requires a real pivot but surfaces
+                                  # more Order Blocks / Liquidity Pools.
 SMC_OB_MAX_DISTANCE_ATR = 3.0     # skip OBs further than this many ATR from current price
 SMC_CHOCH_MAX_RECENCY = 5         # CHOCH must have occurred within N bars to still count
 SMC_LIQUIDITY_RANGE_PCT = 0.5     # cluster-size tolerance for liquidity pools (percent)
