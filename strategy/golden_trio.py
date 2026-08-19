@@ -187,14 +187,21 @@ def find_golden_trio_candidate_diag(candles):
         recent_range = float(df["h"].iloc[-cfg.GT_CHOP_LOOKBACK:].max() - df["l"].iloc[-cfg.GT_CHOP_LOOKBACK:].min())
         return None, f"chop veto (range {recent_range:.1f} < {cfg.GT_CHOP_MIN_RANGE_ATR}xATR={cfg.GT_CHOP_MIN_RANGE_ATR * curr_atr:.1f})"
 
+    curr_high = float(df["h"].iloc[-1])
+    curr_low = float(df["l"].iloc[-1])
+    curr_range = max(curr_high - curr_low, 1e-9)
+
     per_side_reasons = []
     for side, band, opp_band in [("BUY", curr_lower, curr_upper), ("SELL", curr_upper, curr_lower)]:
-        # Trigger bar body must confirm the direction.
-        if side == "BUY" and curr_close <= curr_open:
-            per_side_reasons.append(f"{side}:body-not-bullish")
+        # Reject only a *decisively* counter-direction trigger bar. Dojis and
+        # small counter-bodies at reversal pivots are normal -- rsi-seq +
+        # turtle + zlsma already confirm direction.
+        counter_body_ratio = abs(curr_close - curr_open) / curr_range
+        if side == "BUY" and curr_close < curr_open and counter_body_ratio > cfg.GT_COUNTER_BODY_MAX_RATIO:
+            per_side_reasons.append(f"{side}:strong-bearish-body")
             continue
-        if side == "SELL" and curr_close >= curr_open:
-            per_side_reasons.append(f"{side}:body-not-bearish")
+        if side == "SELL" and curr_close > curr_open and counter_body_ratio > cfg.GT_COUNTER_BODY_MAX_RATIO:
+            per_side_reasons.append(f"{side}:strong-bullish-body")
             continue
 
         # Sequenced RSI gate.
