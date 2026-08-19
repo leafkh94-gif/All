@@ -175,6 +175,12 @@ GT_ZLSMA_FLAT_ATR_FRAC = 0.15
 # Chop/range-compression filter. If the last GT_CHOP_LOOKBACK bars' range
 # fits inside GT_CHOP_MIN_RANGE_ATR * ATR, the market is chopping and no
 # signal fires (avoids the RSI-flip-flop BUY/SELL churn).
+# Trigger-bar body veto. Only reject a candidate if the trigger bar closed
+# *decisively* in the opposite direction; a doji or small counter-body still
+# passes, since rsi-seq + turtle + zlsma already confirm the reversal.
+# 0.5 = counter body must be > 50% of the candle's total range to block.
+GT_COUNTER_BODY_MAX_RATIO = 0.5
+
 GT_CHOP_LOOKBACK = 20
 GT_CHOP_MIN_RANGE_ATR = 2.0  # was 3.0; 3x ATR range over 5 hours (20 M15 bars)
                               # is stricter than gold typically hits outside
