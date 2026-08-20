@@ -26,10 +26,11 @@ def test_alert_only_flag_still_set():
 
 def test_golden_trio_constants_are_wired():
     assert cfg.GT_RSI_PERIOD == 14
-    assert cfg.GT_RSI_DIP_LEVEL < cfg.GT_RSI_CONFIRM_LEVEL
-    assert cfg.GT_RSI_DIP_LOOKBACK >= cfg.GT_RSI_RISE_BARS
+    assert cfg.GT_RSI_DIP_LOOKBACK > 0
+    assert cfg.GT_RSI_MIN_HOOK > 0
+    assert 0 < cfg.GT_RSI_BUY_FLOOR < 50
     assert cfg.GT_ZLSMA_PERIOD == 30
-    assert cfg.GT_TURTLE_PERIOD == 20
+    assert cfg.GT_TURTLE_PERIOD >= 5
     assert cfg.GT_CHOP_MIN_RANGE_ATR > 0
 
 

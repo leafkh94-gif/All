@@ -42,51 +42,51 @@ def _rsi_reversal_sequence(rsi_series, side):
     """Return (fires: bool, quality: 0..1, extreme_value: float) describing
     the reversal quality on the trigger bar.
 
-    BUY sequence:
-      1. RSI dipped <= GT_RSI_DIP_LEVEL somewhere in the last
-         GT_RSI_DIP_LOOKBACK bars (excluding trigger).
-      2. Trigger bar's RSI crosses UP through GT_RSI_CONFIRM_LEVEL.
-      3. Recovery: bar[-2] RSI > the recent dip value (RSI is climbing
-         back, not still falling into the trigger).
+    Hook-up detection (BUY): find the local RSI minimum inside the last
+    GT_RSI_DIP_LOOKBACK bars; the trigger bar must be climbing (curr>prev)
+    and the total climb from the local low must be at least GT_RSI_MIN_HOOK
+    points. Rejects buys made while still deeply oversold via GT_RSI_BUY_FLOOR.
 
-    Quality: 0.5 baseline; +0.5 scaled by how deep the dip was.
-    SELL mirrors."""
+    Replaces the original absolute-cross gate (prev < 50 <= curr) which
+    never fired during trend-continuation sessions where RSI stayed above
+    50 the whole day. Any real momentum reversal now fires regardless of
+    absolute level.
+
+    SELL mirrors on the peak side.
+    """
     lookback = cfg.GT_RSI_DIP_LOOKBACK
-    dip_level = cfg.GT_RSI_DIP_LEVEL
-    confirm = cfg.GT_RSI_CONFIRM_LEVEL
+    hook = cfg.GT_RSI_MIN_HOOK
+
+    if len(rsi_series) < lookback + 2:
+        return False, 0.0, 0.0
 
     prev, curr = float(rsi_series.iloc[-2]), float(rsi_series.iloc[-1])
+    prior = rsi_series.iloc[-(lookback + 1):-1]  # excludes trigger
 
     if side == "BUY":
-        if not (prev < confirm <= curr):
+        if curr <= prev:
             return False, 0.0, 0.0
-        dip_window = rsi_series.iloc[-(lookback + 1):-1]
-        if dip_window.empty:
-            return False, 0.0, 0.0
-        dip_value = float(dip_window.min())
-        if dip_value > dip_level:
+        dip_value = float(prior.min())
+        climb = curr - dip_value
+        if climb < hook:
             return False, 0.0, dip_value
-        # Recovery: bar-before-trigger RSI > recent dip (some climb has happened).
-        if prev <= dip_value:
+        if curr < cfg.GT_RSI_BUY_FLOOR:
             return False, 0.0, dip_value
-        depth = max(0.0, dip_level - dip_value) / max(dip_level, 1e-6)
-        return True, min(1.0, 0.5 + 0.5 * depth), dip_value
+        # Quality: 0.5 at exactly the hook threshold, 1.0 at hook+10.
+        quality = min(1.0, 0.5 + (climb - hook) / 20.0)
+        return True, max(0.0, quality), dip_value
 
     # SELL mirror.
-    inv_confirm = 100 - confirm
-    inv_dip = 100 - dip_level
-    if not (prev > inv_confirm >= curr):
+    if curr >= prev:
         return False, 0.0, 0.0
-    peak_window = rsi_series.iloc[-(lookback + 1):-1]
-    if peak_window.empty:
-        return False, 0.0, 0.0
-    peak_value = float(peak_window.max())
-    if peak_value < inv_dip:
+    peak_value = float(prior.max())
+    drop = peak_value - curr
+    if drop < hook:
         return False, 0.0, peak_value
-    if prev >= peak_value:
+    if curr > (100 - cfg.GT_RSI_BUY_FLOOR):
         return False, 0.0, peak_value
-    depth = max(0.0, peak_value - inv_dip) / max(100 - inv_dip, 1e-6)
-    return True, min(1.0, 0.5 + 0.5 * depth), peak_value
+    quality = min(1.0, 0.5 + (drop - hook) / 20.0)
+    return True, max(0.0, quality), peak_value
 
 
 # ─────────────────────────────────────────────────────────────────────
