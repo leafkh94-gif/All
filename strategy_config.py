@@ -151,6 +151,11 @@ GT_ZLSMA_SLOPE_LOOKBACK = 15   # wide enough to see the trend context, small
 # Uses the `smartmoneyconcepts` library for Order Block / CHOCH / Liquidity
 # Sweep detection. Either detector can fire an alert; the one with higher
 # quality wins if both fire on the same scan.
+# SMC detectors' internal quality budget (each of OB / CHOCH / SWEEP scores
+# up to this ceiling). find_candidate uses 38 as the SMC quality denominator
+# when normalizing against GT's 50-pt (rsi+turtle) budget, so keep it 38.
+PATTERN_QUALITY_BASE_MAX = 38
+
 SMC_SWING_LENGTH = 3              # was 5; on M15 gold, 5 bars (~2.5h each side)
                                   # filtered out most mid-range swings so SMC
                                   # was silent for hours. 3 (~45min each side)
