@@ -132,13 +132,21 @@ GT_RSI_PERIOD = 14
 #   4. Trigger bar body is bullish (close > open) -- confirms the reversal
 # SELL mirrors: RSI >= 100-GT_RSI_DIP_LEVEL, then fell for GT_RSI_RISE_BARS,
 # closes below 100-GT_RSI_CONFIRM_LEVEL, bearish body.
-GT_RSI_DIP_LEVEL = 48        # was 45; steady uptrends rarely dip below 45
-GT_RSI_DIP_LOOKBACK = 5
-GT_RSI_RISE_BARS = 1         # was 2; drops the sequencing requirement to a
-                             # single confirming bar so the strategy fires
-                             # during trend-continuation days, not only pure
-                             # reversals. Turtle proximity + ZLSMA direction
-                             # + chop veto still filter quality.
+# The old absolute-cross gate (dip <= 48, then cross > 50) never fired on
+# trend-continuation days when RSI stayed above 50 the whole session --
+# 10 straight days of zero alerts made this obvious. Replaced with
+# hook-up detection: any real RSI reversal from a local low fires,
+# regardless of absolute level. See _rsi_reversal_sequence in golden_trio.py.
+GT_RSI_DIP_LOOKBACK = 8       # window (in bars) to search for the local low
+GT_RSI_MIN_HOOK = 5           # RSI must climb this many points from local
+                              # low before the trigger fires (BUY); mirrored
+                              # for SELL.
+GT_RSI_BUY_FLOOR = 40         # don't buy while RSI < 40 (still oversold /
+                              # in a real downtrend); mirrored for SELL as
+                              # (100 - GT_RSI_BUY_FLOOR).
+# Kept for backwards compatibility with any imports elsewhere; unused now.
+GT_RSI_DIP_LEVEL = 48
+GT_RSI_RISE_BARS = 1
 GT_RSI_CONFIRM_LEVEL = 50
 GT_ZLSMA_PERIOD = 30           # spec calls for 50, but Capital.com's demo API
                                # caps XAUUSD 15min at ~80 bars per request so
@@ -166,12 +174,18 @@ SMC_CHOCH_MAX_RECENCY = 5         # CHOCH must have occurred within N bars to st
 SMC_LIQUIDITY_RANGE_PCT = 0.5     # cluster-size tolerance for liquidity pools (percent)
 SMC_SWEEP_RECENCY = 3             # sweep must have happened within N bars
 
-GT_TURTLE_PERIOD = 20
-# Band-proximity in ATR. 0.5 was too tight on trend days (bar's extreme
-# usually sits >1 ATR from either band), producing no signals through
-# entire sessions. 1.0 lets pullback-to-band setups qualify without going
-# back to the noisy 1.5.
-GT_PROXIMITY_ATR_MULT = 1.0
+GT_TURTLE_PERIOD = 10        # was 20; a 20-bar Donchian sits so far from
+                              # price during trends that the proximity gate
+                              # never satisfies. 10 bars tracks price closer
+                              # so real pullbacks actually touch the band.
+# Band-proximity in ATR. Progressive loosening: 0.5 (too tight, silent),
+# 1.0 (still silent on trend-continuation days -- pullbacks in strong
+# trends rarely reach the 20-bar Donchian extreme). 2.0 catches typical
+# gold pullback entries (~1-2 ATR from the local low/high) without
+# opening up to noise. Turtle is the location gate; keeping it loose
+# enough to fire during real sessions is more valuable than perfect
+# mean-reversion location.
+GT_PROXIMITY_ATR_MULT = 2.0
 GT_SL_BUFFER_ATR_MULT = 0.25
 GT_QUALITY_MAX = 40
 
