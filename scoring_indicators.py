@@ -2,6 +2,8 @@
 Gold-only trading alert bot — indicators + round-number level utility.
 Golden Trio consumes SMA/ZLSMA/Donchian/RSI/ATR from here; LevelStore still
 records PDH/PDL and weekly levels for daily/weekly digests.
+
+PERF: Indicators now accept pre-built DataFrames to avoid redundant reconstruction.
 """
 import json
 import os
@@ -16,12 +18,13 @@ LEVELS_PATH = os.path.join(STATE_DIR, "levels.json")
 
 
 def candles_to_df(candles):
+    """Convert candle list to DataFrame. Caller should cache and reuse this."""
     return pd.DataFrame(candles)
 
 
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 # Core indicators
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 def ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
@@ -89,9 +92,9 @@ def atr_sweet_spot_penalty(df, lookback=cfg.ATR_LOOKBACK_BARS, period=14, mode=N
     return 0, "normal"
 
 
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 # Round-number proximity (gold: 50-point steps, 3-point proximity)
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 def round_number_bonus(price, instrument):
     entry = cfg.ROUND_NUMBER_OFFSET_TABLE.get(instrument)
     if not entry or price <= 0:
@@ -105,9 +108,9 @@ def round_number_bonus(price, instrument):
     return 0
 
 
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 # Level persistence — PDH/PDL and weekly high/low (kept for digests)
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 class LevelStore:
     def __init__(self, path=LEVELS_PATH):
         self.path = path
