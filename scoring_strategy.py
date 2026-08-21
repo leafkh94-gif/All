@@ -14,6 +14,8 @@ A+ additionally requires:
 H4 opposed still WATCH-eligible with a -15 penalty; A+ blocked.
 Chop, ZLSMA against, or missing RSI sequence -> no signal at all (from
 golden_trio.find_golden_trio_candidate).
+
+PERF: Now accepts pre-built DataFrames to avoid per-call reconstruction.
 """
 import json
 import os
@@ -27,18 +29,21 @@ from strategy.golden_trio import find_golden_trio_candidate, find_golden_trio_ca
 from strategy.smc_detector import find_smc_candidate
 
 
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 # Higher-timeframe bias
-# ─────────────────────────────────────────────────────────────────────
-def _df(candles):
-    return pd.DataFrame(candles)
+# ────────────────────────────────────────────────────────────────██[...]
+def _ensure_df(data):
+    """Convert candle list to DataFrame if needed; pass-through if already a DF."""
+    if isinstance(data, pd.DataFrame):
+        return data
+    return pd.DataFrame(data)
 
 
 def htf_bias(candles_h4, flat_band_pct=0.001):
     """Bull / bear / flat from H4 candles via EMA(20) slope over 5 bars."""
     if not candles_h4 or len(candles_h4) < 30:
         return "FLAT"
-    df = _df(candles_h4)
+    df = _ensure_df(candles_h4)
     e = ind.ema(df["c"], 20)
     if len(e) < 6:
         return "FLAT"
@@ -58,9 +63,9 @@ def _aligns(bias, direction):
     return (bias == "BULL" and direction == "BUY") or (bias == "BEAR" and direction == "SELL")
 
 
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 # Candidate discovery + scoring
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 def _normalized_quality(cand):
     if not cand:
         return -1
@@ -132,8 +137,13 @@ def find_candidate_diag(entry_candles):
 
 
 def score_candidate(instrument, instrument_class, candidate, market, now_utc, level_store,
-                    pending_store=None, mode=None):
-    """Score a Golden Trio candidate from scratch (base 0)."""
+                    pending_store=None, mode=None, entry_df=None):
+    """Score a Golden Trio candidate from scratch (base 0).
+    
+    Args:
+        entry_df: Pre-built DataFrame for market["entry"]. If None, built on-demand.
+                  PERF: Pass this to avoid redundant DataFrame construction.
+    """
     if candidate is None:
         return None
 
@@ -195,7 +205,9 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
         breakdown.append(("round_number", rn_pts))
 
     # 7. ATR sweet-spot penalty (0 or -10)
-    entry_df = _df(market["entry"])
+    # PERF: Use pre-built entry_df if provided, avoid reconstruction.
+    if entry_df is None:
+        entry_df = _ensure_df(market["entry"])
     atr_pts, atr_tag = ind.atr_sweet_spot_penalty(entry_df, mode=mode)
     if atr_pts:
         atr_pts = max(atr_pts, cfg.SCORE_ATR_SWEET_SPOT_PENALTY)
@@ -237,9 +249,9 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     }
 
 
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 # Pending A+ store — 1-candle confirmation delay before an alert fires
-# ─────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────██[...]
 class PendingAPlusStore:
     def __init__(self, path=None):
         self.path = path or os.path.join("state", "pending_aplus.json")

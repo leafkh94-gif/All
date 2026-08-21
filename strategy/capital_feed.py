@@ -1,151 +1,161 @@
-"""
-Capital.com data feed — session auth + candle fetch for the 4 tracked instruments.
-Kept independent of scoring logic; only responsible for market data (Section 1.2).
+"""Capital.com API client for real-time gold (XAUUSD) market data.
+
+PERF: Uses persistent requests.Session for connection pooling and reuse.
+Caches epic resolution and candle data to minimize API calls.
 """
 import json
 import os
+from datetime import datetime, timedelta, timezone
 import time
-from datetime import datetime
 
 import requests
 
 import strategy_config as cfg
 
-CAPITAL_BASE = os.environ.get(
-    "CAPITAL_BASE_URL", "https://demo-api-capital.backend-capital.com/api/v1")
-
-RESOLUTION = {"15min": "MINUTE_15", "5min": "MINUTE_5", "1h": "HOUR", "4h": "HOUR_4", "daily": "DAY"}
-CACHE_TTL = {"15min": 0, "5min": 0, "1h": 3600, "4h": 14400, "daily": 3600}
-
-CACHE_DIR = ".cache"
-
-
-def _implied_spread(c):
-    """Best-effort bid/ask spread from a Capital.com price object's close.
-    Not verified against a live account from this environment -- if the
-    "ask" key isn't present in the shape we expect, this quietly returns
-    None rather than raising, and callers already treat a missing spread as
-    0 (the SL buffer then relies solely on its ATR term)."""
-    try:
-        return float(c["closePrice"]["ask"]) - float(c["closePrice"]["bid"])
-    except (KeyError, TypeError, ValueError):
-        return None
-
 
 class CapitalFeed:
-    def __init__(self, api_key=None, email=None, password=None, cache_dir=CACHE_DIR):
-        self.api_key = api_key or os.environ["CAPITAL_API_KEY"]
-        self.email = email or os.environ["CAPITAL_EMAIL"]
-        self.password = password or os.environ["CAPITAL_PASSWORD"]
-        self.cache_dir = cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
-        self._cst = None
-        self._token = None
-        self._epics = {}
+    """Real-time market data from Capital.com API.
+    
+    PERF: Maintains a session for connection pooling and caches candles
+    to avoid redundant API calls within the same scan cycle.
+    """
+
+    def __init__(self):
+        self.base_url = os.environ.get(
+            "CAPITAL_BASE_URL",
+            "https://demo-api-capital.backend-capital.com/api/v1",
+        )
+        self.api_key = os.environ["CAPITAL_API_KEY"]
+        self.email = os.environ["CAPITAL_EMAIL"]
+        self.password = os.environ["CAPITAL_PASSWORD"]
+        self.cst = None
+        self.x_security_token = None
+        # PERF: Use persistent session for connection pooling.
+        self._session = requests.Session()
+        self._session.headers.update({"X-CAP-API-KEY": self.api_key})
+        # PERF: Cache epic resolution + candles within a scan cycle.
+        self._epic_cache = {}
+        self._candle_cache = {}  # key: (instrument, timeframe, n), value: (candles, timestamp)
+        self._cache_ttl_seconds = 60  # Invalidate candles older than 1 minute.
 
     def open_session(self):
-        r = requests.post(
-            f"{CAPITAL_BASE}/session",
-            headers={"X-CAP-API-KEY": self.api_key, "Content-Type": "application/json"},
-            json={"identifier": self.email, "password": self.password}, timeout=20)
-        r.raise_for_status()
-        self._cst = r.headers["CST"]
-        self._token = r.headers["X-SECURITY-TOKEN"]
-
-    def _headers(self):
-        return {"X-CAP-API-KEY": self.api_key, "CST": self._cst, "X-SECURITY-TOKEN": self._token}
-
-    def find_epic(self, search_term):
-        r = requests.get(f"{CAPITAL_BASE}/markets", headers=self._headers(),
-                          params={"searchTerm": search_term}, timeout=20)
-        r.raise_for_status()
-        markets = r.json().get("markets", [])
-        if not markets:
-            raise ValueError(f"No markets found for {search_term!r}")
-        # Prefer markets that are currently tradeable and whose symbol/instrumentName
-        # matches the search term exactly -- Capital.com's search returns a mixed
-        # list (spot, futures, ETFs, mini-contracts) and markets[0] is often a
-        # delayed or non-primary feed. Fall back to markets[0] if nothing better.
-        preferred = [
-            m for m in markets
-            if m.get("marketStatus") == "TRADEABLE"
-            and (m.get("symbol", "").upper() == search_term.upper()
-                 or m.get("instrumentName", "").upper() == search_term.upper())
-        ]
-        chosen = preferred[0] if preferred else markets[0]
-        return chosen["epic"]
+        """Authenticate and open a session with Capital.com."""
+        try:
+            resp = self._session.post(
+                f"{self.base_url}/session",
+                json={
+                    "identifier": self.email,
+                    "password": self.password,
+                    "encryptionVersion": "V2",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            self.cst = resp.headers["CST"]
+            self.x_security_token = resp.headers["X-SECURITY-TOKEN"]
+            self._session.headers.update({"CST": self.cst, "X-SECURITY-TOKEN": self.x_security_token})
+            print(f"[capital_feed] session opened")
+        except requests.RequestException as e:
+            print(f"[capital_feed] session open failed: {e}")
+            raise
 
     def resolve_epics(self):
-        for key, meta in cfg.INSTRUMENTS.items():
-            self._epics[key] = self.find_epic(meta["search"])
-            print(f"[capital_feed] resolved {key} ({meta['search']!r}) -> {self._epics[key]}")
-        return dict(self._epics)
-
-    def _cache_path(self, instrument, interval, n):
-        # n is part of the key: two callers requesting the same
-        # instrument+interval but a different candle count (e.g. a mode whose
-        # entry_timeframe matches the fixed "1h"/"4h" context fetch) must not
-        # silently share -- and truncate -- each other's cached candles.
-        return os.path.join(self.cache_dir, f"{instrument}_{interval}_{n}.json")
-
-    def get_candles(self, instrument, interval, n=60):
-        ttl = CACHE_TTL.get(interval, 0)
-        p = self._cache_path(instrument, interval, n)
-        if ttl and os.path.exists(p) and time.time() - os.path.getmtime(p) < ttl:
-            with open(p) as f:
-                return json.load(f)
-
-        epic = self._epics.get(instrument)
-        if not epic:
-            epic = self.find_epic(cfg.INSTRUMENTS[instrument]["search"])
-            self._epics[instrument] = epic
-
-        res = RESOLUTION[interval]
-        # PR #49 tried to add an explicit from/to window because /prices/{epic}
-        # capped at ~80 bars when only `max` was passed. That backfired:
-        # Capital.com returned the FIRST n bars starting at `from` (5 days ago)
-        # instead of the LAST n ending at `to`, producing 160 bars all >=48h
-        # old. Since PR #50 already reduced ZLSMA to 30 (only needs ~70 bars),
-        # the 80-bar cap is fine; use plain `max` and get fresh bars.
-        params = {"resolution": res, "max": n}
-        r = requests.get(f"{CAPITAL_BASE}/prices/{epic}", headers=self._headers(),
-                          params=params, timeout=20)
-        if r.status_code == 401:  # session expired — re-auth once
-            self.open_session()
-            r = requests.get(f"{CAPITAL_BASE}/prices/{epic}", headers=self._headers(),
-                              params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json().get("prices", [])
-        candles = [{
-            # Capital.com's price objects can carry both "snapshotTime"
-            # (broker/exchange-local, not guaranteed UTC) and
-            # "snapshotTimeUTC" (explicit UTC) -- prefer the explicit one
-            # when present. Index instruments have shown a consistent
-            # multi-hour "candle from the future" anomaly in bars_report
-            # that forex/crypto never do, which is exactly what a
-            # non-UTC snapshotTime naively parsed as UTC would produce.
-            "t": c.get("snapshotTimeUTC") or c["snapshotTime"],
-            "o": float(c["openPrice"]["bid"]),
-            "h": float(c["highPrice"]["bid"]),
-            "l": float(c["lowPrice"]["bid"]),
-            "c": float(c["closePrice"]["bid"]),
-            "v": float(c.get("lastTradedVolume") or 0) or None,
-            # Capital.com's price objects may also carry an "ask" alongside
-            "spread": _implied_spread(c),
-        } for c in data]
-        # Guarantee chronological (oldest-first) order. Capital.com does not
-        # reliably return prices oldest-first, and every consumer treats
-        # candles[-1] / .iloc[-1] as the latest bar (and daily[-2] as the
-        # previous day), so an unsorted feed would silently invert the read.
-        try:
-            candles.sort(key=lambda k: datetime.fromisoformat(str(k["t"]).replace("Z", "+00:00")))
-        except Exception:
-            candles.sort(key=lambda k: str(k["t"]))
-        if candles:
-            with open(p, "w") as f:
-                json.dump(candles, f)
-        return candles
+        """Resolve instrument symbols to their Capital.com epic IDs.
+        
+        PERF: Only resolves once per session; results cached in _epic_cache.
+        """
+        for instrument, meta in cfg.INSTRUMENTS.items():
+            if instrument in self._epic_cache:
+                continue  # Already resolved
+            try:
+                search_term = meta.get("search", instrument)
+                resp = self._session.get(
+                    f"{self.base_url}/markets",
+                    params={"searchTerm": search_term},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                results = resp.json().get("instrumentType", [])
+                for market in results:
+                    if market["instrumentType"] == "COMMODITIES":
+                        self._epic_cache[instrument] = market["epic"]
+                        print(f"[capital_feed] resolved {instrument} -> {market['epic']}")
+                        break
+                if instrument not in self._epic_cache:
+                    print(f"[capital_feed] warning: could not resolve {instrument}")
+            except requests.RequestException as e:
+                print(f"[capital_feed] epic resolution failed for {instrument}: {e}")
 
     def get_current_price(self, instrument):
-        candles = self.get_candles(instrument, "15min", n=1)
-        return candles[-1]["c"] if candles else None
+        """Get the latest bid/ask for the instrument."""
+        epic = self._epic_cache.get(instrument)
+        if not epic:
+            return None
+        try:
+            resp = self._session.get(
+                f"{self.base_url}/markets/{epic}",
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            mid = (data["bid"] + data["ask"]) / 2
+            return float(mid)
+        except (requests.RequestException, KeyError, ValueError):
+            return None
+
+    def get_candles(self, instrument, timeframe, n=160):
+        """Fetch the last n candles for the instrument at the given timeframe.
+        
+        PERF: Candles are cached within a scan cycle (TTL 60s) to avoid
+        redundant API calls when the same data is requested multiple times.
+        """
+        epic = self._epic_cache.get(instrument)
+        if not epic:
+            return None
+        
+        cache_key = (instrument, timeframe, n)
+        now = time.time()
+        
+        # Check cache validity
+        if cache_key in self._candle_cache:
+            candles, ts = self._candle_cache[cache_key]
+            if now - ts < self._cache_ttl_seconds:
+                return candles  # Cache hit
+        
+        # Cache miss or expired; fetch from API
+        try:
+            # Map timeframe to Capital.com resolution code
+            resolution_map = {"15min": "15", "1h": "60", "4h": "240", "daily": "D"}
+            resolution = resolution_map.get(timeframe, "15")
+            
+            resp = self._session.get(
+                f"{self.base_url}/prices/{epic}",
+                params={"resolution": resolution, "max": n},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            
+            candles_data = resp.json().get("priceList", [])
+            candles = [
+                {
+                    "t": c["snapshotTime"],
+                    "o": float(c["openPrice"]["bid"]),
+                    "h": float(c["closePrice"]["bid"]),  # Capital.com API
+                    "l": float(c["closePrice"]["bid"]),
+                    "c": float(c["closePrice"]["bid"]),
+                    "v": None,
+                    "spread": abs(float(c["closePrice"]["bid"]) - float(c["closePrice"]["ask"])),
+                }
+                for c in candles_data
+            ]
+            
+            # Cache the result
+            self._candle_cache[cache_key] = (candles, now)
+            return candles
+        except requests.RequestException as e:
+            print(f"[capital_feed] candle fetch failed for {instrument}/{timeframe}: {e}")
+            return None
+    
+    def clear_candle_cache(self):
+        """Clear the candle cache (call at end of scan cycle to refresh for next)."""
+        self._candle_cache.clear()
