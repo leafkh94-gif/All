@@ -25,13 +25,23 @@ SCAN_INTERVAL_MINUTES = 15
 # TARGET_MODE = "FIXED" bypasses golden_trio's structural stop/TP logic and
 # uses fixed point offsets instead. TARGET_MODE = "STRUCTURAL" (or anything
 # else) keeps the original Turtle-band-derived targets.
+#
+# Cost-aware calibration for gold on M15:
+#   POINT_VALUE = 1.0 means 1 pt = $1 of price. Simpler mental model than
+#   the previous 0.1 mapping.
+#   SL = $25 -- roughly 3-8x M15 gold ATR, wide enough that random wiggle
+#   inside a real setup doesn't hit the stop.
+#   TP1 = $25 (1R), TP2 = $50 (2R), TP3 = $100 (4R). Three genuinely
+#   distinct tiers; TP3 is no longer collapsed onto TP2.
+#   MAX_SPREAD $1.50 = 6% of the $25 stop, versus the old 25% ratio that
+#   ate any edge before the trade even played out.
 TARGET_MODE = "FIXED"
-POINT_VALUE = 0.1        # price distance per "point" (0.1 -> 20pt=2usd; 1.0 -> 20usd)
-FIXED_SL_POINTS = 20
-FIXED_TP1_POINTS = 20
-FIXED_TP2_POINTS = 40
-MAX_SPREAD_POINTS = 5.0  # skip signal if live spread wider than this many points
-                          # (at POINT_VALUE=0.1 -> $0.50 spread ceiling for gold)
+POINT_VALUE = 1.0
+FIXED_SL_POINTS = 25
+FIXED_TP1_POINTS = 25
+FIXED_TP2_POINTS = 50
+FIXED_TP3_POINTS = 100
+MAX_SPREAD_POINTS = 1.5
 
 # ─────────────────────────────────────────────────────────────────────
 # 1.3  Round-number levels (gold trades in 50-dollar increments; 3 pts proximity)

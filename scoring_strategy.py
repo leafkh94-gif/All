@@ -94,15 +94,17 @@ def _add_fixed_targets_if_missing(cand):
         stop = entry - cfg.FIXED_SL_POINTS * pt
         tp1 = entry + cfg.FIXED_TP1_POINTS * pt
         tp2 = entry + cfg.FIXED_TP2_POINTS * pt
+        tp3 = entry + cfg.FIXED_TP3_POINTS * pt
     else:
         stop = entry + cfg.FIXED_SL_POINTS * pt
         tp1 = entry - cfg.FIXED_TP1_POINTS * pt
         tp2 = entry - cfg.FIXED_TP2_POINTS * pt
+        tp3 = entry - cfg.FIXED_TP3_POINTS * pt
     cand["entry_price"] = float(entry)
     cand["stop_loss"] = float(stop)
     cand["tp1"] = float(tp1)
     cand["tp2"] = float(tp2)
-    cand["tp3"] = float(tp2)
+    cand["tp3"] = float(tp3)
     cand["risk"] = abs(float(entry) - float(stop))
     return cand
 
