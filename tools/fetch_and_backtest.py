@@ -22,7 +22,9 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from strategy.capital_feed import CapitalFeed
+import requests
+
+from strategy.capital_feed import CapitalFeed, CAPITAL_BASE
 
 CHUNK_MAX = 1000        # per-request bar ceiling; API-side max
 BARS_PER_DAY = 96       # M15 bars in 24h
@@ -33,8 +35,8 @@ def _fmt_ts(dt):
 
 
 def fetch_history(feed, epic, weeks):
-    """Walk backwards in ~10-day chunks and stitch into one chronological
-    list. Dedupe on `snapshotTime`. Returns a list of candle dicts sorted
+    """Walk backwards in ~1000-bar chunks and stitch into one chronological
+    list. Dedupe on snapshot timestamp. Returns candle dicts sorted
     ascending by t."""
     total_bars_target = weeks * 5 * BARS_PER_DAY
     print(f"targeting ~{total_bars_target} bars (~{weeks} weeks)")
@@ -44,43 +46,47 @@ def fetch_history(feed, epic, weeks):
     for chunk_idx in range((total_bars_target // CHUNK_MAX) + 2):
         params = {"resolution": "MINUTE_15", "max": CHUNK_MAX, "to": _fmt_ts(end)}
         try:
-            resp = feed._session.get(
-                f"{feed.base_url}/prices/{epic}", params=params, timeout=15,
+            resp = requests.get(
+                f"{CAPITAL_BASE}/prices/{epic}",
+                headers=feed._headers(),
+                params=params,
+                timeout=20,
             )
             resp.raise_for_status()
         except Exception as e:
             print(f"chunk {chunk_idx}: fetch failed ({e}); stopping early")
             break
-        data = resp.json().get("prices") or resp.json().get("priceList") or []
+        data = resp.json().get("prices", [])
         if not data:
             print(f"chunk {chunk_idx}: empty response; stopping")
             break
+        new_rows = 0
         for c in data:
             t = c.get("snapshotTimeUTC") or c.get("snapshotTime")
             if not t or t in all_rows:
                 continue
             try:
-                op = c["openPrice"]; cp = c["closePrice"]; hp = c.get("highPrice", cp); lp = c.get("lowPrice", cp)
                 all_rows[t] = {
                     "t": t,
-                    "o": float(op["bid"]),
-                    "h": float(hp["bid"]),
-                    "l": float(lp["bid"]),
-                    "c": float(cp["bid"]),
+                    "o": float(c["openPrice"]["bid"]),
+                    "h": float(c["highPrice"]["bid"]),
+                    "l": float(c["lowPrice"]["bid"]),
+                    "c": float(c["closePrice"]["bid"]),
                 }
+                new_rows += 1
             except (KeyError, TypeError, ValueError):
                 continue
-        got = len(data)
         earliest = min(c.get("snapshotTimeUTC") or c.get("snapshotTime") for c in data)
-        print(f"chunk {chunk_idx}: +{got} bars, total unique {len(all_rows)}, earliest {earliest}")
-        # Next chunk stops just before the earliest bar we just got
+        print(f"chunk {chunk_idx}: +{len(data)} bars ({new_rows} new), total unique {len(all_rows)}, earliest {earliest}")
+        if new_rows == 0:
+            print("no new bars in this chunk; stopping")
+            break
         end = datetime.fromisoformat(earliest.replace("Z", "+00:00")) - timedelta(seconds=1)
         if len(all_rows) >= total_bars_target:
             break
-        time.sleep(0.5)   # be polite
+        time.sleep(0.5)
 
-    rows = sorted(all_rows.values(), key=lambda r: r["t"])
-    return rows
+    return sorted(all_rows.values(), key=lambda r: r["t"])
 
 
 def write_csv(rows, path):
@@ -102,7 +108,7 @@ def main():
     feed = CapitalFeed()
     feed.open_session()
     feed.resolve_epics()
-    epic = feed._epic_cache.get("XAUUSD")
+    epic = feed._epics.get("XAUUSD")
     if not epic:
         print("could not resolve XAUUSD epic; aborting")
         sys.exit(1)
