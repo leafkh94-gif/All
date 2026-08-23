@@ -1,31 +1,45 @@
-"""Golden Trio strategy — sequenced RSI reversal at a Turtle band, ZLSMA
-direction filter, chop-market rejection. The candidate this returns is
-scored downstream in scoring_strategy.score_candidate.
+"""Golden Trio strategy — RSI hook-up at a Turtle band, ZLSMA direction
+filter, chop-market rejection. The candidate this returns is scored
+downstream in scoring_strategy.score_candidate.
 
 Hard gates (return None if any fails):
-  1. Not chop (recent range >= GT_CHOP_MIN_RANGE_ATR * ATR)
-  2. Sequenced RSI reversal:
-     BUY -> RSI dipped <= GT_RSI_DIP_LEVEL in last GT_RSI_DIP_LOOKBACK bars,
-     then rose for GT_RSI_RISE_BARS consecutive bars, trigger bar closes
-     above GT_RSI_CONFIRM_LEVEL from below, trigger body is bullish.
-     SELL mirrors on the opposite side.
+  1. Not chop (recent range >= GT_CHOP_MIN_RANGE_ATR * ATR over last
+     GT_CHOP_LOOKBACK bars).
+  2. RSI hook-up (per side):
+     BUY -> the trigger bar's RSI is climbing (curr > prev), has climbed
+     at least GT_RSI_MIN_HOOK points above the local minimum in the last
+     GT_RSI_DIP_LOOKBACK bars, and RSI is not below GT_RSI_BUY_FLOOR (to
+     avoid catching a falling knife).
+     SELL mirrors on the peak side (drop from local max, floor at
+     100 - GT_RSI_BUY_FLOOR).
+     Note: the original spec used an absolute-cross gate (RSI dipping
+     below one level and crossing back above another). It was replaced
+     with hook-up detection because the cross literally never fires on
+     a trend-continuation session where RSI stays elevated all day.
   3. Turtle band tested: the trigger bar's extreme (low for BUY, high for
-     SELL) sits within GT_PROXIMITY_ATR_MULT * ATR of the band.
-  4. ZLSMA slope is not against the direction. Slope classifies as:
-       aligned / flat / against
-     - against -> None (never fires)
-     - flat -> allowed but scored as flat downstream (blocks A+)
-     - aligned -> full points downstream
+     SELL) sits within GT_PROXIMITY_ATR_MULT * ATR of the band. Uses a
+     GT_TURTLE_PERIOD-bar Donchian; the shorter period keeps the band
+     close enough to price that real pullbacks reach it.
+  4. Trigger-bar body veto: block only decisively counter-direction
+     candles (counter body > GT_COUNTER_BODY_MAX_RATIO of range).
+     Dojis/small counter-bodies still pass -- the rsi+turtle+zlsma stack
+     already confirms direction.
+  5. ZLSMA slope not against the direction:
+       against -> None (never fires)
+       flat    -> allowed, scored as flat downstream (blocks A+)
+       aligned -> full points downstream
 
 Component quality scores handed to the scorer:
-  - rsi_confirm_quality: 0..SCORE_RSI_CONFIRM_MAX based on how deep the dip
-    was and how clean the rise sequence was
-  - turtle_quality: 0..SCORE_TURTLE_MAX based on how tightly the trigger
+  - rsi_quality: 0..SCORE_RSI_CONFIRM_MAX from _rsi_reversal_sequence
+    (scales with the size of the hook from the local low)
+  - turtle_quality: 0..SCORE_TURTLE_MAX from how tightly the trigger
     bar's extreme hugged the band
   - zlsma_status: "aligned" | "flat"
 
 Fixed target mode (cfg.TARGET_MODE == "FIXED") produces stop/TP1/TP2/TP3
-at fixed point offsets; structural mode uses Turtle-band-derived targets.
+at fixed point offsets (FIXED_SL_POINTS / FIXED_TP{1,2,3}_POINTS scaled
+by POINT_VALUE). Structural mode uses Turtle-band-derived targets and
+still fills TP3 as the opposite band.
 """
 import pandas as pd
 
@@ -230,11 +244,12 @@ def find_golden_trio_candidate_diag(candles):
                 stop = entry - cfg.FIXED_SL_POINTS * pt
                 tp1 = entry + cfg.FIXED_TP1_POINTS * pt
                 tp2 = entry + cfg.FIXED_TP2_POINTS * pt
+                tp3 = entry + cfg.FIXED_TP3_POINTS * pt
             else:
                 stop = entry + cfg.FIXED_SL_POINTS * pt
                 tp1 = entry - cfg.FIXED_TP1_POINTS * pt
                 tp2 = entry - cfg.FIXED_TP2_POINTS * pt
-            tp3 = tp2
+                tp3 = entry - cfg.FIXED_TP3_POINTS * pt
             risk = abs(entry - stop)
         else:
             # Structural: SL just past the tested band + buffer; TPs scale

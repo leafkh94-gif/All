@@ -14,8 +14,25 @@ import numpy as np
 try:
     from smartmoneyconcepts import smc
     SMC_AVAILABLE = True
-except ImportError:
+except ImportError as _smc_err:
     SMC_AVAILABLE = False
+    _SMC_IMPORT_ERROR = _smc_err
+else:
+    _SMC_IMPORT_ERROR = None
+
+
+def assert_smc_available():
+    """Startup hard-fail. Half the signal engine is SMC; if the library is
+    missing every SMC detector silently returns None and we ship gold
+    alerts on Golden Trio alone without any warning. Call this once at
+    process start (e.g. from main_alerts / run_forever)."""
+    if not SMC_AVAILABLE:
+        raise RuntimeError(
+            "smartmoneyconcepts is required for the SMC detectors "
+            "(Order Block / CHOCH / Liquidity Sweep) but failed to import: "
+            f"{_SMC_IMPORT_ERROR}. Install it (`pip install smartmoneyconcepts`) "
+            "or remove SMC from find_candidate."
+        )
 
 import strategy_config as cfg
 

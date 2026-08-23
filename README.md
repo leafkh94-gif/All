@@ -1,14 +1,21 @@
-# Gold Alert Bot — Golden Trio
+# Gold Alert Bot — Golden Trio + SMC
 
 Alert-only trading bot for **XAUUSD (Gold)** on Capital.com CFDs.
-Scans every 15 minutes on one strategy — **The Golden Trio**: Turtle Trade
-Channel + RSI (14) + Zero Lag SMA (50) — and sends WATCH ⚡ / A+ 🟢 alerts
-to Telegram. **It suggests. It never executes trades.**
+Scans every 15 minutes on **two parallel detectors** and sends
+WATCH ⚡ / A+ 🟢 alerts to Telegram. **It suggests. It never executes trades.**
 
-Signals fire on RSI oversold/overbought reversals at the Turtle band,
-gated by ZLSMA trend slope. TP1 = 1R, TP2 = midpoint to opposite band,
-TP3 = opposite band. Best on the 15-min timeframe during the London/NY
-overlap (13:00-16:00 UTC), which is gold's prime liquidity window.
+1. **Golden Trio** — RSI(14) hook-up from a local low at a 10-bar Turtle
+   (Donchian) band, gated by a ZLSMA(30) trend-slope filter. ZLSMA is 30
+   not 50 because the Capital.com M15 API caps at ~80 bars per request.
+2. **Smart Money Concepts** — Order Block, Change of Character (CHOCH),
+   and Liquidity Sweep detection via the `smartmoneyconcepts` library.
+
+Each scan runs both detectors and keeps the higher-quality candidate.
+
+**Targets** (fixed mode, `POINT_VALUE = 1.0`): $25 stop, $25 TP1 (1R),
+$50 TP2 (2R), $100 TP3 (4R). Max spread accepted per signal: $1.50
+(~6% of stop). Best during the London/NY overlap (13:00–16:00 UTC),
+which is gold's prime liquidity window.
 
 ## How to run it (real-time mode — recommended)
 
