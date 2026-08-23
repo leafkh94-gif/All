@@ -178,7 +178,7 @@ def run_backtest(candles):
             "t": window[-1]["t"],
             "direction": candidate["direction"],
             "score": scored["score"] if scored else None,
-            "quality": candidate["quality"],
+            "quality": candidate.get("rsi_quality", 0) + candidate.get("turtle_quality", 0),
             "rsi": round(candidate.get("rsi", 0.0), 1),
             "h4_bias": bias,
             "would_veto": would_veto,

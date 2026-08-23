@@ -1,0 +1,45 @@
+name: backtest
+
+# Manually-triggered historical backtest. Pulls up to N weeks of M15 gold
+# from Capital.com, runs backtest.py end-to-end, and uploads the per-signal
+# JSON plus stdout summary as an artifact you can download and inspect.
+#
+# The bot's live runner does NOT use this workflow -- see bot.yml. This is
+# a read-only research job: no state files touched, no Telegram alerts.
+on:
+  workflow_dispatch:
+    inputs:
+      weeks:
+        description: "Weeks of M15 gold history to attempt"
+        required: false
+        default: "26"
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - name: Fetch history + run backtest
+        run: |
+          mkdir -p bt_out
+          python tools/fetch_and_backtest.py \
+            --weeks ${{ github.event.inputs.weeks }} \
+            --out bt_out/gold_m15_capital.csv \
+            --json bt_out/backtest_result.json \
+            | tee bt_out/summary.txt
+        env:
+          CAPITAL_API_KEY:  ${{ secrets.CAPITAL_API_KEY }}
+          CAPITAL_EMAIL:    ${{ secrets.CAPITAL_EMAIL }}
+          CAPITAL_PASSWORD: ${{ secrets.CAPITAL_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backtest-${{ github.run_id }}
+          path: bt_out/
+          retention-days: 30
