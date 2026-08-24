@@ -965,6 +965,7 @@ def run():
                 # tight" line.
                 diagnostics[instrument] = {"pattern": None, "direction": None, "score": None,
                                             "blocked": f"blocked: {block_reason}"}
+                print(f"[scan] {instrument}: no candidate — {block_reason}")
                 continue
             # Spread guard: skip signals when the live spread is wider than
             # MAX_SPREAD_POINTS. Every candle carries capital_feed's
@@ -976,6 +977,8 @@ def run():
                 diagnostics[instrument] = {"pattern": candidate["pattern"],
                                             "direction": candidate["direction"], "score": None,
                                             "blocked": f"spread {latest_spread:g} > {max_spread_price:g}"}
+                print(f"[scan] {instrument}: {candidate['pattern']} {candidate['direction']} — "
+                      f"blocked, spread {latest_spread:g} > {max_spread_price:g}")
                 continue
             scored = strat.score_candidate(instrument, meta["class"], candidate, market, now, level_store,
                                             mode=mode)
@@ -985,6 +988,9 @@ def run():
                 "zlsma": scored["zlsma_status"], "h4": scored["htf_bias"],
                 "blocked": None if scored["tier"] != "NONE" else "score below WATCH threshold",
             }
+            print(f"[scan] {instrument}: {scored['pattern']} {scored['direction']} "
+                  f"score={scored['score']} tier={scored['tier']} "
+                  f"h4={scored['htf_bias']} zlsma={scored['zlsma_status']}")
             if scored["tier"] != "NONE":
                 candidates.append((instrument, scored))
         except Exception:
@@ -996,6 +1002,7 @@ def run():
 
     for instrument, scored in candidates:
         if suppress_new_alerts:
+            print(f"[scan] {instrument}: suppressed (loss-limit / blackout / news)")
             continue  # daily loss limit, manual /blackout, or news blackout
 
         # Duplicate/flip-flop cooldown -- kills repeat alerts on the same
@@ -1005,29 +1012,39 @@ def run():
         if blocked:
             diagnostics[instrument] = {"pattern": scored["pattern"], "direction": scored["direction"],
                                         "score": scored["score"], "blocked": reason}
+            print(f"[scan] {instrument}: cooldown-blocked — {reason}")
             continue
 
         if scored.get("aplus_eligible"):
             if hard_flat_active(now, instrument, mode=mode):
+                print(f"[scan] {instrument}: A+ suppressed (hard-flat window)")
                 continue
             if watch_tracker.has_active(instrument) or pending_store.get(instrument):
+                print(f"[scan] {instrument}: A+ skipped (active WATCH or pending A+)")
                 continue
             if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
+                print(f"[scan] {instrument}: A+ skipped (active entry or open trade)")
                 continue
             # A+ waits for one candle's confirmation; WATCH stays instant.
             pending_store.add(instrument, scored)
             record_alert_for_cooldown(main_state, instrument, scored["direction"], scored["entry_price"], now)
+            print(f"[scan] {instrument}: A+ QUEUED for one-candle confirmation "
+                  f"(score={scored['score']}, {scored['direction']} @ {scored['entry_price']:g})")
             continue
 
         if scored["score"] >= mode.watch_min_score:
             if watch_tracker.has_active(instrument):
+                print(f"[scan] {instrument}: WATCH skipped (already active)")
                 continue
             if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
+                print(f"[scan] {instrument}: WATCH skipped (active entry or open trade)")
                 continue
             expires_at = now + timedelta(minutes=mode.watch_expiry_minutes)
             send_telegram(format_watch_alert(scored, expires_at, mode=mode))
             watch_tracker.add(scored, now)
             record_alert_for_cooldown(main_state, instrument, scored["direction"], scored["entry_price"], now)
+            print(f"[scan] {instrument}: WATCH ALERT SENT "
+                  f"(score={scored['score']}, {scored['direction']} @ {scored['entry_price']:g})")
 
     main_state["last_scan_time"] = now.strftime("%Y-%m-%d %H:%M UTC")
     main_state["last_scan_mode"] = mode.name
