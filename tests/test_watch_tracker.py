@@ -60,7 +60,7 @@ def test_collapse_sends_quiet_cancel_and_removes(tmp_path):
 
 
 def test_still_monitoring_sends_update_after_45_min(tmp_path):
-    tracker, messages = _tracker(tmp_path, rescore_value=70)
+    tracker, messages = _tracker(tmp_path, rescore_value=65)
     tracker.add(_scored(score=68), _now())
     tracker.evaluate_all(_now() + dt.timedelta(minutes=46))
     assert tracker.has_active("US500")
@@ -68,7 +68,7 @@ def test_still_monitoring_sends_update_after_45_min(tmp_path):
 
 
 def test_still_monitoring_no_update_before_45_min(tmp_path):
-    tracker, messages = _tracker(tmp_path, rescore_value=70)
+    tracker, messages = _tracker(tmp_path, rescore_value=65)
     tracker.add(_scored(score=68), _now())
     tracker.evaluate_all(_now() + dt.timedelta(minutes=20))
     assert tracker.has_active("US500")
@@ -84,7 +84,7 @@ def test_pattern_gone_treated_as_collapse(tmp_path):
 
 
 def test_default_expiry_holds_at_81_minutes(tmp_path):
-    tracker, _ = _tracker(tmp_path, rescore_value=70)
+    tracker, _ = _tracker(tmp_path, rescore_value=65)
     tracker.add(_scored(score=68), _now())
     tracker.evaluate_all(_now() + dt.timedelta(minutes=81))
     assert tracker.has_active("US500")
