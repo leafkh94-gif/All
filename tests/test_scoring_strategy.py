@@ -99,12 +99,15 @@ def test_score_candidate_score_is_bounded_0_100():
     assert 0 <= scored["score"] <= 100
 
 
-def test_score_candidate_includes_killzone_bonus_in_breakdown_during_london():
+def test_score_candidate_omits_killzone_bonus():
+    # Killzone bonus intentionally disabled (SCORE_KILLZONE_MAX=0) so alerts
+    # aren't concentrated into the London/NY overlap. Verify no killzone
+    # tag reaches the breakdown regardless of scan time.
     candidate = strat.find_candidate(_long_setup_candles())
     market = _market(_long_setup_candles())
     scored = strat.score_candidate("XAUUSD", "COMMODITY", candidate, market, _now(), _StubLevelStore())
     tags = [tag for tag, _ in scored["breakdown"]]
-    assert "LONDON_KILLZONE" in tags
+    assert not any("KILLZONE" in tag for tag in tags)
 
 
 def test_score_candidate_short_setup_bias_bear_returns_scored_dict():

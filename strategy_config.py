@@ -56,10 +56,16 @@ ROUND_NUMBER_OFFSET_TABLE = {
 # component has to earn its points, so these thresholds mean "actual signal
 # quality" instead of "cleared the artificial floor".
 # ─────────────────────────────────────────────────────────────────────
-NO_ALERT_MAX = 54
-WATCH_MIN_SCORE = 55
-WATCH_MAX_SCORE = 74
-APLUS_MIN_SCORE = 75
+# Killzone bonus removed (SCORE_KILLZONE_MAX=0 below) — it concentrated
+# alerts into 13:00–16:00 UTC by adding 10 pts during the London/NY
+# overlap and 0 outside it, so Asian/early-European setups needed 10
+# extra "real" points to reach WATCH. With that gone, WATCH threshold
+# dropped 55 → 45 so a real setup (RSI hook + Turtle proximity +
+# ZLSMA aligned ≈ 50 pts even before H4) qualifies in every session.
+NO_ALERT_MAX = 44
+WATCH_MIN_SCORE = 45
+WATCH_MAX_SCORE = 69
+APLUS_MIN_SCORE = 70
 
 # Score budget (rewritten from base-60 model). Max ≈ 100.
 SCORE_RSI_CONFIRM_MAX = 30      # sequenced RSI reversal quality
@@ -69,7 +75,12 @@ SCORE_ZLSMA_FLAT = 0            # flat slope contributes nothing (blocks A+)
 SCORE_H4_ALIGNED = 15
 SCORE_H4_FLAT = 0
 SCORE_H4_OPPOSED = -15          # opposed EMA slope; also blocks A+
-SCORE_KILLZONE_MAX = 10
+SCORE_KILLZONE_MAX = 0          # was 10; the bonus concentrated alerts
+                                # into the London/NY overlap and left the
+                                # rest of the day artificially short of
+                                # threshold. Gold trades 24/5 -- alerts
+                                # should reflect actual setup quality,
+                                # not what time it is.
 SCORE_ROUND_NUMBER = 5
 SCORE_ATR_SWEET_SPOT_PENALTY = -10
 
@@ -101,7 +112,7 @@ INSTRUMENT_PROFILES = {
 WATCH_EXPIRY_HOURS = 4
 WATCH_UPDATE_INTERVAL_MINUTES = 45
 WATCH_UPGRADE_SCORE = APLUS_MIN_SCORE
-WATCH_COLLAPSE_SCORE = 55
+WATCH_COLLAPSE_SCORE = 45
 
 # ─────────────────────────────────────────────────────────────────────
 # 4.  Health check
