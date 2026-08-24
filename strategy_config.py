@@ -159,9 +159,12 @@ GT_RSI_PERIOD = 14
 # hook-up detection: any real RSI reversal from a local low fires,
 # regardless of absolute level. See _rsi_reversal_sequence in golden_trio.py.
 GT_RSI_DIP_LOOKBACK = 8       # window (in bars) to search for the local low
-GT_RSI_MIN_HOOK = 5           # RSI must climb this many points from local
-                              # low before the trigger fires (BUY); mirrored
-                              # for SELL.
+GT_RSI_MIN_HOOK = 3           # was 5; 5 pts of RSI climb is a lot on M15
+                              # gold outside London/NY -- Asian and early-Euro
+                              # sessions rarely hook that hard. 3 pts still
+                              # requires a real momentum shift (not noise)
+                              # while catching setups the bot was missing
+                              # through the quieter sessions.
 GT_RSI_BUY_FLOOR = 40         # don't buy while RSI < 40 (still oversold /
                               # in a real downtrend); mirrored for SELL as
                               # (100 - GT_RSI_BUY_FLOOR).
