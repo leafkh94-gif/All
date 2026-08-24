@@ -38,7 +38,10 @@ import strategy_config as cfg
 
 
 def _to_smc_df(candles):
-    """Convert our candle dicts to the OHLCV DataFrame the library expects."""
+    """Convert our candle dicts to the OHLCV DataFrame the library expects.
+    Volume is filled to 1.0 wherever it's missing / None / NaN --
+    smartmoneyconcepts.ob() crashes on `None + None` during obVolume
+    accumulation, and Capital.com's feed frequently returns v=None."""
     df = pd.DataFrame(candles)
     out = pd.DataFrame({
         "open": df["o"],
@@ -47,9 +50,10 @@ def _to_smc_df(candles):
         "close": df["c"],
     })
     if "v" in df.columns:
-        out["volume"] = df["v"]
+        vol = pd.to_numeric(df["v"], errors="coerce").fillna(1.0)
     else:
-        out["volume"] = 1.0
+        vol = pd.Series([1.0] * len(df), index=df.index)
+    out["volume"] = vol
     out.index = range(len(out))
     return out
 
