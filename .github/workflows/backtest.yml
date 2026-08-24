@@ -20,7 +20,10 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120     # backtester now runs the full live pipeline
+                             # (find_candidate + score + cooldown + SMC) per
+                             # bar under 3 cost regimes -- 13k bars can take
+                             # 20-40min. 120min gives room for slow days.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
