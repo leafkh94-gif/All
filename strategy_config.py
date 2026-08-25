@@ -74,7 +74,17 @@ SCORE_ZLSMA_ALIGNED = 20        # ZLSMA slope aligned with entry direction
 SCORE_ZLSMA_FLAT = 0            # flat slope contributes nothing (blocks A+)
 SCORE_H4_ALIGNED = 15
 SCORE_H4_FLAT = 0
-SCORE_H4_OPPOSED = -15          # opposed EMA slope; also blocks A+
+SCORE_H4_OPPOSED = -10          # was -15; combined with WATCH_MIN=45, -15
+                                # meant every H4-opposed setup fell just
+                                # under WATCH (typical opposed score 39-42)
+                                # so the bot went silent whenever the H4
+                                # trend was persistent. -10 still tilts
+                                # the score against opposition (backtest
+                                # confirmed opposed signals lose -0.09R
+                                # avg vs aligned +0.05R) without turning
+                                # H4 into a hard veto. A+ still blocked
+                                # for opposed via score_candidate's
+                                # aplus_eligible gate.
 SCORE_KILLZONE_MAX = 0          # was 10; the bonus concentrated alerts
                                 # into the London/NY overlap and left the
                                 # rest of the day artificially short of
