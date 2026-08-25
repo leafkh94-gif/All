@@ -54,22 +54,22 @@ PATTERN_NAME = "GOLDEN_TRIO"
 # ─────────────────────────────────────────────────────────────────────
 def _rsi_reversal_sequence(rsi_series, side):
     """Return (fires: bool, quality: 0..1, extreme_value: float) describing
-    the reversal quality on the trigger bar.
+    the RSI-reversal quality on the trigger bar.
 
-    Hook-up detection (BUY): find the local RSI minimum inside the last
-    GT_RSI_DIP_LOOKBACK bars; the trigger bar must be climbing (curr>prev)
-    and the total climb from the local low must be at least GT_RSI_MIN_HOOK
-    points. Rejects buys made while still deeply oversold via GT_RSI_BUY_FLOOR.
+    Soft gate (was hard). RSI now contributes *evidence*, not a veto:
 
-    Replaces the original absolute-cross gate (prev < 50 <= curr) which
-    never fired during trend-continuation sessions where RSI stayed above
-    50 the whole day. Any real momentum reversal now fires regardless of
-    absolute level.
-
-    SELL mirrors on the peak side.
+      - Direction check (curr > prev for BUY, curr < prev for SELL) is
+        still required -- without any climb/drop we can't call it a
+        reversal at all.
+      - The old GT_RSI_MIN_HOOK hard threshold is gone. Quality scales
+        smoothly with the climb/drop from the local extreme: 3pt hook =
+        ~0.3, 8pt = ~0.6, 15pt+ = 1.0.
+      - GT_RSI_BUY_FLOOR now down-weights instead of vetoing: still
+        firing while deeply oversold (BUY: curr < 40) drops the quality
+        multiplier to 0.4x so it's weak evidence rather than an outright
+        buy-the-knife signal. SELL mirrors on 100 - floor.
     """
     lookback = cfg.GT_RSI_DIP_LOOKBACK
-    hook = cfg.GT_RSI_MIN_HOOK
 
     if len(rsi_series) < lookback + 2:
         return False, 0.0, 0.0
@@ -79,15 +79,13 @@ def _rsi_reversal_sequence(rsi_series, side):
 
     if side == "BUY":
         if curr <= prev:
-            return False, 0.0, 0.0
+            return False, 0.0, 0.0  # no climb -> no BUY reversal at all
         dip_value = float(prior.min())
         climb = curr - dip_value
-        if climb < hook:
-            return False, 0.0, dip_value
+        # Smooth quality curve: saturating at ~15pt climb.
+        quality = min(1.0, climb / 15.0)
         if curr < cfg.GT_RSI_BUY_FLOOR:
-            return False, 0.0, dip_value
-        # Quality: 0.5 at exactly the hook threshold, 1.0 at hook+10.
-        quality = min(1.0, 0.5 + (climb - hook) / 20.0)
+            quality *= 0.4  # deeply oversold: weak evidence, still fires
         return True, max(0.0, quality), dip_value
 
     # SELL mirror.
@@ -95,11 +93,9 @@ def _rsi_reversal_sequence(rsi_series, side):
         return False, 0.0, 0.0
     peak_value = float(prior.max())
     drop = peak_value - curr
-    if drop < hook:
-        return False, 0.0, peak_value
+    quality = min(1.0, drop / 15.0)
     if curr > (100 - cfg.GT_RSI_BUY_FLOOR):
-        return False, 0.0, peak_value
-    quality = min(1.0, 0.5 + (drop - hook) / 20.0)
+        quality *= 0.4
     return True, max(0.0, quality), peak_value
 
 
@@ -107,23 +103,43 @@ def _rsi_reversal_sequence(rsi_series, side):
 # Turtle band proximity
 # ─────────────────────────────────────────────────────────────────────
 def _turtle_proximity(df, band, side, atr_value):
-    """Return (fires: bool, quality: 0..1). Quality = 1 when the extreme
-    sits exactly on the band; 0 when it's at the loose-edge (proximity mult
-    times ATR away)."""
+    """Return (fires: bool, quality: 0..1).
+
+    Soft gate (was hard). Turtle location now contributes evidence
+    across a much wider distance range:
+
+      - Touching / piercing the band  -> quality ~1.0 (best)
+      - Within GT_PROXIMITY_ATR_MULT * ATR -> smooth 1.0 -> 0.5
+      - Beyond GT_PROXIMITY_ATR_MULT and up to GT_PROXIMITY_ATR_HARD_VETO
+        -> smooth 0.5 -> ~0.0 (fires but as very weak evidence)
+      - Beyond GT_PROXIMITY_ATR_HARD_VETO -> hard veto (setup is at
+        the wrong end of the range and would demand a huge move
+        against the trend to work; almost never a real edge)
+
+    Fires=False only in that last extreme case, so most setups now
+    reach scoring and the ATR distance shows up as a quality signal
+    rather than as a silent gate."""
     if atr_value <= 0:
         return False, 0.0
     tol = cfg.GT_PROXIMITY_ATR_MULT * atr_value
+    hard = cfg.GT_PROXIMITY_ATR_HARD_VETO * atr_value
     if side == "BUY":
         extreme = min(df["l"].iloc[-1], df["l"].iloc[-2])
-        distance = extreme - band  # positive means above the band
+        distance = extreme - band     # positive means above lower band
     else:
         extreme = max(df["h"].iloc[-1], df["h"].iloc[-2])
-        distance = band - extreme
-    if distance > tol:
+        distance = band - extreme     # positive means below upper band
+    if distance > hard:
         return False, 0.0
-    # distance can be negative (wick pierced past band); clamp for quality.
     d = max(0.0, distance)
-    return True, 1.0 - d / tol if tol > 0 else 1.0
+    if d <= tol:
+        # Inside the "good" zone: quality 1.0 (on band) -> 0.5 (at tol).
+        quality = 1.0 - 0.5 * (d / tol)
+    else:
+        # Extended: quality 0.5 (at tol) -> ~0 (at hard cap).
+        span = max(hard - tol, 1e-9)
+        quality = 0.5 * (1.0 - (d - tol) / span)
+    return True, max(0.0, min(1.0, quality))
 
 
 # ─────────────────────────────────────────────────────────────────────

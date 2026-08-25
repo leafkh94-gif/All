@@ -195,6 +195,6 @@ def test_score_candidate_accepts_smc_pattern_types():
     now = dt.datetime(2026, 8, 5, 14, 0, tzinfo=dt.timezone.utc)
 
     result = score_candidate(
-        "US500", "US_INDEX", candidate, market, now, level_store, diagnostic=True)
+        "XAUUSD", "COMMODITY", candidate, market, now, level_store)
     assert result is not None
     assert "score" in result

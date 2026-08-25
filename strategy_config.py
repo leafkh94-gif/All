@@ -227,6 +227,12 @@ GT_TURTLE_PERIOD = 10        # was 20; a 20-bar Donchian sits so far from
 # enough to fire during real sessions is more valuable than perfect
 # mean-reversion location.
 GT_PROXIMITY_ATR_MULT = 2.0
+# Beyond this many ATR from the Turtle band the setup is at the wrong
+# end of the range -- would take a huge trend-continuation move to hit
+# TP. Hard-vetoed. Anything between GT_PROXIMITY_ATR_MULT and this cap
+# now fires with a smoothly decaying quality score instead of being
+# silently rejected.
+GT_PROXIMITY_ATR_HARD_VETO = 5.0
 GT_SL_BUFFER_ATR_MULT = 0.25
 GT_QUALITY_MAX = 40
 
@@ -252,9 +258,18 @@ GT_CHOP_MIN_RANGE_ATR = 2.0  # was 3.0; 3x ATR range over 5 hours (20 M15 bars)
                               # markets but allows normal-session movement.
 
 # Cooldown between alerts to prevent duplicate/flip-flop spam.
+# Opposite-direction cooldown is now overridden by any SMC structural
+# event (Order Block / CHOCH / Liquidity Sweep) -- a fresh sweep is the
+# "genuine new structure" that justifies reversing the previous alert.
 COOLDOWN_SAME_DIRECTION_MINUTES = 30
 COOLDOWN_SAME_DIRECTION_POINTS = 30    # override cooldown if price moved this far
-COOLDOWN_OPPOSITE_DIRECTION_MINUTES = 60
+COOLDOWN_OPPOSITE_DIRECTION_MINUTES = 30  # was 60; reduced per user directive #7
+
+# Existing WATCH supersede threshold. A new WATCH candidate replaces the
+# active one when: different direction, score >= active + this margin, or
+# a fresh SMC structural event. Prevents a stale mediocre WATCH from
+# masking a much stronger later setup.
+WATCH_SUPERSEDE_SCORE_MARGIN = 10
 
 # ─────────────────────────────────────────────────────────────────────
 # 9.1  Core principles

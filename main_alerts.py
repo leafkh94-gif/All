@@ -820,12 +820,18 @@ def _cooldown_key(instrument, direction):
     return f"cooldown/{instrument}/{direction}"
 
 
-def cooldown_blocks_alert(main_state, instrument, direction, entry_price, now_utc):
+_SMC_PATTERNS = {"ORDER_BLOCK", "CHOCH_REVERSAL", "SMC_LIQUIDITY_SWEEP"}
+
+
+def cooldown_blocks_alert(main_state, instrument, direction, entry_price, now_utc,
+                            pattern=None):
     """Return (blocked: bool, reason: str). Same-direction alerts within
     COOLDOWN_SAME_DIRECTION_MINUTES are blocked unless price moved at least
     COOLDOWN_SAME_DIRECTION_POINTS. Opposite-direction alerts within
-    COOLDOWN_OPPOSITE_DIRECTION_MINUTES are always blocked (kills the
-    BUY -> SELL flip-flop churn)."""
+    COOLDOWN_OPPOSITE_DIRECTION_MINUTES are blocked EXCEPT when the new
+    candidate is an SMC structural event (Order Block / CHOCH / Liquidity
+    Sweep) -- a fresh sweep or CHOCH IS the "genuine new structure" the
+    cooldown was meant to allow through, per user directive."""
     opposite = "SELL" if direction == "BUY" else "BUY"
     price_moved_threshold = cfg.COOLDOWN_SAME_DIRECTION_POINTS * cfg.POINT_VALUE
 
@@ -840,9 +846,11 @@ def cooldown_blocks_alert(main_state, instrument, direction, entry_price, now_ut
                 return True, (f"same-direction cooldown ({elapsed:.0f}<{cfg.COOLDOWN_SAME_DIRECTION_MINUTES}m,"
                               f" moved {price_move:g}<{price_moved_threshold:g})")
 
-    # Opposite direction: any alert within window is blocked (flip-flop).
+    # Opposite direction: block within window UNLESS an SMC structural event
+    # justifies the reversal (Order Block / CHOCH / Liquidity Sweep are
+    # material new structure, not flip-flop noise).
     other = main_state.get(_cooldown_key(instrument, opposite))
-    if other:
+    if other and pattern not in _SMC_PATTERNS:
         last_ts = datetime.fromisoformat(other["t"])
         elapsed = (now_utc - last_ts).total_seconds() / 60
         if elapsed < cfg.COOLDOWN_OPPOSITE_DIRECTION_MINUTES:
@@ -1010,19 +1018,39 @@ def run():
         # Duplicate/flip-flop cooldown -- kills repeat alerts on the same
         # reversal and BUY <-> SELL churn during chop.
         blocked, reason = cooldown_blocks_alert(
-            main_state, instrument, scored["direction"], scored["entry_price"], now)
+            main_state, instrument, scored["direction"], scored["entry_price"], now,
+            pattern=scored.get("pattern"))
         if blocked:
             diagnostics[instrument] = {"pattern": scored["pattern"], "direction": scored["direction"],
                                         "score": scored["score"], "blocked": reason}
             print(f"[scan] {instrument}: cooldown-blocked — {reason}")
             continue
 
+        # An active WATCH does NOT automatically block a new alert. The
+        # new candidate supersedes the existing one when it is materially
+        # better: different direction (fresh reversal), a much higher
+        # score, or a structural SMC event that the older WATCH doesn't
+        # represent. Per user directive #8.
+        active_watch = watch_tracker.get_active(instrument)
+        watch_supersedes = False
+        if active_watch is not None:
+            new_pattern = scored.get("pattern")
+            is_smc_new = new_pattern in _SMC_PATTERNS
+            watch_supersedes = (
+                scored["direction"] != active_watch["direction"]
+                or scored["score"] >= active_watch["score"] + cfg.WATCH_SUPERSEDE_SCORE_MARGIN
+                or is_smc_new
+            )
+
         if scored.get("aplus_eligible"):
             if hard_flat_active(now, instrument, mode=mode):
                 print(f"[scan] {instrument}: A+ suppressed (hard-flat window)")
                 continue
-            if watch_tracker.has_active(instrument) or pending_store.get(instrument):
-                print(f"[scan] {instrument}: A+ skipped (active WATCH or pending A+)")
+            # A+ is an upgrade -- always allowed to replace an existing
+            # WATCH (that is exactly what "upgrade" means). Only skip if
+            # already pending A+ or in an active/open trade.
+            if pending_store.get(instrument):
+                print(f"[scan] {instrument}: A+ skipped (already pending A+)")
                 continue
             if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
                 print(f"[scan] {instrument}: A+ skipped (active entry or open trade)")
@@ -1035,18 +1063,21 @@ def run():
             continue
 
         if scored["score"] >= mode.watch_min_score:
-            if watch_tracker.has_active(instrument):
-                print(f"[scan] {instrument}: WATCH skipped (already active)")
+            if active_watch is not None and not watch_supersedes:
+                print(f"[scan] {instrument}: WATCH skipped "
+                      f"(active {active_watch['direction']} score={active_watch['score']} "
+                      f"vs new {scored['direction']} score={scored['score']}, not materially better)")
                 continue
             if entry_tracker.has_active(instrument) or open_trade_tracker.has_active(instrument):
                 print(f"[scan] {instrument}: WATCH skipped (active entry or open trade)")
                 continue
             expires_at = now + timedelta(minutes=mode.watch_expiry_minutes)
             send_telegram(format_watch_alert(scored, expires_at, mode=mode))
-            watch_tracker.add(scored, now)
+            watch_tracker.add(scored, now)  # overwrites the old entry on the same instrument
             record_alert_for_cooldown(main_state, instrument, scored["direction"], scored["entry_price"], now)
+            supersede_tag = " (superseded prior WATCH)" if active_watch is not None else ""
             print(f"[scan] {instrument}: WATCH ALERT SENT "
-                  f"(score={scored['score']}, {scored['direction']} @ {scored['entry_price']:g})")
+                  f"(score={scored['score']}, {scored['direction']} @ {scored['entry_price']:g}){supersede_tag}")
 
     main_state["last_scan_time"] = now.strftime("%Y-%m-%d %H:%M UTC")
     main_state["last_scan_mode"] = mode.name

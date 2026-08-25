@@ -64,6 +64,12 @@ class WatchTracker:
     def has_active(self, instrument):
         return instrument in self._data
 
+    def get_active(self, instrument):
+        """Return the active watch dict or None. Used by callers that need
+        to compare a new candidate against the existing one (see the
+        supersede-if-materially-better logic in main_alerts.run)."""
+        return self._data.get(instrument)
+
     def add(self, scored, now_utc):
         instrument = scored["instrument"]
         self._data[instrument] = {
