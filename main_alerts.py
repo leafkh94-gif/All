@@ -988,9 +988,11 @@ def run():
                 "zlsma": scored["zlsma_status"], "h4": scored["htf_bias"],
                 "blocked": None if scored["tier"] != "NONE" else "score below WATCH threshold",
             }
+            breakdown_str = " ".join(f"{tag}={pts:+d}" for tag, pts in scored.get("breakdown", []))
             print(f"[scan] {instrument}: {scored['pattern']} {scored['direction']} "
                   f"score={scored['score']} tier={scored['tier']} "
-                  f"h4={scored['htf_bias']} zlsma={scored['zlsma_status']}")
+                  f"h4={scored['htf_bias']} zlsma={scored['zlsma_status']} "
+                  f"| {breakdown_str}")
             if scored["tier"] != "NONE":
                 candidates.append((instrument, scored))
         except Exception:

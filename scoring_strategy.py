@@ -175,12 +175,23 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
         score += turtle_pts
         breakdown.append(("turtle_location", turtle_pts))
 
-        # 3. ZLSMA direction (0 or +20; flat contributes 0 and blocks A+)
+        # 3. ZLSMA direction. aligned = +20, flat = 0, against = penalty
+        # ("against" used to be a hard veto in golden_trio; softened per
+        # user directive so counter-ZLSMA reversals can still qualify).
         if zlsma_status == "aligned":
             score += cfg.SCORE_ZLSMA_ALIGNED
             breakdown.append(("zlsma_aligned", cfg.SCORE_ZLSMA_ALIGNED))
-        else:  # "flat" -- "against" already vetoed by golden_trio
+        elif zlsma_status == "against":
+            score += cfg.SCORE_ZLSMA_AGAINST
+            breakdown.append(("zlsma_against", cfg.SCORE_ZLSMA_AGAINST))
+        else:  # "flat"
             breakdown.append(("zlsma_flat", 0))
+
+    # Chop regime penalty (was a hard veto in golden_trio). Applies to
+    # both GT and SMC candidates; A+ is separately blocked when this is set.
+    if candidate.get("chop_regime"):
+        score += cfg.SCORE_CHOP_PENALTY
+        breakdown.append(("chop_regime", cfg.SCORE_CHOP_PENALTY))
 
     # 4. H4 bias
     if _aligns(bias, direction):
@@ -218,11 +229,15 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
 
     score = max(0, min(100, score))
 
-    # A+ gate: score threshold + not-opposed H4. GT candidates additionally
-    # need aligned ZLSMA; SMC candidates are exempt from that (different model).
+    # A+ gate: score threshold + not-opposed H4 + not-chop + (GT only:
+    # ZLSMA aligned). The chop/ZLSMA-against candidates that now flow
+    # through the softened GT gates can still qualify as WATCH but are
+    # explicitly held below A+ -- the "A+ = statistically stronger"
+    # promise stays intact.
     aplus_eligible = (
         score >= cfg.APLUS_MIN_SCORE
         and not _opposes(bias, direction)
+        and not candidate.get("chop_regime")
         and (is_smc or zlsma_status == "aligned")
     )
     tier = "A+" if aplus_eligible else ("WATCH" if score >= cfg.WATCH_MIN_SCORE else "NONE")

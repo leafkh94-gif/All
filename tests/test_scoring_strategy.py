@@ -53,8 +53,16 @@ def test_find_candidate_returns_golden_trio_dict_when_gates_align():
     assert result["direction"] == "BUY"
 
 
-def test_find_candidate_returns_none_on_flat_market():
-    assert strat.find_candidate(make_candles(200, start_price=2000.0, step=0.0, noise=0.05)) is None
+def test_find_candidate_on_flat_market_returns_candidate_tagged_as_chop():
+    """Chop was previously a hard veto that returned None; per the user's
+    architectural directive it's now a soft penalty. The detector may still
+    emit a candidate, but it must carry chop_regime=True so scoring applies
+    SCORE_CHOP_PENALTY and A+ eligibility is blocked."""
+    result = strat.find_candidate(make_candles(200, start_price=2000.0, step=0.0, noise=0.05))
+    if result is not None:
+        # If any direction managed to satisfy the remaining gates on a flat
+        # tape, it should be tagged as chop so downstream scoring can penalize.
+        assert result.get("chop_regime") is True
 
 
 # ─── score_candidate ─────────────────────────────────────────────────
