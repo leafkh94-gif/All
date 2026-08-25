@@ -94,6 +94,13 @@ SCORE_KILLZONE_MAX = 0          # was 10; the bonus concentrated alerts
 SCORE_ROUND_NUMBER = 5
 SCORE_ATR_SWEET_SPOT_PENALTY = -10
 
+# Formerly hard vetoes in golden_trio.py, now soft score penalties so a
+# strong M15 setup can still qualify as WATCH even when the trend
+# indicator or the volatility regime is unfavorable. A+ is still blocked
+# in both cases (see score_candidate.aplus_eligible).
+SCORE_ZLSMA_AGAINST = -12       # ZLSMA slope opposes the entry direction
+SCORE_CHOP_PENALTY = -10        # recent range is compressed (chop regime)
+
 DAILY_LOSS_LIMIT_USD = 20.0
 DAILY_LOSS_BREAKER_DURATION_DAYS = 14
 

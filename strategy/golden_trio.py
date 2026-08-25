@@ -196,10 +196,12 @@ def find_golden_trio_candidate_diag(candles):
     curr_upper = float(upper.iloc[-1])
     curr_lower = float(lower.iloc[-1])
 
-    # Global chop veto -- kills every direction, not per-side.
-    if _is_chop(df, curr_atr):
-        recent_range = float(df["h"].iloc[-cfg.GT_CHOP_LOOKBACK:].max() - df["l"].iloc[-cfg.GT_CHOP_LOOKBACK:].min())
-        return None, f"chop veto (range {recent_range:.1f} < {cfg.GT_CHOP_MIN_RANGE_ATR}xATR={cfg.GT_CHOP_MIN_RANGE_ATR * curr_atr:.1f})"
+    # Chop regime -- was a hard veto; now downgraded to a candidate tag
+    # that scoring converts into a penalty. Reason: a real liquidity /
+    # CHOCH / structure setup can still be worth an M15 alert even when
+    # the last 20 bars have been rangebound. A+ is still blocked in
+    # chop via score_candidate.aplus_eligible.
+    chop_regime = _is_chop(df, curr_atr)
 
     curr_high = float(df["h"].iloc[-1])
     curr_low = float(df["l"].iloc[-1])
@@ -230,11 +232,13 @@ def find_golden_trio_candidate_diag(candles):
             per_side_reasons.append(f"{side}:turtle")
             continue
 
-        # ZLSMA direction.
+        # ZLSMA direction. Was a hard veto for "against"; now downgraded
+        # to a candidate tag that scoring turns into a penalty. Reason
+        # (user-directed): XAUUSD often reverses BEFORE a lagging trend
+        # indicator flips, so rejecting all counter-ZLSMA setups killed
+        # legitimate M15 opportunities. A+ still blocked on "against"
+        # via score_candidate.aplus_eligible.
         zlsma_status = _zlsma_status(zlsma, curr_atr, side)
-        if zlsma_status == "against":
-            per_side_reasons.append(f"{side}:zlsma-against")
-            continue
 
         # Build entry / SL / TPs.
         entry = curr_close
@@ -297,6 +301,7 @@ def find_golden_trio_candidate_diag(candles):
             "rsi_quality": int(rsi_quality_pts),
             "turtle_quality": int(turtle_quality_pts),
             "zlsma_status": zlsma_status,
+            "chop_regime": bool(chop_regime),
             "rsi": float(rsi_series.iloc[-1]),
             "zlsma": float(zlsma.iloc[-1]),
             "turtle_upper": float(curr_upper),
