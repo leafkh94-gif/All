@@ -1,50 +1,50 @@
-"""Golden Trio strategy — RSI hook-up at a Turtle band, ZLSMA direction
-filter, chop-market rejection. The candidate this returns is scored
-downstream in scoring_strategy.score_candidate.
+"""Golden Trio — RSI momentum evidence + Turtle location evidence,
+with ZLSMA slope as a separate trend-alignment axis. The candidate this
+returns is scored downstream in scoring_strategy.score_candidate.
 
-Hard gates (return None if any fails):
-  1. Not chop (recent range >= GT_CHOP_MIN_RANGE_ATR * ATR over last
-     GT_CHOP_LOOKBACK bars).
-  2. RSI hook-up (per side):
-     BUY -> the trigger bar's RSI is climbing (curr > prev), has climbed
-     at least GT_RSI_MIN_HOOK points above the local minimum in the last
-     GT_RSI_DIP_LOOKBACK bars, and RSI is not below GT_RSI_BUY_FLOOR (to
-     avoid catching a falling knife).
-     SELL mirrors on the peak side (drop from local max, floor at
-     100 - GT_RSI_BUY_FLOOR).
-     Note: the original spec used an absolute-cross gate (RSI dipping
-     below one level and crossing back above another). It was replaced
-     with hook-up detection because the cross literally never fires on
-     a trend-continuation session where RSI stays elevated all day.
-  3. Turtle band tested: the trigger bar's extreme (low for BUY, high for
-     SELL) sits within GT_PROXIMITY_ATR_MULT * ATR of the band. Uses a
-     GT_TURTLE_PERIOD-bar Donchian; the shorter period keeps the band
-     close enough to price that real pullbacks reach it.
-  4. Trigger-bar body veto: block only decisively counter-direction
-     candles (counter body > GT_COUNTER_BODY_MAX_RATIO of range).
-     Dojis/small counter-bodies still pass -- the rsi+turtle+zlsma stack
-     already confirms direction.
-  5. ZLSMA slope not against the direction:
-       against -> None (never fires)
-       flat    -> allowed, scored as flat downstream (blocks A+)
-       aligned -> full points downstream
+ARCHITECTURE NOTE (this is the important part)
+──────────────────────────────────────────────
+RSI and Turtle are **evidence**, not permission. Neither answers "may
+this setup exist?"; both answer "how good is it?". Concretely:
 
-Component quality scores handed to the scorer:
-  - rsi_quality: 0..SCORE_RSI_CONFIRM_MAX from _rsi_reversal_sequence
-    (scales with the size of the hook from the local low)
-  - turtle_quality: 0..SCORE_TURTLE_MAX from how tightly the trigger
-    bar's extreme hugged the band
-  - zlsma_status: "aligned" | "flat"
+  - RSI must show *some* turn in the entry direction (curr > prev for a
+    BUY) -- without that there is no reversal to speak of -- but the size
+    of the hook only scales `rsi_quality`. There is no minimum hook, no
+    absolute level to cross, and no oversold veto; being deeply oversold
+    on a BUY down-weights the evidence to 0.4x instead of killing it.
+  - Turtle proximity scales `turtle_quality` smoothly from touching the
+    band down to ~0 at GT_PROXIMITY_ATR_HARD_VETO ATR away. The single
+    remaining hard rejection is beyond that cap, where the setup is at
+    the wrong end of the range entirely.
+  - ZLSMA slope never rejects. It is classified aligned / flat / against
+    and scored as a signed contribution downstream.
+  - Chop never rejects. It is tagged on the candidate and scored as a
+    penalty downstream.
 
-Fixed target mode (cfg.TARGET_MODE == "FIXED") produces stop/TP1/TP2/TP3
-at fixed point offsets (FIXED_SL_POINTS / FIXED_TP{1,2,3}_POINTS scaled
-by POINT_VALUE). Structural mode uses Turtle-band-derived targets and
-still fills TP3 as the opposite band.
+The only conditions that still return None are structural: not enough
+bars, NaN indicators, a decisively counter-direction trigger bar, no RSI
+turn at all, and the Turtle hard cap.
+
+Outputs consumed by the scorer:
+  - setup_quality: 0..1, the weighted blend of RSI and Turtle evidence
+    (GT_QUALITY_WEIGHT_RSI / GT_QUALITY_WEIGHT_TURTLE). This is the
+    single number the scorer multiplies by SCORE_SETUP_MAX, and it is
+    the axis SMC also reports on, so the two detectors are comparable by
+    construction.
+  - rsi_quality / turtle_quality: legacy per-component points, retained
+    for the alert breakdown display only.
+  - zlsma_status: "aligned" | "flat" | "against"
+  - chop_regime: bool
+
+Targets come from strategy.targets.build_targets, shared with SMC, in
+either FIXED (dollar ladder) or ATR (volatility-scaled ladder) mode.
+STRUCTURAL mode still derives targets from the Turtle bands here.
 """
 import pandas as pd
 
 import scoring_indicators as ind
 import strategy_config as cfg
+from strategy import targets
 
 PATTERN_NAME = "GOLDEN_TRIO"
 
@@ -173,16 +173,46 @@ def _is_chop(df, atr_value):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Shared market context
+# ─────────────────────────────────────────────────────────────────────
+def market_context(candles, direction):
+    """ZLSMA alignment + chop regime for an arbitrary direction.
+
+    Golden Trio computes these inline for its own candidate. SMC
+    candidates need the *same* two axes measured the *same* way, or the
+    two detectors' scores aren't comparable no matter how the quality
+    budgets are normalised. Returns
+    {"zlsma_status": ..., "chop_regime": ..., "atr": ...} or None when
+    there aren't enough bars.
+    """
+    warmup = max(cfg.GT_ZLSMA_PERIOD * 2 + cfg.GT_ZLSMA_SLOPE_LOOKBACK,
+                 cfg.GT_CHOP_LOOKBACK)
+    if not candles or len(candles) < warmup:
+        return None
+    df = pd.DataFrame(candles)
+    zlsma = ind.zero_lag_sma(df["c"], cfg.GT_ZLSMA_PERIOD)
+    atr_value = float(ind.atr(df).iloc[-1])
+    if pd.isna(zlsma.iloc[-1]) or pd.isna(zlsma.iloc[-cfg.GT_ZLSMA_SLOPE_LOOKBACK]):
+        return None
+    return {
+        "zlsma_status": _zlsma_status(zlsma, atr_value, direction),
+        "chop_regime": bool(_is_chop(df, atr_value)),
+        "atr": atr_value,
+        "zlsma": float(zlsma.iloc[-1]),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────
-def find_golden_trio_candidate(candles):
+def find_golden_trio_candidate(candles, target_mode=None):
     """Backwards-compatible wrapper: returns just the candidate dict (or None).
     Prefer find_golden_trio_candidate_diag() for per-gate diagnostics."""
-    candidate, _reason = find_golden_trio_candidate_diag(candles)
+    candidate, _reason = find_golden_trio_candidate_diag(candles, target_mode=target_mode)
     return candidate
 
 
-def find_golden_trio_candidate_diag(candles):
+def find_golden_trio_candidate_diag(candles, target_mode=None):
     """Return (candidate_or_None, block_reason). block_reason is a short
     string naming the gate that killed every direction, or None on success."""
     warmup = max(
@@ -248,29 +278,23 @@ def find_golden_trio_candidate_diag(candles):
             per_side_reasons.append(f"{side}:turtle")
             continue
 
-        # ZLSMA direction. Was a hard veto for "against"; now downgraded
-        # to a candidate tag that scoring turns into a penalty. Reason
-        # (user-directed): XAUUSD often reverses BEFORE a lagging trend
-        # indicator flips, so rejecting all counter-ZLSMA setups killed
-        # legitimate M15 opportunities. A+ still blocked on "against"
-        # via score_candidate.aplus_eligible.
+        # ZLSMA direction -- a scored axis, never a veto. XAUUSD often
+        # reverses BEFORE a lagging trend indicator flips, so rejecting
+        # every counter-ZLSMA setup killed legitimate M15 opportunities.
+        # "against" costs SCORE_ZLSMA_AGAINST points downstream, which is
+        # enough to keep a weak setup below A+ without hiding a strong one.
         zlsma_status = _zlsma_status(zlsma, curr_atr, side)
 
         # Build entry / SL / TPs.
         entry = curr_close
-        if cfg.TARGET_MODE == "FIXED":
-            pt = cfg.POINT_VALUE
-            if side == "BUY":
-                stop = entry - cfg.FIXED_SL_POINTS * pt
-                tp1 = entry + cfg.FIXED_TP1_POINTS * pt
-                tp2 = entry + cfg.FIXED_TP2_POINTS * pt
-                tp3 = entry + cfg.FIXED_TP3_POINTS * pt
-            else:
-                stop = entry + cfg.FIXED_SL_POINTS * pt
-                tp1 = entry - cfg.FIXED_TP1_POINTS * pt
-                tp2 = entry - cfg.FIXED_TP2_POINTS * pt
-                tp3 = entry - cfg.FIXED_TP3_POINTS * pt
-            risk = abs(entry - stop)
+        if cfg.TARGET_MODE in ("FIXED", "ATR"):
+            t = targets.build_targets(entry, side, atr_value=curr_atr,
+                                      mode=target_mode or cfg.TARGET_MODE)
+            if not t:
+                per_side_reasons.append(f"{side}:no-targets")
+                continue
+            stop, tp1, tp2, tp3 = t["stop_loss"], t["tp1"], t["tp2"], t["tp3"]
+            risk = t["risk"]
         else:
             # Structural: SL just past the tested band + buffer; TPs scale
             # by distance to opposite band.
@@ -305,9 +329,18 @@ def find_golden_trio_candidate_diag(candles):
         rsi_quality_pts = round(rsi_quality_frac * cfg.SCORE_RSI_CONFIRM_MAX)
         turtle_quality_pts = round(turtle_quality_frac * cfg.SCORE_TURTLE_MAX)
 
+        # Unified 0..1 setup quality. This -- not the legacy point
+        # ceilings -- is what the scorer multiplies by SCORE_SETUP_MAX,
+        # so Golden Trio and SMC sit on one axis. RSI and Turtle are now
+        # weighted *evidence* inside that fraction; neither is a gate on
+        # whether the setup exists.
+        setup_quality = (cfg.GT_QUALITY_WEIGHT_RSI * rsi_quality_frac
+                         + cfg.GT_QUALITY_WEIGHT_TURTLE * turtle_quality_frac)
+
         return {
             "pattern": PATTERN_NAME,
             "direction": side,
+            "setup_quality": float(max(0.0, min(1.0, setup_quality))),
             "entry_price": float(entry),
             "stop_loss": float(stop),
             "tp1": float(tp1),

@@ -450,6 +450,28 @@ def _pattern_name(raw):
     return _PATTERN_DISPLAY.get(raw, raw)
 
 
+def _mtf_summary(scored):
+    """One line showing what each timeframe contributed to the score.
+
+    Worth surfacing in the alert: the whole point of the MTF layer is
+    that the reader can see *why* a setup scored what it did, and which
+    timeframes were actually available when it was scored.
+    """
+    detail = scored.get("mtf") or {}
+    if not detail:
+        return ""
+    bits = []
+    for tf in ("h4", "h1", "m5", "m1"):
+        d = detail.get(tf)
+        if not d:
+            continue
+        bits.append(f"{tf.upper()} {d['points']:+d}" if d.get("available")
+                    else f"{tf.upper()} n/a")
+    if not bits:
+        return ""
+    return "   MTF: " + " · ".join(bits) + f"  (total {scored.get('mtf_points', 0):+d})\n"
+
+
 def _breakdown_summary(scored):
     parts = [f"{tag} {pts:+d}" for tag, pts in scored.get("breakdown", []) if pts]
     return " · ".join(parts)
@@ -463,6 +485,7 @@ def format_watch_alert(scored, expires_at, mode=None):
         f"Direction: {scored['direction']}\n"
         f"Entry zone: {scored['entry_price']:g}\n"
         f"Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}\n"
+        f"{_mtf_summary(scored)}"
         f"Expires: {expires_at.strftime('%H:%M')} UTC ({_format_duration(m.watch_expiry_minutes)})"
     )
 
@@ -490,11 +513,12 @@ def format_aplus_alert(scored, now_utc, mode=None):
         f"Risk (R):   {risk:g}\n"
         f"TP1:        {scored['tp1']:g}   ← close 50%, SL to breakeven\n"
         f"TP2:        {scored['tp2']:g}   ← close 30%, SL to TP1\n"
-        f"TP3:        {scored['tp3']:g}   (opposite Turtle band)  ← runner 20%\n\n"
+        f"TP3:        {scored['tp3']:g}   ← runner 20%\n\n"
         f"Expires:    {expiry.strftime('%H:%M')} UTC  ({_format_duration(cfg.PENDING_ORDER_MAX_MINUTES)})\n\n"
         f"📋 Reason: {_pattern_name(scored['pattern'])}\n"
         f"{diag_line}"
-        f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}  |  {_breakdown_summary(scored)}\n\n"
+        f"   Score: {scored['score']}/100  |  Bias: {scored['htf_bias']}  |  {_breakdown_summary(scored)}\n"
+        f"{_mtf_summary(scored)}\n"
         f"📐 Position size: your_risk_$ / {risk:g} = lots/units\n\n"
         f"After TP1 → SL to breakeven. After TP2 → SL to TP1, runner (20%) targets TP3.\n"
         f"18:00 UTC → get ready to close manually. 18:30 UTC hard flat → close all remaining."
@@ -560,17 +584,45 @@ def maybe_record_weekly_levels(feed, level_store, now_utc):
 # ─────────────────────────────────────────────────────────────────────
 # Market data bundle
 # ─────────────────────────────────────────────────────────────────────
+def _safe_candles(feed, instrument, interval, n):
+    """Fetch one timeframe, returning [] rather than raising.
+
+    The MTF layer treats a missing timeframe as neutral (0 points), so a
+    single flaky resolution degrades the score's precision instead of
+    killing the whole scan. What it must never do is fail silently and
+    unnoticed -- hence the warn.
+    """
+    try:
+        return feed.get_candles(instrument, interval, n=n) or []
+    except Exception as e:                              # noqa: BLE001
+        print(f"[mtf] {instrument} {interval} fetch failed ({e}); "
+              f"scoring that timeframe as neutral")
+        return []
+
+
 def build_market(feed, instrument, mode=None):
+    """Assemble the full MTF bundle: M1 / M5 / M15 / H1 / H4.
+
+    M15 is the setup timeframe. M5 confirms, H1 gives context, H4 gives
+    regime, M1 times the entry -- see strategy/mtf.py. Any timeframe that
+    comes back empty is scored as neutral, so the bot still runs (with a
+    less precise score) on a partial feed.
+
+    Golden Trio needs ~110 M15 bars for ZLSMA to stabilise; the counts
+    come from cfg.MTF_FETCH_BARS.
+    """
     m = mode or modes.STANDARD
-    # Golden Trio needs at least 110 bars (ZLSMA(50) is SMA-of-SMA -> ~100
-    # bars to stabilise, plus the RSI oversold-lookback tail). 160 gives
-    # comfortable slack over the scan_diagnostics MIN_BARS_NEEDED threshold.
-    return {
-        "entry": feed.get_candles(instrument, m.entry_timeframe, n=160),
-        "m15": feed.get_candles(instrument, "15min", n=160),
-        "h1": feed.get_candles(instrument, "1h", n=160),
-        "h4": feed.get_candles(instrument, "4h", n=260),
+    bars = cfg.MTF_FETCH_BARS
+    market = {
+        "entry": _safe_candles(feed, instrument, m.entry_timeframe,
+                               bars.get(m.entry_timeframe, 160)),
+        "m1": _safe_candles(feed, instrument, "1min", bars["1min"]),
+        "m5": _safe_candles(feed, instrument, "5min", bars["5min"]),
+        "m15": _safe_candles(feed, instrument, "15min", bars["15min"]),
+        "h1": _safe_candles(feed, instrument, "1h", bars["1h"]),
+        "h4": _safe_candles(feed, instrument, "4h", bars["4h"]),
     }
+    return market
 
 
 # ─────────────────────────────────────────────────────────────────────

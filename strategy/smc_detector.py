@@ -136,6 +136,10 @@ def detect_order_block(candles, swing_length=None):
             "sweep_price": float(ob_bottom if is_bullish else ob_top),
             "leg_extreme": float(ob_bottom if is_bullish else ob_top),
             "quality": quality,
+            # Same 0..1 axis Golden Trio reports on; see
+            # scoring_strategy._setup_quality.
+            "setup_quality": float(quality) / cfg.PATTERN_QUALITY_BASE_MAX,
+            "quality_max": cfg.PATTERN_QUALITY_BASE_MAX,
             "ob_top": float(ob_top),
             "ob_bottom": float(ob_bottom),
             "ob_strength": float(strength),
@@ -200,6 +204,10 @@ def detect_choch_reversal(candles, swing_length=None):
             "sweep_price": float(level),
             "leg_extreme": float(level),
             "quality": quality,
+            # Same 0..1 axis Golden Trio reports on; see
+            # scoring_strategy._setup_quality.
+            "setup_quality": float(quality) / cfg.PATTERN_QUALITY_BASE_MAX,
+            "quality_max": cfg.PATTERN_QUALITY_BASE_MAX,
             "choch_level": float(level),
             "broken_index": int(broken_idx),
         }
@@ -262,6 +270,10 @@ def detect_smc_liquidity_sweep(candles, swing_length=None):
             "sweep_price": float(level),
             "leg_extreme": float(level),
             "quality": quality,
+            # Same 0..1 axis Golden Trio reports on; see
+            # scoring_strategy._setup_quality.
+            "setup_quality": float(quality) / cfg.PATTERN_QUALITY_BASE_MAX,
+            "quality_max": cfg.PATTERN_QUALITY_BASE_MAX,
         }
 
     return None

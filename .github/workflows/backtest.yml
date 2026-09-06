@@ -1,8 +1,18 @@
 name: backtest
 
 # Manually-triggered historical backtest. Pulls up to N weeks of M15 gold
-# from Capital.com, runs backtest.py end-to-end, and uploads the per-signal
-# JSON plus stdout summary as an artifact you can download and inspect.
+# from Capital.com, runs backtest.py end-to-end, then runs the score
+# calibration over the result, and uploads the per-signal JSON plus stdout
+# summary as an artifact you can download and inspect.
+#
+# To compare stop ladders, dispatch this twice -- once with target_mode
+# FIXED, once with ATR -- and diff the expectancy in the two summaries.
+# Artifacts are named per mode so the two runs don't collide.
+#
+# The summary reports the signal opportunity rate and the tradeable alert
+# rate separately; they answer different questions and should not be
+# quoted interchangeably. Note the fetch is M15-only, so the M5/M1 layers
+# score neutral in these runs.
 #
 # The bot's live runner does NOT use this workflow -- see bot.yml. This is
 # a read-only research job: no state files touched, no Telegram alerts.
@@ -13,6 +23,12 @@ on:
         description: "Weeks of M15 gold history to attempt"
         required: false
         default: "26"
+      target_mode:
+        description: "Stop/TP ladder: FIXED ($25) or ATR (volatility-scaled)"
+        required: false
+        default: "FIXED"
+        type: choice
+        options: ["FIXED", "ATR"]
 
 permissions:
   contents: read
@@ -20,10 +36,14 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 120     # backtester now runs the full live pipeline
-                             # (find_candidate + score + cooldown + SMC) per
-                             # bar under 3 cost regimes -- 13k bars can take
-                             # 20-40min. 120min gives room for slow days.
+    timeout-minutes: 120     # The backtester runs the full live pipeline
+                             # (find_candidate + score + SMC + MTF) on EVERY
+                             # bar, not just unblocked ones -- that is what
+                             # makes the signal-opportunity rate measurable,
+                             # and it costs detection work the old
+                             # skip-while-in-trade path avoided. Measured
+                             # ~65ms/bar with SMC installed, so ~13k bars is
+                             # ~15min. 120min leaves ample headroom.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,8 +54,10 @@ jobs:
           mkdir -p bt_out
           python tools/fetch_and_backtest.py \
             --weeks ${{ github.event.inputs.weeks }} \
+            --target-mode ${{ github.event.inputs.target_mode }} \
             --out bt_out/gold_m15_capital.csv \
             --json bt_out/backtest_result.json \
+            --calibrate \
             | tee bt_out/summary.txt
         env:
           CAPITAL_API_KEY:  ${{ secrets.CAPITAL_API_KEY }}
@@ -43,6 +65,6 @@ jobs:
           CAPITAL_PASSWORD: ${{ secrets.CAPITAL_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
-          name: backtest-${{ github.run_id }}
+          name: backtest-${{ github.event.inputs.target_mode }}-${{ github.run_id }}
           path: bt_out/
           retention-days: 30
