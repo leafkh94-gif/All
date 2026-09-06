@@ -1,34 +1,69 @@
-"""Replay the LIVE Golden Trio + SMC pipeline over historical M15 candles.
+"""Replay the LIVE Golden Trio + SMC + MTF pipeline over historical candles.
 
 This backtester intentionally uses the exact same code paths as the live
-bot (scoring_strategy.find_candidate + score_candidate, main_alerts
-cooldown_blocks_alert + record_alert_for_cooldown, PendingAPlusStore-
-style A+ confirmation, tracker gating) so live and backtest can't drift.
+bot (scoring_strategy.find_candidate + score_candidate, strategy.mtf,
+main_alerts cooldown_blocks_alert + record_alert_for_cooldown,
+PendingAPlusStore-style A+ confirmation) so live and backtest can't drift.
 
 Read-only: does not modify state files, does not send Telegram, does not
 touch the running bot. Purely a research replay.
 
 Usage:
-    python backtest.py --candles path/to/XAUUSD_M15.csv
-    python backtest.py --candles path/to/XAUUSD_M15.csv --json out.json
+    python backtest.py --candles XAUUSD_M15.csv
+    python backtest.py --candles XAUUSD_M15.csv --m5 XAUUSD_M5.csv --m1 XAUUSD_M1.csv
+    python backtest.py --candles XAUUSD_M15.csv --target-mode ATR
+    python backtest.py --candles XAUUSD_M15.csv --json out.json
 
 CSV must have columns t, o, h, l, c (v optional). Timestamps ISO 8601 UTC.
 Bars must be chronological.
+
+TWO METRICS, NOT ONE
+────────────────────
+This is an alert bot, not a one-position execution engine, so a single
+"number of trades" figure is misleading. Every bar that produces a
+tier-qualifying signal is recorded as an **opportunity** and simulated,
+including the ones a live position or a cooldown would have suppressed.
+The report then gives:
+
+  - Signal opportunity rate: every qualifying setup the strategy found.
+    This is the honest measure of the *strategy's* edge and the sample
+    the score calibration should be built from.
+  - Tradeable alert rate: what survives the cooldown and one-position-
+    at-a-time gates. This is what a user would actually have received.
+
+Conflating them lets a position gate silently shrink the sample and
+makes the strategy look rarer (or better) than it is.
+
+TARGET MODES
+────────────
+--target-mode {FIXED,ATR} runs the same candles through the fixed dollar
+ladder or the ATR-scaled one, so the "is $25 the right stop in every
+volatility regime?" question is answered by comparison rather than by
+assumption. Run both and diff the expectancy.
+
+MTF INPUTS
+──────────
+H1 and H4 are aggregated from M15 with the trailing partial bar dropped,
+so no unclosed higher-timeframe candle is ever visible. M5 and M1 cannot
+be synthesised from M15; pass real M5/M1 CSVs with --m5/--m1 to exercise
+those layers. Without them, strategy.mtf scores those timeframes as
+neutral (exactly 0), which is why the MTF contributions are zero-centred
+-- an M15-only run and a full-MTF run stay on the same score scale
+instead of differing by a constant offset. Each signal row records
+mtf_available so a report can never silently conflate the two.
 
 Every fired signal is simulated under three cost regimes (ideal,
 realistic $0.75 spread, conservative $1.50 spread) so results aren't
 optimistic.
 
-Every fired signal's log row includes the M15 / H1 / H4 last-bar
-timestamps and bar counts so a follow-up look-ahead-bias audit can
-verify no future data leaked in.
+Every signal's log row includes the M15 / H1 / H4 (and M5 / M1 when
+supplied) last-bar timestamps and bar counts so a follow-up look-ahead-
+bias audit can verify no future data leaked in.
 """
 import argparse
 import json
 import os
-import sys
-from collections import Counter, defaultdict
-from datetime import datetime
+from collections import Counter
 
 import pandas as pd
 
@@ -172,33 +207,84 @@ COST_REGIMES = [
 ]
 
 
-class BacktestRun:
-    """One walk over the candle series. Fires signals under the exact live
-    pipeline; simulates trade outcomes under three cost regimes; logs each
-    signal with the MTF state it was evaluated against."""
+def index_by_time(candles):
+    """Map ISO timestamp -> position, for slicing a finer timeframe to the
+    same instant as an M15 bar without ever seeing past it."""
+    return {str(c["t"]): i for i, c in enumerate(candles)}
 
-    def __init__(self, candles, mode=None):
+
+class BacktestRun:
+    """One walk over the candle series.
+
+    Records EVERY tier-qualifying signal as an opportunity, tags whether
+    it would have been suppressed live (open simulated position, or
+    cooldown), and simulates the outcome regardless. That separation is
+    the whole point: an alert bot's edge and an alert bot's delivered
+    alert count are different numbers, and gating the sample by the
+    former hides how often the strategy was actually right.
+    """
+
+    def __init__(self, candles, mode=None, m5=None, m1=None, target_mode=None):
         self.candles = candles
         self.mode = mode or modes.STANDARD
+        self.target_mode = target_mode or cfg.TARGET_MODE
+
+        # Optional finer timeframes for the real M5 / M1 layers.
+        self.m5 = m5 or []
+        self.m1 = m1 or []
+        self._m5_idx = index_by_time(self.m5)
+        self._m1_idx = index_by_time(self.m1)
+        self._m5_cursor = 0
+        self._m1_cursor = 0
 
         # State that live persists to disk; here in-memory per-run.
         self.main_state = {}
         self.pending_a_plus = None          # (scored_dict, added_at_index)
-        self.blocked_until_bar = -1         # no new signal while i < this
+        self.blocked_until_bar = -1         # simulated position still open
         self.signals = []
 
     # ── helpers ──────────────────────────────────────────────────────
     def _now(self, i):
         return pd.to_datetime(self.candles[i]["t"], utc=True).to_pydatetime()
 
+    def _finer_upto(self, series, idx_map, cursor_attr, m15_ts, span_bars):
+        """Slice a finer-timeframe series so it ends at the close of the
+        M15 bar at m15_ts and never later.
+
+        Exact-timestamp lookup first (the fast, unambiguous path); falls
+        back to a monotonic cursor scan when the finer feed has gaps or a
+        different alignment. Both are strictly backward-looking."""
+        if not series:
+            return []
+        m15_close = pd.to_datetime(m15_ts, utc=True) + pd.Timedelta(minutes=15)
+        cursor = getattr(self, cursor_attr)
+        # Advance while the NEXT bar still closes at or before the M15 close.
+        n = len(series)
+        while cursor + 1 < n:
+            nxt = pd.to_datetime(series[cursor + 1]["t"], utc=True)
+            if nxt >= m15_close:
+                break
+            cursor += 1
+        setattr(self, cursor_attr, cursor)
+        lo = max(0, cursor + 1 - span_bars)
+        return series[lo:cursor + 1]
+
     def _build_market(self, i):
         window = self.candles[: i + 1]
+        ts = self.candles[i]["t"]
         return {
             "entry": window,
             "m15": window,
+            "m5": self._finer_upto(self.m5, self._m5_idx, "_m5_cursor", ts,
+                                   cfg.MTF_FETCH_BARS["5min"]),
+            "m1": self._finer_upto(self.m1, self._m1_idx, "_m1_cursor", ts,
+                                   cfg.MTF_FETCH_BARS["1min"]),
             "h1": aggregate_htf(window, 4),
             "h4": aggregate_htf(window, 16),
         }
+
+    def _find(self, market):
+        return strat.find_candidate(market["entry"], target_mode=self.target_mode)
 
     def _tick_pending(self, i):
         """Live analog: evaluate_pending_confirmations. Exactly one bar
@@ -208,34 +294,28 @@ class BacktestRun:
         scored, added_at = self.pending_a_plus
         if i <= added_at:
             return  # not yet — pending was just set this same bar
-        # We only ever confirm on the immediately-following bar.
         if i == added_at + 1:
             last_closed = self.candles[i]
             direction = scored["direction"]
             if strat.confirmation_closed_in_direction(last_closed, direction):
-                # Rescore on the new window; if still A+, fire.
                 market = self._build_market(i)
-                candidate = strat.find_candidate(market["entry"])
+                candidate = self._find(market)
                 if candidate and candidate["direction"] == direction:
                     now = self._now(i)
                     rescored = strat.score_candidate(
                         "XAUUSD", "COMMODITY", candidate, market, now, None)
                     if rescored and rescored["score"] >= self.mode.aplus_min_score:
-                        self._fire("A+", rescored, i)
-        # Whether or not it fired, the pending window has passed.
+                        self._record("A+", rescored, i, market, suppressed=None)
         self.pending_a_plus = None
 
     # ── scan ─────────────────────────────────────────────────────────
     def scan(self, i):
         self._tick_pending(i)
 
-        if i < self.blocked_until_bar:
-            return  # a prior alert's trade is still live in the simulation
-
         market = self._build_market(i)
         now = self._now(i)
 
-        candidate = strat.find_candidate(market["entry"])
+        candidate = self._find(market)
         if candidate is None:
             return
 
@@ -244,27 +324,48 @@ class BacktestRun:
         if not scored or scored["tier"] == "NONE":
             return
 
-        blocked, _ = ma.cooldown_blocks_alert(
-            self.main_state, "XAUUSD", scored["direction"], scored["entry_price"], now)
-        if blocked:
+        # From here on the setup IS an opportunity: it cleared the score
+        # threshold. Whether it becomes a delivered alert is a separate
+        # question, answered by the two gates below and recorded, not
+        # used to drop the row.
+        suppressed = None
+        if i < self.blocked_until_bar:
+            suppressed = "open_position"
+        else:
+            blocked, reason = ma.cooldown_blocks_alert(
+                self.main_state, "XAUUSD", scored["direction"],
+                scored["entry_price"], now)
+            if blocked:
+                suppressed = f"cooldown: {reason}"
+
+        if suppressed:
+            self._record(scored["tier"], scored, i, market, suppressed=suppressed)
             return
 
         if scored.get("aplus_eligible"):
             # A+ waits one bar for confirmation, mirrors PendingAPlusStore.
             if self.pending_a_plus is not None:
+                self._record("A+", scored, i, market,
+                             suppressed="pending_confirmation_busy")
                 return
             self.pending_a_plus = (scored, i)
             ma.record_alert_for_cooldown(
                 self.main_state, "XAUUSD", scored["direction"], scored["entry_price"], now)
             return
 
-        if scored["score"] >= self.mode.watch_min_score:
-            self._fire("WATCH", scored, i)
-            ma.record_alert_for_cooldown(
-                self.main_state, "XAUUSD", scored["direction"], scored["entry_price"], now)
+        self._record("WATCH", scored, i, market, suppressed=None)
+        ma.record_alert_for_cooldown(
+            self.main_state, "XAUUSD", scored["direction"], scored["entry_price"], now)
 
-    # ── fire + simulate ──────────────────────────────────────────────
-    def _fire(self, tier, scored, i):
+    # ── record + simulate ────────────────────────────────────────────
+    def _record(self, tier, scored, i, market=None, suppressed=None):
+        """Log one opportunity and simulate it under every cost regime.
+
+        `suppressed` is None for a delivered alert, or a short reason
+        string for an opportunity a live run would not have sent. Both
+        are simulated identically -- suppression changes what the user
+        would have received, not what the market did.
+        """
         forward = self.candles[i + 1: i + 1 + _ENTRY_EXPIRY_BARS + _HOLD_EXPIRY_BARS]
         outcomes = {}
         for name, spread in COST_REGIMES:
@@ -272,52 +373,52 @@ class BacktestRun:
             outcomes[name] = {"outcome": outcome, "r": round(r, 3),
                               "exit_bar_offset": exit_offset}
 
-        # Block further alerts until the simulated trade (under realistic
-        # cost) is done -- roughly mirrors live blocking-while-in-trade.
-        realistic_exit = outcomes["realistic"]["exit_bar_offset"] or _ENTRY_EXPIRY_BARS
-        self.blocked_until_bar = i + 1 + realistic_exit
+        if suppressed is None:
+            # Only a DELIVERED alert occupies the simulated position.
+            realistic_exit = outcomes["realistic"]["exit_bar_offset"] or _ENTRY_EXPIRY_BARS
+            self.blocked_until_bar = i + 1 + realistic_exit
 
-        # MTF audit fields — exact bar timestamps + counts each timeframe saw
-        market = self._build_market(i)
-        m15 = market["m15"]
-        h1 = market["h1"]
-        h4 = market["h4"]
-
-        # Breakdown as a name→pts map for easy score-band analysis
+        market = market or self._build_market(i)
         breakdown_map = {tag: pts for tag, pts in scored.get("breakdown", [])}
 
-        self.signals.append({
+        row = {
             "bar_index": i,
             "t": self.candles[i]["t"],
             "tier": tier,
+            "tradeable": suppressed is None,
+            "suppressed_reason": suppressed,
             "pattern": scored["pattern"],
             "direction": scored["direction"],
             "score": scored["score"],
+            "setup_quality": scored.get("setup_quality"),
             "breakdown": breakdown_map,
             "h4_bias": scored.get("htf_bias"),
             "zlsma_status": scored.get("zlsma_status"),
-            # Look-ahead audit trail
-            "m15_last_t": m15[-1]["t"] if m15 else None,
-            "m15_bars": len(m15),
-            "h1_last_t": h1[-1]["t"] if h1 else None,
-            "h1_bars": len(h1),
-            "h4_last_t": h4[-1]["t"] if h4 else None,
-            "h4_bars": len(h4),
+            "chop_regime": scored.get("chop_regime"),
+            "target_mode": scored.get("target_mode"),
+            "mtf_points": scored.get("mtf_points"),
+            "mtf_available": scored.get("mtf_available"),
             # Execution
             "entry_price": scored["entry_price"],
             "stop_loss": scored["stop_loss"],
             "tp1": scored["tp1"], "tp2": scored["tp2"], "tp3": scored["tp3"],
             "risk": scored["risk"],
             "outcomes": outcomes,
-        })
+        }
+        # Look-ahead audit trail: last bar each timeframe was allowed to see.
+        for key in ("m15", "h1", "h4", "m5", "m1"):
+            series = market.get(key) or []
+            row[f"{key}_last_t"] = series[-1]["t"] if series else None
+            row[f"{key}_bars"] = len(series)
+        self.signals.append(row)
 
 
-def run_backtest(candles, mode=None):
+def run_backtest(candles, mode=None, m5=None, m1=None, target_mode=None):
     """Walk every bar, emit signals through the live pipeline."""
-    run = BacktestRun(candles, mode=mode)
+    run = BacktestRun(candles, mode=mode, m5=m5, m1=m1, target_mode=target_mode)
     warmup = max(
         cfg.GT_ZLSMA_PERIOD * 2 + cfg.GT_ZLSMA_SLOPE_LOOKBACK + 5,
-        16 * 30,   # need ≥30 H4 bars for htf_bias
+        16 * 30,   # need ≥30 H4 bars for the H4 regime read
     )
     for i in range(warmup, len(candles) - 1):
         run.scan(i)
@@ -375,49 +476,93 @@ def _fmt(s):
             f"dd={s['max_dd_r']}R streak={s['max_losing_streak']}")
 
 
-def print_summary(signals):
-    print(f"\nTotal signals fired: {len(signals)}")
+def _bar_span_days(signals, candles=None):
+    if not signals:
+        return 0.0
+    a = pd.to_datetime(signals[0]["t"], utc=True)
+    b = pd.to_datetime(signals[-1]["t"], utc=True)
+    return max((b - a).total_seconds() / 86400.0, 1e-9)
+
+
+def _rate_block(name, subset, span_days):
+    n = len(subset)
+    per_week = n / span_days * 7 if span_days > 0 else 0.0
+    print(f"  {name}: n={n}  ({per_week:.1f}/week)  {_fmt(_stats(subset))}")
+
+
+def print_summary(signals, candles=None, target_mode=None):
+    tradeable = [s for s in signals if s.get("tradeable", True)]
+    suppressed = [s for s in signals if not s.get("tradeable", True)]
+
+    print(f"\nTarget mode: {target_mode or cfg.TARGET_MODE}")
+    print(f"Total opportunities recorded: {len(signals)}")
     if not signals:
         return
-    ts_first = signals[0]["t"]
-    ts_last = signals[-1]["t"]
-    print(f"Span: {ts_first} → {ts_last}")
+    print(f"Span: {signals[0]['t']} → {signals[-1]['t']}")
+    span_days = _bar_span_days(signals, candles)
+
+    # ── the two rates the docstring promises ─────────────────────────
+    print("\nRATES (realistic cost)")
+    print("  These are different questions. The first measures the")
+    print("  strategy; the second measures what a user would receive.")
+    _rate_block("signal opportunity rate ", signals, span_days)
+    _rate_block("tradeable alert rate    ", tradeable, span_days)
+    if suppressed:
+        print(f"\n  Suppressed ({len(suppressed)}) by reason:")
+        for reason, n in Counter(
+                (s.get("suppressed_reason") or "?").split(" (")[0]
+                for s in suppressed).most_common():
+            sub = [s for s in suppressed if (s.get("suppressed_reason") or "?").startswith(reason)]
+            print(f"    {reason}: n={n}  {_fmt(_stats(sub))}")
+        print("  If the suppressed set's expectancy materially differs from")
+        print("  the tradeable set's, the gates are selecting on outcome and")
+        print("  need re-examining -- not just thinning the stream.")
+
+    # ── MTF coverage: never let an M15-only run be read as full-MTF ──
+    cov = Counter(s.get("mtf_available") or "none" for s in signals)
+    print("\nMTF coverage (timeframes with data at signal time):")
+    for combo, n in cov.most_common():
+        print(f"  {combo}: {n}")
+    if not any("m5" in (k or "") for k in cov):
+        print("  NOTE: no M5/M1 candles supplied -- those layers scored")
+        print("  neutral (0 pts) throughout. Pass --m5/--m1 to exercise them.")
 
     tiers = Counter(s["tier"] for s in signals)
-    print(f"By tier: {dict(tiers)}")
+    print(f"\nBy tier: {dict(tiers)}")
 
     for cost, _ in COST_REGIMES:
         overall = _stats(signals, cost=cost)
-        print(f"\n[{cost}] overall: {_fmt(overall)}")
+        print(f"[{cost}] all opportunities: {_fmt(overall)}")
 
-    # Split: pattern
-    print("\nBy detector (realistic cost):")
+    def _splits(label, subset):
+        print(f"\n{label} (realistic cost, all opportunities):")
+        return subset
+
+    _splits("By detector", signals)
     for pat in sorted({s["pattern"] for s in signals}):
-        subset = [s for s in signals if s["pattern"] == pat]
-        print(f"  {pat}: {_fmt(_stats(subset))}")
+        sub = [s for s in signals if s["pattern"] == pat]
+        print(f"  {pat}: {_fmt(_stats(sub))}")
 
-    # Split: tier
-    print("\nBy tier (realistic cost):")
+    _splits("By tier", signals)
     for tier in ["WATCH", "A+"]:
-        subset = [s for s in signals if s["tier"] == tier]
-        print(f"  {tier}: {_fmt(_stats(subset))}")
+        sub = [s for s in signals if s["tier"] == tier]
+        print(f"  {tier}: {_fmt(_stats(sub))}")
 
-    # Split: direction
-    print("\nBy direction (realistic cost):")
+    _splits("By direction", signals)
     for direction in ["BUY", "SELL"]:
-        subset = [s for s in signals if s["direction"] == direction]
-        print(f"  {direction}: {_fmt(_stats(subset))}")
+        sub = [s for s in signals if s["direction"] == direction]
+        print(f"  {direction}: {_fmt(_stats(sub))}")
 
-    # Split: score band
-    print("\nBy score band (realistic cost):")
+    _splits("By score band", signals)
     for lo, hi in [(0, 44), (45, 49), (50, 54), (55, 59), (60, 64),
                     (65, 69), (70, 74), (75, 79), (80, 84), (85, 100)]:
-        subset = [s for s in signals if lo <= s["score"] <= hi]
-        if subset:
-            print(f"  {lo:>2}-{hi:>2}: {_fmt(_stats(subset))}")
+        sub = [s for s in signals if lo <= s["score"] <= hi]
+        if sub:
+            print(f"  {lo:>2}-{hi:>2}: {_fmt(_stats(sub))}")
+    print("  (Monotonic expectancy across these bands is the evidence that")
+    print("   the score means anything. Check it with tools/calibrate_scores.py.)")
 
-    # Split: session
-    print("\nBy session UTC (realistic cost):")
+    _splits("By session UTC", signals)
     def _hour_of(ts):
         return int(str(ts)[11:13])
     sessions = {
@@ -428,36 +573,45 @@ def print_summary(signals):
         "after (21-24)": lambda h: 21 <= h < 24,
     }
     for name, pred in sessions.items():
-        subset = [s for s in signals if pred(_hour_of(s["t"]))]
-        print(f"  {name}: {_fmt(_stats(subset))}")
+        sub = [s for s in signals if pred(_hour_of(s["t"]))]
+        print(f"  {name}: {_fmt(_stats(sub))}")
 
-    # Outcome distribution (realistic)
-    print("\nOutcome distribution (realistic):")
+    print("\nOutcome distribution (realistic, all opportunities):")
     counts = Counter(s["outcomes"]["realistic"]["outcome"] for s in signals)
     for outcome, n in sorted(counts.items(), key=lambda x: -x[1]):
         print(f"  {outcome}: {n}")
 
-    # TP hit rates (of filled trades under realistic cost)
-    filled = [s for s in signals if not s["outcomes"]["realistic"]["outcome"].startswith("no_fill")]
+    filled = [s for s in signals
+              if not s["outcomes"]["realistic"]["outcome"].startswith("no_fill")]
     if filled:
-        tp1_hit = sum(1 for s in filled if s["outcomes"]["realistic"]["outcome"] not in
-                       ("stop_before_tp1", "time_expired_no_fill_progress", "invalid_risk", "spread_erased_risk"))
-        tp2_hit = sum(1 for s in filled if s["outcomes"]["realistic"]["outcome"] in
-                       ("breakeven_after_tp1", "runner_stopped", "tp3_runner_complete", "time_expired_after_tp1"))
-        # Note: breakeven_after_tp1 means we reached TP1 then hit BE stop -- TP2 NOT hit
+        no_tp1 = ("stop_before_tp1", "time_expired_no_fill_progress",
+                  "invalid_risk", "spread_erased_risk")
+        tp1_hit = sum(1 for s in filled
+                      if s["outcomes"]["realistic"]["outcome"] not in no_tp1)
+        # breakeven_after_tp1 means TP1 then BE stop -- TP2 was NOT hit.
         tp2_hit = sum(1 for s in filled if s["outcomes"]["realistic"]["outcome"] in
                        ("runner_stopped", "tp3_runner_complete"))
-        tp3_hit = sum(1 for s in filled if s["outcomes"]["realistic"]["outcome"] == "tp3_runner_complete")
+        tp3_hit = sum(1 for s in filled
+                      if s["outcomes"]["realistic"]["outcome"] == "tp3_runner_complete")
         print(f"\nTP hit rates (of {len(filled)} filled): "
               f"TP1={tp1_hit/len(filled)*100:.0f}% "
               f"TP2={tp2_hit/len(filled)*100:.0f}% "
               f"TP3={tp3_hit/len(filled)*100:.0f}%")
+        print("  A high TP1 rate is not an edge on its own: exits are")
+        print("  weighted 50/30/20, so expectancy (avg R above), not win")
+        print("  rate, is the number that decides whether this is worth")
+        print("  trading.")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Replay live pipeline over historical candles.")
     parser.add_argument("--candles", required=True,
-                        help="CSV path with columns t,o,h,l,c[,v] chronological")
+                        help="M15 CSV path with columns t,o,h,l,c[,v] chronological")
+    parser.add_argument("--m5", help="Optional M5 CSV; enables the real M5 confirmation layer")
+    parser.add_argument("--m1", help="Optional M1 CSV; enables the real M1 timing layer")
+    parser.add_argument("--target-mode", choices=["FIXED", "ATR"], default=None,
+                        help="Override cfg.TARGET_MODE. Run both and compare "
+                             "before concluding the fixed $25 ladder is right.")
     parser.add_argument("--json", help="Optional per-signal log JSON path")
     args = parser.parse_args()
 
@@ -466,13 +620,23 @@ def main():
     os.environ.setdefault("TELEGRAM_CHAT_ID", "0")
 
     candles = load_candles(args.candles)
-    print(f"Loaded {len(candles)} candles from {args.candles}")
-    signals = run_backtest(candles)
-    print_summary(signals)
+    print(f"Loaded {len(candles)} M15 candles from {args.candles}")
+    m5 = load_candles(args.m5) if args.m5 else None
+    m1 = load_candles(args.m1) if args.m1 else None
+    if m5:
+        print(f"Loaded {len(m5)} M5 candles from {args.m5}")
+    if m1:
+        print(f"Loaded {len(m1)} M1 candles from {args.m1}")
+
+    target_mode = args.target_mode or cfg.TARGET_MODE
+    signals = run_backtest(candles, m5=m5, m1=m1, target_mode=target_mode)
+    print_summary(signals, candles=candles, target_mode=target_mode)
     if args.json:
         with open(args.json, "w") as f:
             json.dump(signals, f, indent=2, default=str)
         print(f"\nPer-signal log written to {args.json}")
+        print("Next: python tools/calibrate_scores.py --signals "
+              f"{args.json} --oos-split 0.7")
 
 
 if __name__ == "__main__":

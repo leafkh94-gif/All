@@ -43,6 +43,27 @@ FIXED_TP2_POINTS = 50
 FIXED_TP3_POINTS = 100
 MAX_SPREAD_POINTS = 1.5
 
+# TARGET_MODE = "ATR" sizes the same 1R / 2R / 4R ladder off current M15
+# ATR instead of a fixed dollar distance. The point of having both is to
+# be able to *test* them against each other on identical candles rather
+# than assume $25 is the right stop in every volatility regime:
+#
+#     python backtest.py --candles X.csv --target-mode FIXED
+#     python backtest.py --candles X.csv --target-mode ATR
+#
+# ATR_SL_MULT is chosen so that at typical M15 gold ATR (~$3) the stop
+# lands near the $25 the fixed mode uses -- the two modes are then
+# comparable at median volatility and diverge only in the tails, which is
+# exactly the behaviour under test. ATR_SL_MIN/MAX_POINTS bound the stop
+# so a news-spike ATR can't produce an absurd distance.
+ATR_SL_MULT = 8.0
+ATR_TP1_R = 1.0
+ATR_TP2_R = 2.0
+ATR_TP3_R = 4.0
+ATR_SL_MIN_POINTS = 12.0
+ATR_SL_MAX_POINTS = 45.0
+ATR_TARGET_PERIOD = 14
+
 # ─────────────────────────────────────────────────────────────────────
 # 1.3  Round-number levels (gold trades in 50-dollar increments; 3 pts proximity)
 # ─────────────────────────────────────────────────────────────────────
@@ -67,39 +88,100 @@ WATCH_MIN_SCORE = 45
 WATCH_MAX_SCORE = 69
 APLUS_MIN_SCORE = 70
 
-# Score budget (rewritten from base-60 model). Max ≈ 100.
-SCORE_RSI_CONFIRM_MAX = 30      # sequenced RSI reversal quality
-SCORE_TURTLE_MAX = 20           # proximity to Turtle band (0.5*ATR tight)
-SCORE_ZLSMA_ALIGNED = 20        # ZLSMA slope aligned with entry direction
-SCORE_ZLSMA_FLAT = 0            # flat slope contributes nothing (blocks A+)
-SCORE_H4_ALIGNED = 15
+# ─────────────────────────────────────────────────────────────────────
+# Score budget.
+#
+# The score is built from three groups, all on one 0..100 scale:
+#
+#   A. M15 SETUP        setup_quality * SCORE_SETUP_MAX          0..45
+#      + trend-alignment axis (ZLSMA for GT, structure for SMC)  -12..+15
+#   B. MTF LAYER        H4 regime / H1 context / M5 confirm /
+#                       M1 timing, each signed and bounded       -37..+37
+#   C. CONTEXT          round number, chop, ATR regime           -20..+5
+#
+# Max realistically ≈ 100 (clamped). Note group B is *zero-centred*: a
+# timeframe with no candles available contributes exactly 0, identical to
+# a neutral reading, so an M15-only backtest and a full-MTF live run
+# produce comparable scores instead of a systematic offset.
+# ─────────────────────────────────────────────────────────────────────
+
+# A. Setup quality. ONE budget shared by both detectors. Each detector
+# reports setup_quality as a 0..1 fraction of its own internal maximum,
+# so Golden Trio and SMC land on the same axis by construction rather
+# than by an arbitrary rescale of two unrelated point totals.
+# NOTE: equal *range* is not equal *meaning* -- whether GT 0.8 and SMC
+# 0.8 carry the same expectancy is an empirical question. Measure it with
+# tools/calibrate_scores.py; do not assume it.
+SCORE_SETUP_MAX = 45
+
+# Per-detector internal weighting of the components that make up
+# setup_quality (must sum to 1.0 within each detector).
+GT_QUALITY_WEIGHT_RSI = 0.6      # RSI is evidence of momentum...
+GT_QUALITY_WEIGHT_TURTLE = 0.4   # ...Turtle is evidence of location.
+
+# Legacy component ceilings. Still exported so the detectors can report
+# per-component points for the alert breakdown, but they no longer set
+# the score: setup_quality does.
+SCORE_RSI_CONFIRM_MAX = 30
+SCORE_TURTLE_MAX = 20
+
+# Trend-alignment axis. GT reads it off ZLSMA slope; SMC reads it off the
+# structural bias the pattern implies. Same points either way.
+SCORE_ZLSMA_ALIGNED = 15        # slope/structure aligned with the entry
+SCORE_ZLSMA_FLAT = 0            # flat contributes nothing
+SCORE_ZLSMA_AGAINST = -12       # slope/structure opposes the entry
+
+# B. MTF layer budgets. Each is the magnitude of a signed contribution:
+# a timeframe fully confirming earns +MAX, fully contradicting -MAX.
+SCORE_H4_MAX = 12               # regime
+SCORE_H1_MAX = 10               # context
+SCORE_M5_MAX = 10               # confirmation
+SCORE_M1_MAX = 5                # entry timing only -- smallest by design
+
+# Back-compat aliases. htf_bias()/older callers still reference these.
+SCORE_H4_ALIGNED = SCORE_H4_MAX
 SCORE_H4_FLAT = 0
-SCORE_H4_OPPOSED = -10          # was -15; combined with WATCH_MIN=45, -15
-                                # meant every H4-opposed setup fell just
-                                # under WATCH (typical opposed score 39-42)
-                                # so the bot went silent whenever the H4
-                                # trend was persistent. -10 still tilts
-                                # the score against opposition (backtest
-                                # confirmed opposed signals lose -0.09R
-                                # avg vs aligned +0.05R) without turning
-                                # H4 into a hard veto. A+ still blocked
-                                # for opposed via score_candidate's
-                                # aplus_eligible gate.
+SCORE_H4_OPPOSED = -SCORE_H4_MAX
+
 SCORE_KILLZONE_MAX = 0          # was 10; the bonus concentrated alerts
                                 # into the London/NY overlap and left the
                                 # rest of the day artificially short of
                                 # threshold. Gold trades 24/5 -- alerts
                                 # should reflect actual setup quality,
                                 # not what time it is.
+
+# C. Context.
 SCORE_ROUND_NUMBER = 5
 SCORE_ATR_SWEET_SPOT_PENALTY = -10
-
-# Formerly hard vetoes in golden_trio.py, now soft score penalties so a
-# strong M15 setup can still qualify as WATCH even when the trend
-# indicator or the volatility regime is unfavorable. A+ is still blocked
-# in both cases (see score_candidate.aplus_eligible).
-SCORE_ZLSMA_AGAINST = -12       # ZLSMA slope opposes the entry direction
 SCORE_CHOP_PENALTY = -10        # recent range is compressed (chop regime)
+
+# ─────────────────────────────────────────────────────────────────────
+# MTF layer tuning (strategy/mtf.py)
+#
+# Every "FULL_*" constant is the reading at which that component's
+# contribution saturates at ±1.0. Readings scale linearly up to it, so a
+# marginal trend earns marginal points instead of the old all-or-nothing
+# ±15 on H4.
+# ─────────────────────────────────────────────────────────────────────
+MTF_H4_EMA_PERIOD = 20
+MTF_H4_FLAT_BAND_PCT = 0.001    # |EMA slope| below this -> regime FLAT
+MTF_H4_FULL_SLOPE_PCT = 0.006   # 0.6% EMA(20) move over 5 H4 bars = full weight
+
+MTF_H1_RANGE_BARS = 24          # one trading day of H1 for the location read
+MTF_H1_EMA_PERIOD = 20
+MTF_H1_SLOPE_BARS = 6
+MTF_H1_FULL_SLOPE_PCT = 0.004
+
+MTF_M5_LOOKBACK = 6             # 30 minutes of M5
+MTF_M5_RSI_PERIOD = 14
+MTF_M5_FULL_DISP_ATR = 1.5      # 1.5 ATR of net displacement = full weight
+MTF_M5_FULL_RSI_DELTA = 12.0    # 12 RSI points of slope = full weight
+
+MTF_M1_LOOKBACK = 10            # 10 minutes
+MTF_M1_FULL_EXTENSION_ATR = 3.0 # already 3 M1-ATR past entry = max chase penalty
+
+# How many bars of each timeframe the live feed pulls per scan.
+MTF_FETCH_BARS = {"1min": 120, "5min": 200, "15min": 160, "1h": 160, "4h": 260}
 
 DAILY_LOSS_LIMIT_USD = 20.0
 DAILY_LOSS_BREAKER_DURATION_DAYS = 14
