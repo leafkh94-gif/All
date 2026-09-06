@@ -10,7 +10,16 @@ snapshotTime, and write the concatenated CSV.
 
 Usage (env vars required for the API):
     CAPITAL_API_KEY=... CAPITAL_EMAIL=... CAPITAL_PASSWORD=... \\
-      python tools/fetch_and_backtest.py --weeks 26
+      python tools/fetch_and_backtest.py --weeks 26 --calibrate
+
+Pass --target-mode FIXED / ATR to test either stop ladder; run it once
+per mode and compare, rather than assuming the fixed $25 stop is right
+across every volatility regime.
+
+Note this fetches M15 only, so the M5 and M1 layers score neutral in the
+resulting run (strategy/mtf.py treats absent timeframes as exactly 0).
+The H1 and H4 layers are aggregated from the M15 series and do
+contribute.
 """
 import argparse
 import csv
@@ -103,6 +112,12 @@ def main():
                     help="how many weeks of M15 history to attempt")
     ap.add_argument("--out", default="gold_m15_capital.csv")
     ap.add_argument("--json", default="backtest_result.json")
+    ap.add_argument("--target-mode", choices=["FIXED", "ATR"], default=None,
+                    help="Target ladder to test. Dispatch once per mode and "
+                         "diff the expectancy before concluding the fixed "
+                         "$25 stop suits every volatility regime.")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="Also run tools/calibrate_scores.py on the result.")
     args = ap.parse_args()
 
     feed = CapitalFeed()
@@ -121,11 +136,25 @@ def main():
     write_csv(rows, args.out)
 
     print("\n=== running backtest ===")
-    subprocess.check_call([
+    cmd = [
         sys.executable, "backtest.py",
         "--candles", args.out,
         "--json", args.json,
-    ])
+    ]
+    if args.target_mode:
+        cmd += ["--target-mode", args.target_mode]
+    subprocess.check_call(cmd)
+
+    if args.calibrate:
+        # Cheap (seconds) next to the backtest itself, and it is the step
+        # that turns a pile of signals into a statement about whether the
+        # score means anything.
+        print("\n=== calibrating scores ===")
+        subprocess.check_call([
+            sys.executable, os.path.join("tools", "calibrate_scores.py"),
+            "--signals", args.json,
+            "--oos-split", "0.7",
+        ])
 
 
 if __name__ == "__main__":

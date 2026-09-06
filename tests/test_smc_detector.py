@@ -198,3 +198,85 @@ def test_score_candidate_accepts_smc_pattern_types():
         "XAUUSD", "COMMODITY", candidate, market, now, level_store)
     assert result is not None
     assert "score" in result
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Parity with Golden Trio in the scoring pipeline.
+#
+# SMC candidates used to reach the scorer without a zlsma_status at all,
+# so the trend axis was silently skipped for half of all signals. That
+# isn't one score formula with two inputs, it's two formulas -- and it
+# makes any comparison between the detectors meaningless.
+# ─────────────────────────────────────────────────────────────────────
+import scoring_strategy as strat
+import strategy_config as cfg
+
+
+def _smc_bearing_candles(n=400, seed=11):
+    """A deterministic random walk with enough swing structure that the
+    SMC detectors actually fire. A tidy alternating-leg series does not:
+    the library's swing detection needs irregular pivots, and a test that
+    silently skips because nothing fired proves nothing."""
+    import random
+    rnd = random.Random(seed)
+    out, price = [], 2000.0
+    for i in range(n):
+        o = price
+        c = o + sum(rnd.gauss(0, 0.55) for _ in range(4))
+        h = max(o, c) + abs(rnd.gauss(0, 0.55))
+        l = min(o, c) - abs(rnd.gauss(0, 0.55))
+        out.append({"t": f"2025-01-{1 + i // 96:02d}T{(i % 96) // 4:02d}:{(i % 4) * 15:02d}:00+00:00",
+                    "o": round(o, 3), "h": round(h, 3), "l": round(l, 3),
+                    "c": round(c, 3), "v": 100})
+        price = c
+    return out
+
+
+def _first_smc_candidate(candles):
+    for i in range(120, len(candles)):
+        raw = find_smc_candidate(candles[:i + 1])
+        if raw:
+            return dict(raw), candles[:i + 1]
+    raise AssertionError(
+        "no SMC candidate on the fixture series -- these tests would be "
+        "vacuous. Fix the fixture, don't skip the assertion.")
+
+
+def test_prepared_smc_candidate_has_the_same_shape_as_a_gt_candidate():
+    raw, window = _first_smc_candidate(_smc_bearing_candles())
+    prepared = strat._prepare_smc(raw, window)
+    for key in ("entry_price", "stop_loss", "tp1", "tp2", "tp3", "risk",
+                "zlsma_status", "setup_quality"):
+        assert key in prepared, f"SMC candidate is missing {key}"
+
+
+def test_smc_candidates_are_measured_on_the_trend_axis():
+    """The specific regression: an SMC candidate must carry a real
+    zlsma_status, not None, or the trend axis scores 0 for it by default
+    while Golden Trio pays or earns on the same axis."""
+    raw, window = _first_smc_candidate(_smc_bearing_candles())
+    prepared = strat._prepare_smc(raw, window)
+    assert prepared["zlsma_status"] in ("aligned", "flat", "against")
+
+
+def test_smc_setup_quality_is_on_the_shared_0_1_axis():
+    raw, window = _first_smc_candidate(_smc_bearing_candles())
+    prepared = strat._prepare_smc(raw, window)
+    q = strat._setup_quality(prepared)
+    assert 0.0 <= q <= 1.0
+    assert abs(q - raw["quality"] / cfg.PATTERN_QUALITY_BASE_MAX) < 1e-9
+
+
+def test_smc_setup_points_share_the_same_budget_as_golden_trio():
+    """Neither detector may outspend the other on setup quality."""
+    raw, window = _first_smc_candidate(_smc_bearing_candles())
+    prepared = strat._prepare_smc(raw, window)
+    import datetime as dt
+    market = {"entry": window, "m15": window, "h1": [], "h4": [], "m5": [], "m1": []}
+    scored = strat.score_candidate(
+        "XAUUSD", "COMMODITY", prepared, market,
+        dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.timezone.utc), None)
+    assert scored is not None
+    setup_pts = next(pts for tag, pts in scored["breakdown"] if tag.startswith("smc_"))
+    assert 0 <= setup_pts <= cfg.SCORE_SETUP_MAX
+    assert 0 <= scored["score"] <= 100
