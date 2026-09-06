@@ -138,7 +138,24 @@ def simulate_execution(scored, forward, spread_price=0.0):
     if abs(entry - stop) <= 0:
         return "invalid_risk", 0.0, None
 
-    # Slip entry by spread: BUY fills at ask (higher), SELL at bid (lower).
+    # Spread is a COST, not a looser trigger.
+    #
+    # The feed is bid-quoted, so the fill triggers when the bid touches
+    # the alerted entry level; what the spread changes is the price you
+    # actually paid (BUY fills at the ask, SELL at the bid), which is
+    # entry_eff below and the basis for every R calculation after it.
+    #
+    # Triggering on entry_eff instead -- as this did previously -- made a
+    # BUY fill whenever the bar dipped to entry + spread, i.e. a WIDER
+    # spread produced an EASIER fill. That is backwards, and it also
+    # meant the three cost regimes stopped evaluating the same set of
+    # trades: the conservative regime picked up marginal fills the ideal
+    # regime never entered, so the regimes could no longer isolate the
+    # cost of spread. On a 573-signal run the filled counts diverged
+    # 543 / 555 / 563 across ideal / realistic / conservative.
+    #
+    # Trigger on the raw entry; charge the spread on the fill price only.
+    # All three regimes now share one trade set and differ solely by cost.
     entry_eff = entry + spread_price if is_buy else entry - spread_price
     risk_eff = abs(entry_eff - stop)
     if risk_eff <= 0:
@@ -146,7 +163,7 @@ def simulate_execution(scored, forward, spread_price=0.0):
 
     fill_idx = None
     for i, c in enumerate(forward[:_ENTRY_EXPIRY_BARS]):
-        if (is_buy and c["l"] <= entry_eff) or (not is_buy and c["h"] >= entry_eff):
+        if (is_buy and c["l"] <= entry) or (not is_buy and c["h"] >= entry):
             fill_idx = i
             break
     if fill_idx is None:

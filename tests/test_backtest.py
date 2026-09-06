@@ -197,3 +197,70 @@ def test_target_mode_is_threaded_into_candidate_discovery():
     m15 = make_candles(50, start_price=2000.0, step=1.0)
     assert _run_with(m15, target_mode="ATR").target_mode == "ATR"
     assert _run_with(m15).target_mode == cfg.TARGET_MODE
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Spread is a cost, not a looser fill trigger.
+#
+# Regression: entry_eff was used for BOTH the cost basis and the fill
+# trigger, so a wider spread made a BUY fill whenever the bar dipped to
+# entry + spread. A wider spread produced an EASIER fill, and the three
+# cost regimes stopped sharing a trade set -- which is precisely the
+# property that lets them isolate the cost of spread.
+# ─────────────────────────────────────────────────────────────────────
+
+def _ohlc_bar(o, h, l, c):
+    return {"t": "2025-01-01T00:00:00+00:00", "o": o, "h": h, "l": l, "c": c, "v": 1}
+
+
+def _scored(direction="BUY", entry=2000.0):
+    sign = 1.0 if direction == "BUY" else -1.0
+    return {"direction": direction, "entry_price": entry,
+            "stop_loss": entry - sign * 25.0,
+            "tp1": entry + sign * 25.0, "tp2": entry + sign * 50.0,
+            "tp3": entry + sign * 100.0, "risk": 25.0}
+
+
+def test_wider_spread_never_creates_a_fill_that_a_tighter_spread_missed():
+    """A bar that stops just short of the entry must not fill under any
+    spread. Previously it filled under the conservative regime only."""
+    # BUY at 2000; the bar's low only reaches 2000.80 -- never touches entry.
+    forward = [_ohlc_bar(2002.0, 2003.0, 2000.80, 2001.0)] * 8
+    for spread in (0.0, 0.75, 1.50):
+        outcome, _r, _x = backtest.simulate_execution(
+            _scored("BUY"), forward, spread_price=spread)
+        assert outcome == "no_fill_expired", f"filled at spread {spread}"
+
+
+def test_sell_side_mirrors_the_no_fill_behaviour():
+    forward = [_ohlc_bar(1998.0, 1999.20, 1997.0, 1998.0)] * 8
+    for spread in (0.0, 0.75, 1.50):
+        outcome, _r, _x = backtest.simulate_execution(
+            _scored("SELL"), forward, spread_price=spread)
+        assert outcome == "no_fill_expired", f"filled at spread {spread}"
+
+
+def test_all_cost_regimes_fill_on_exactly_the_same_bars():
+    """The regimes must differ only in R, never in which trades exist --
+    otherwise they aren't measuring the cost of spread, they're measuring
+    two different samples."""
+    forward = ([_ohlc_bar(2001.0, 2002.0, 1999.5, 2000.5)]        # touches entry
+               + [_ohlc_bar(2001.0, 2027.0, 2000.0, 2026.0)] * 6)  # runs to TP1
+    fills = []
+    for _name, spread in backtest.COST_REGIMES:
+        outcome, r, exit_off = backtest.simulate_execution(
+            _scored("BUY"), forward, spread_price=spread)
+        fills.append((outcome, exit_off, r))
+    outcomes = {f[0] for f in fills}
+    exits = {f[1] for f in fills}
+    assert len(outcomes) == 1, f"regimes diverged on outcome: {fills}"
+    assert len(exits) == 1, f"regimes diverged on fill/exit timing: {fills}"
+
+
+def test_spread_still_reduces_the_realised_r():
+    """The fix must not quietly stop charging for spread."""
+    forward = ([_ohlc_bar(2001.0, 2002.0, 1999.5, 2000.5)]
+               + [_ohlc_bar(2001.0, 2027.0, 2000.0, 2026.0)] * 6)
+    _o, r_ideal, _ = backtest.simulate_execution(_scored("BUY"), forward, spread_price=0.0)
+    _o, r_wide, _ = backtest.simulate_execution(_scored("BUY"), forward, spread_price=1.50)
+    assert r_wide < r_ideal
