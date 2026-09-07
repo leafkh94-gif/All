@@ -83,3 +83,54 @@ def test_candidate_carries_diagnostic_indicator_values():
     result = find_golden_trio_candidate(_long_setup_candles())
     for k in ("rsi", "zlsma", "turtle_upper", "turtle_lower", "atr", "zlsma_status", "rsi_quality", "turtle_quality"):
         assert k in result, f"missing diagnostic key {k!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Entry placement. Taking the trigger bar's close means entering at the
+# top of the move that produced the signal, which measured as an ~8-point
+# win-rate penalty on data with no directional information.
+# ─────────────────────────────────────────────────────────────────────
+import strategy_config as cfg
+
+
+def _any_candidate(seed_steps=(0.4, -0.4, 0.7, -0.7)):
+    """Return the first candidate found across a few tapes, with its candles."""
+    for step in seed_steps:
+        for noise in (1.2, 0.8, 1.6):
+            candles = make_candles(220, start_price=2650.0, step=step, noise=noise)
+            cand = find_golden_trio_candidate(candles)
+            if cand:
+                return cand, candles
+    raise AssertionError("no Golden Trio candidate on any fixture tape")
+
+
+def test_entry_is_a_pullback_from_the_trigger_close_not_the_close():
+    cand, candles = _any_candidate()
+    close = candles[-1]["c"]
+    if cand["direction"] == "BUY":
+        assert cand["entry_price"] < close, "a BUY must wait for a dip below the close"
+    else:
+        assert cand["entry_price"] > close, "a SELL must wait for a pop above the close"
+
+
+def test_pullback_distance_matches_the_configured_atr_fraction():
+    cand, candles = _any_candidate()
+    close = candles[-1]["c"]
+    expected = cfg.ENTRY_PULLBACK_ATR * cand["atr"]
+    assert abs(abs(cand["entry_price"] - close) - expected) < 1e-6
+
+
+def test_risk_is_measured_from_the_pullback_entry():
+    """The ladder must hang off the entry actually used, not the close,
+    or the stop distance silently differs from ATR_SL_MULT * ATR."""
+    cand, _ = _any_candidate()
+    assert abs(abs(cand["entry_price"] - cand["stop_loss"]) - cand["risk"]) < 1e-6
+
+
+def test_targets_stay_ordered_away_from_the_pullback_entry():
+    cand, _ = _any_candidate()
+    e = cand["entry_price"]
+    if cand["direction"] == "BUY":
+        assert cand["stop_loss"] < e < cand["tp1"] < cand["tp2"] < cand["tp3"]
+    else:
+        assert cand["stop_loss"] > e > cand["tp1"] > cand["tp2"] > cand["tp3"]
