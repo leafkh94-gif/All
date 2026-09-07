@@ -34,7 +34,6 @@ import argparse
 import json
 import os
 import sys
-from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -47,24 +46,44 @@ def span_weeks(signals):
     return max(days / 7.0, 1e-9)
 
 
+def run_watch_floor(signals):
+    """The WATCH threshold the logged run itself used.
+
+    Rows at or above it competed for the cooldown and one-position gates
+    for real. Rows below it were never alerts, so they never occupied the
+    gate and never blocked anything.
+    """
+    real = [s["score"] for s in signals
+            if s.get("suppressed_reason") != "below_threshold"]
+    return min(real) if real else None
+
+
 def delivered_at(signals, watch_min, aplus_min, weeks):
     """Replay the gates at a candidate threshold pair.
 
-    A signal is only *delivered* if it clears the threshold AND was not
-    suppressed. Suppression is recorded per-signal by the backtester;
-    'below_threshold' rows were never real alerts, so they are treated as
-    eligible here and re-tested against the candidate threshold.
+    Returns (aplus_per_week, watch_per_week, reliable).
+
+    `reliable` is False when watch_min drops below the threshold the run
+    actually used. Below that line the answer is an UPPER BOUND, not a
+    prediction: those extra candidates never competed for the position
+    gate, so counting them as delivered assumes a gate that was never
+    tested. Some of them would have blocked each other, and some would
+    have blocked alerts that did fire. Only a re-run at the candidate
+    threshold settles it.
+
+    At or above the run's own floor the numbers are exact, because
+    splitting genuinely-delivered alerts by an A+ line is only
+    re-labelling them.
     """
+    floor = run_watch_floor(signals)
+    reliable = floor is None or watch_min >= floor
+
     elig = [s for s in signals if s["score"] >= watch_min]
-    # A row suppressed by cooldown/position under the ORIGINAL thresholds
-    # would also have been suppressed under a lower one (the blocking
-    # trade still exists), so keep those suppressed. Rows suppressed only
-    # for being below threshold become deliverable if they now clear it.
     deliverable = [s for s in elig
                    if s.get("tradeable") or s.get("suppressed_reason") == "below_threshold"]
     aplus = [s for s in deliverable if s["score"] >= aplus_min]
     watch = [s for s in deliverable if s["score"] < aplus_min]
-    return len(aplus) / weeks, len(watch) / weeks, len(elig) / weeks
+    return len(aplus) / weeks, len(watch) / weeks, reliable
 
 
 def pick(signals, target_aplus, target_watch, weeks):
@@ -75,7 +94,12 @@ def pick(signals, target_aplus, target_watch, weeks):
         for w in scores:
             if w >= a:
                 continue
-            ar, wr, _ = delivered_at(signals, w, a, weeks)
+            ar, wr, reliable = delivered_at(signals, w, a, weeks)
+            if not reliable:
+                # Never recommend a threshold whose rate we can only
+                # bound from above -- that is how a tuner talks you into
+                # a noisy configuration.
+                continue
             # Distance in relative terms so neither target dominates.
             cost = abs(ar - target_aplus) / max(target_aplus, 1e-9) \
                  + abs(wr - target_watch) / max(target_watch, 1e-9)
@@ -109,14 +133,19 @@ def main():
     print(f"score distribution: min={min(scores)} median={sorted(scores)[len(scores)//2]} "
           f"p90={sorted(scores)[int(len(scores)*0.9)]} max={max(scores)}")
 
+    floor = run_watch_floor(signals)
+    print(f"\nThe logged run used WATCH >= {floor}. At or above that line the")
+    print("rates below are exact. Below it they are upper bounds: those")
+    print("candidates never competed for the one-position gate.")
     print("\nDelivered rate by threshold (after cooldown + position gates):")
-    print(f"  {'A+ min':>7} {'A+/wk':>7} {'WATCH min':>10} {'WATCH/wk':>9}")
-    for a in (55, 60, 62, 65, 68, 70, 75):
-        for w in (45, 50):
-            if w >= a:
+    print(f"  {'A+ min':>7} {'A+/wk':>7} {'WATCH min':>10} {'WATCH/wk':>9}  ")
+    for a in (48, 50, 52, 55, 58, 60, 65, 70):
+        for w in (floor,):
+            if w is None or w >= a:
                 continue
-            ar, wr, _ = delivered_at(signals, w, a, weeks)
-            print(f"  {a:>7} {ar:>7.1f} {w:>10} {wr:>9.1f}")
+            ar, wr, rel = delivered_at(signals, w, a, weeks)
+            flag = "" if rel else "  (upper bound)"
+            print(f"  {a:>7} {ar:>7.1f} {w:>10} {wr:>9.1f}{flag}")
 
     best = pick(signals, args.aplus_per_week, args.watch_per_week, weeks)
     if best:
