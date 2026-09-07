@@ -63,6 +63,7 @@ bias audit can verify no future data leaked in.
 import argparse
 import json
 import os
+from bisect import bisect_right
 from collections import Counter
 
 import pandas as pd
@@ -105,6 +106,35 @@ def aggregate_htf(m15_candles, factor):
             "v": None,
         })
     return out
+
+
+def precompute_htf(candles, factor):
+    """Aggregate the WHOLE series once, recording where each HTF bar ends.
+
+    Returns (bars, end_idx) where end_idx[k] is the index of the last M15
+    bar inside HTF bar k. A scan at bar i may use exactly the bars whose
+    end_idx <= i, which reproduces aggregate_htf(candles[:i+1], factor)
+    bar-for-bar -- same fixed chunk grid anchored at index 0, same dropped
+    trailing partial -- but costs O(n) for the whole run instead of O(n)
+    per scan.
+
+    Anchoring matters: aggregating a *sliding* window would move the chunk
+    boundaries every bar, so the "same" H4 candle would keep changing
+    shape as the run advanced.
+    """
+    bars, ends = [], []
+    for start in range(0, len(candles) - factor + 1, factor):
+        chunk = candles[start:start + factor]
+        bars.append({
+            "t": chunk[0]["t"],
+            "o": chunk[0]["o"],
+            "h": max(c["h"] for c in chunk),
+            "l": min(c["l"] for c in chunk),
+            "c": chunk[-1]["c"],
+            "v": None,
+        })
+        ends.append(start + factor - 1)
+    return bars, ends
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -266,6 +296,10 @@ class BacktestRun:
         self._m5_cursor = 0
         self._m1_cursor = 0
 
+        # Precomputed HTF, sliced per scan by end index.
+        self._h1_bars, self._h1_ends = precompute_htf(candles, 4)
+        self._h4_bars, self._h4_ends = precompute_htf(candles, 16)
+
         # State that live persists to disk; here in-memory per-run.
         self.main_state = {}
         self.pending_a_plus = None          # (scored_dict, added_at_index)
@@ -299,17 +333,31 @@ class BacktestRun:
         return series[lo:cursor + 1]
 
     def _build_market(self, i):
-        window = self.candles[: i + 1]
+        """Assemble the market bundle a live scan at bar i would have seen.
+
+        Every timeframe is truncated to the SAME number of bars the live
+        feed pulls (cfg.MTF_FETCH_BARS). Previously this passed the entire
+        history from bar 0, which meant the SMC detectors computed swings,
+        order blocks and CHOCH over thousands of bars in backtest but over
+        160 bars live -- a live/backtest divergence in the data, defeating
+        the point of sharing the code paths. It also made the whole run
+        O(n^2).
+        """
+        bars = cfg.MTF_FETCH_BARS
+        lo = max(0, i + 1 - bars["15min"])
+        window = self.candles[lo: i + 1]
         ts = self.candles[i]["t"]
+        h1 = self._h1_bars[: bisect_right(self._h1_ends, i)][-bars["1h"]:]
+        h4 = self._h4_bars[: bisect_right(self._h4_ends, i)][-bars["4h"]:]
         return {
             "entry": window,
             "m15": window,
             "m5": self._finer_upto(self.m5, self._m5_idx, "_m5_cursor", ts,
-                                   cfg.MTF_FETCH_BARS["5min"]),
+                                   bars["5min"]),
             "m1": self._finer_upto(self.m1, self._m1_idx, "_m1_cursor", ts,
-                                   cfg.MTF_FETCH_BARS["1min"]),
-            "h1": aggregate_htf(window, 4),
-            "h4": aggregate_htf(window, 16),
+                                   bars["1min"]),
+            "h1": h1,
+            "h4": h4,
         }
 
     def _find(self, market):
