@@ -518,7 +518,12 @@ def _stats(subset, cost="realistic"):
         return None
     filled = [s for s in subset if not s["outcomes"][cost]["outcome"].startswith("no_fill")]
     if not filled:
-        return {"n": 0, "wr": 0.0, "avg_r": 0.0, "total_r": 0.0}
+        # Must carry every key _fmt reads. Returning a short dict here
+        # crashed the whole report with a KeyError the moment any subset
+        # (a detector, a session, a score band) happened to contain only
+        # unfilled signals -- after the run had already done its work.
+        return {"n": 0, "wins": 0, "wr": 0.0, "avg_r": 0.0, "total_r": 0.0,
+                "profit_factor": 0.0, "max_dd_r": 0.0, "max_losing_streak": 0}
     rs = [s["outcomes"][cost]["r"] for s in filled]
     wins = [r for r in rs if r > 0]
     losses = [r for r in rs if r < 0]
@@ -728,11 +733,14 @@ def main():
     target_mode = args.target_mode or cfg.TARGET_MODE
     signals = run_backtest(candles, m5=m5, m1=m1, target_mode=target_mode,
                            record_all=args.record_all)
-    print_summary(signals, candles=candles, target_mode=target_mode)
+    # Persist BEFORE reporting. The run is the expensive part; a bug in
+    # the summary formatting must not throw away its results.
     if args.json:
         with open(args.json, "w") as f:
             json.dump(signals, f, indent=2, default=str)
-        print(f"\nPer-signal log written to {args.json}")
+        print(f"Per-signal log written to {args.json}")
+    print_summary(signals, candles=candles, target_mode=target_mode)
+    if args.json:
         print("Next: python tools/calibrate_scores.py --signals "
               f"{args.json} --oos-split 0.7")
 

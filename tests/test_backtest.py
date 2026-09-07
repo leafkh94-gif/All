@@ -264,3 +264,17 @@ def test_spread_still_reduces_the_realised_r():
     _o, r_ideal, _ = backtest.simulate_execution(_scored("BUY"), forward, spread_price=0.0)
     _o, r_wide, _ = backtest.simulate_execution(_scored("BUY"), forward, spread_price=1.50)
     assert r_wide < r_ideal
+
+
+def test_stats_returns_every_field_the_formatter_reads():
+    """Regression: the empty-`filled` early return omitted profit_factor,
+    max_dd_r and max_losing_streak, so any subset containing only unfilled
+    signals crashed the entire report with a KeyError -- after the run had
+    already spent its time."""
+    unfilled = [{"outcomes": {"realistic": {"outcome": "no_fill_expired", "r": 0.0}}}]
+    st = backtest._stats(unfilled)
+    assert st["n"] == 0
+    backtest._fmt(st)          # must not raise
+    full = backtest._stats([
+        {"outcomes": {"realistic": {"outcome": "tp3_runner_complete", "r": 1.2}}}])
+    assert set(st) >= set(full), "empty-case dict is missing keys the full case has"
