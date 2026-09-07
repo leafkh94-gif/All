@@ -140,29 +140,26 @@ ROUND_NUMBER_OFFSET_TABLE = {
 # The previous A+ = 70 fired on 4 of 573 signals (0.7%) against a
 # practical score ceiling of 76 — silent. It had been carried unchanged
 # through a scoring rewrite that changed what the score means, which is
-# how a threshold quietly stops matching its distribution.
+# how a threshold quietly stops matching its own distribution.
 #
-# Measured delivered rates (exact: these split alerts that genuinely
-# fired, after the cooldown and one-position gates):
+# Measured delivered rates, after the cooldown and one-position gates
+# (exact: these split alerts that genuinely fired):
 #
-#   A+ line   A+/wk   WATCH/wk        A+ line   A+/wk   WATCH/wk
-#      48      6.2       2.9             58      1.4       7.7
-#      50      4.8       4.3             60      0.9       8.2
-#      52      3.7       5.4             65      0.4       8.7
-#      55      2.4       6.7  <-         70      0.0       9.1  <- old
+#   A+ line   A+/wk   WATCH/wk   split        A+ line   A+/wk   WATCH/wk
+#      48      6.7       4.8     58% A+          53       2.4      9.0
+#      50      4.6       6.9     40% A+          55       1.2     10.2
+#      52      2.9       8.5     25% A+  <-      70       0.1     11.3  <- old
 #
-# 55 puts A+ at ~1 every 2-3 days and WATCH at ~1.4/day, roughly a
-# 26/74 split of a ~9/week total. Selective without being silent.
+# 52 puts A+ at roughly one every two to three days and WATCH at ~1.7 a
+# day: about 11 alerts a week, split 25/75. Selective without going quiet.
 #
-# Note the total delivered rate is ~9/week almost regardless of the A+
-# line: the binding constraint is the one-position gate, not the
-# threshold. Moving A+ mostly re-labels alerts between tiers. That is why
-# the ladder and hold-window fixes mattered far more than this number —
-# they took the delivered rate from 1.9/week to 9.1/week on their own.
+# These must be re-derived whenever the score budget or the entry logic
+# changes -- the entry-pullback fix alone moved the A+ share at a fixed
+# line from 26% to 11%, because it changed which setups fill.
 NO_ALERT_MAX = 44
 WATCH_MIN_SCORE = 45
-WATCH_MAX_SCORE = 54
-APLUS_MIN_SCORE = 55
+WATCH_MAX_SCORE = 51
+APLUS_MIN_SCORE = 52
 
 # ─────────────────────────────────────────────────────────────────────
 # Score budget.

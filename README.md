@@ -70,31 +70,96 @@ and a timeframe whose candles are unavailable both contribute exactly 0.
 That is what lets an M15-only backtest and a full-MTF live run sit on the
 same score scale instead of differing by a constant offset.
 
-**Targets.** Two selectable ladders, both 1R / 2R / 4R:
-- `TARGET_MODE = "FIXED"` (default): $25 stop, $25 TP1, $50 TP2, $100 TP3.
-- `TARGET_MODE = "ATR"`: the same ladder sized off M15 ATR, clamped to
-  $12–$45.
+**Targets.** Sized in ATR, because gold's volatility varies far more than
+a fixed dollar distance can absorb:
 
-They exist as a matched pair so the question "is a fixed $25 stop right
-across every volatility regime?" can be settled by comparison rather than
-assumption — run the backtest both ways and diff the expectancy.
+- `TARGET_MODE = "ATR"` (default): stop at 3×ATR, ladder 1R / 2R / 3.5R.
+- `TARGET_MODE = "FIXED"`: the legacy $25 / $25 / $50 / $100 ladder, kept
+  so the two can be compared on identical candles.
 
-Max spread accepted per signal: $1.50 (~6% of a $25 stop).
+3× is where two opposing forces balance, measured against a
+volatility-realistic series (M15 ATR ≈ $3.5):
+
+| stop | in $ | spread as %R | resolves ≤1 day | median bars |
+|---|---|---|---|---|
+| 1.5×ATR | 5.24 | 14.3% | 100% | 5 |
+| **3.0×ATR** | **10.47** | **7.2%** | **97%** | **17** |
+| 8.0×ATR | 27.92 | 2.7% | 60% | 71 |
+
+The old fixed $25 stop was that last row: ~7×ATR, a median of ~18 hours to
+resolve, and only 60% resolving inside a day. While one sat open it
+blocked every later setup — that, not the score thresholds, was what made
+the bot feel silent.
+
+**Entry.** On a limit `ENTRY_PULLBACK_ATR` (0.5) better than the trigger
+bar's close, never at the close itself. This corrects a structural
+anti-edge rather than refining one — see below.
+
+**Alert cadence.** Thresholds are derived from a target delivered rate by
+`tools/tune_thresholds.py`, not chosen by hand: WATCH ≥ 45, A+ ≥ 52,
+giving ~2.9 A+ and ~8.5 WATCH per week (~11/week, a 25/75 split). They
+must be re-derived whenever the score budget or entry logic changes.
+
+## What the no-edge control test found
+
+The most useful result here came from running the strategy against a
+**driftless** series — same volatility, trend structure removed — where
+no entry can beat 50% because there is no directional information to
+find. Anything that deviates from 50% is geometry, not skill.
+
+Two things showed up that no amount of backtesting on trending data would
+have separated from noise:
+
+**1. The entry was on the wrong side of the bar.** A symmetric ±1R
+barrier race from each signal:
+
+```
+random bars, random direction        50.2%   ← correct baseline
+strategy entries, own direction      43.7%
+strategy entries, direction FLIPPED  56.3%
+```
+
+A BUY triggers on a bar that hooked up off its low, so that bar's close
+sits near its high — entering there starts every trade nearer its stop
+than its target. Waiting for a 0.5 ATR pullback restores 50.2% exactly,
+at the cost of fill rate (72% vs 95%). An unfilled setup costs nothing; a
+structurally disadvantaged fill costs on every one taken.
+
+**2. The exit ladder needs a real edge to break even.** With 50/30/20
+partial exits and a move to breakeven after TP1, the typical winner banks
+≈ +0.68R while the typical loser costs −1.00R:
+
+```
+BREAKEVEN WIN RATE REQUIRED = 59%
+```
+
+That is the bar any genuine signal has to clear. It is a property of the
+exit design, not of any dataset, and it is why *expectancy* — not TP1 hit
+rate — is the number that decides whether this is worth trading.
 
 ## Validation status
 
 **This is a rule-based prototype, not a validated strategy.** The
-repository contains the machinery to measure an edge; it does not contain
-a demonstrated one, and nothing here should be read as a win-rate or
-profitability claim. Specifically:
+repository contains the machinery to measure an edge and, as of the
+control test above, evidence about its *structure*. It does not contain a
+demonstrated edge, and nothing here is a profitability claim.
 
-- The backtester needs an external historical candle CSV; no large-sample
-  result is committed here.
-- The score thresholds (45 / 70) are structural defaults. Whether a score
-  of X corresponds to any particular expectancy is an open empirical
-  question — `tools/calibrate_scores.py` is what answers it.
-- The two detectors share a score axis. Whether they share a *meaning* is
-  measured, not assumed.
+- No real market data has been run through it. All numbers above come
+  from `tools/make_synthetic_gold.py`, which reproduces gold's
+  volatility, session profile and trend/range alternation but carries no
+  genuine predictive structure.
+- Results on the trending synthetic series look positive. **Ignore them.**
+  That generator has trend regimes built in, and a trend-aware strategy
+  will rediscover them; it is measuring the generator, not the market.
+  The driftless control is the honest read, and there the strategy is
+  negative — as anything must be on data with no edge.
+- The thresholds set cadence, not quality. Whether a score of X predicts
+  anything is untested; `tools/calibrate_scores.py` is what answers it,
+  and only on real history.
+
+What synthetic data *can* settle is structure: stop sizing relative to
+noise, how fast trades resolve, alert cadence, and the two control-test
+findings above. Those transfer. Expectancy does not.
 
 ### Backtesting
 
