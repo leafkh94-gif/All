@@ -112,7 +112,13 @@ def aggregate_htf(m15_candles, factor):
 # Handles fill delay + spread cost + partial exits.
 # ─────────────────────────────────────────────────────────────────────
 _ENTRY_EXPIRY_BARS = 6           # 90 min pending-order cap
-_HOLD_EXPIRY_BARS = 4 * 96       # up to 4 days of M15
+_HOLD_EXPIRY_BARS = 96           # one trading day of M15.
+                                 # Was 4*96. On realistic volatility a 3xATR
+                                 # trade resolves in ~17 bars at the median and
+                                 # 97% resolve inside one day, so a 4-day window
+                                 # bought almost no extra resolution while
+                                 # holding the one-position gate shut for days.
+                                 # A scalp that hasn't resolved in a day is dead.
 
 
 def _r_at(price, entry, risk, is_buy):
@@ -241,8 +247,14 @@ class BacktestRun:
     former hides how often the strategy was actually right.
     """
 
-    def __init__(self, candles, mode=None, m5=None, m1=None, target_mode=None):
+    def __init__(self, candles, mode=None, m5=None, m1=None, target_mode=None,
+                 record_all=False):
         self.candles = candles
+        # record_all keeps candidates that scored below WATCH too. The
+        # normal log is censored at WATCH_MIN_SCORE, which makes it
+        # useless for asking "what would a LOWER threshold deliver?" --
+        # exactly the question tools/tune_thresholds.py has to answer.
+        self.record_all = record_all
         self.mode = mode or modes.STANDARD
         self.target_mode = target_mode or cfg.TARGET_MODE
 
@@ -338,7 +350,13 @@ class BacktestRun:
 
         scored = strat.score_candidate(
             "XAUUSD", "COMMODITY", candidate, market, now, None)
-        if not scored or scored["tier"] == "NONE":
+        if not scored:
+            return
+        if scored["tier"] == "NONE":
+            if self.record_all:
+                # Simulated, but never tradeable and never occupies the
+                # position gate -- it is distribution data, not an alert.
+                self._record("NONE", scored, i, market, suppressed="below_threshold")
             return
 
         # From here on the setup IS an opportunity: it cleared the score
@@ -430,9 +448,11 @@ class BacktestRun:
         self.signals.append(row)
 
 
-def run_backtest(candles, mode=None, m5=None, m1=None, target_mode=None):
+def run_backtest(candles, mode=None, m5=None, m1=None, target_mode=None,
+                 record_all=False):
     """Walk every bar, emit signals through the live pipeline."""
-    run = BacktestRun(candles, mode=mode, m5=m5, m1=m1, target_mode=target_mode)
+    run = BacktestRun(candles, mode=mode, m5=m5, m1=m1, target_mode=target_mode,
+                      record_all=record_all)
     warmup = max(
         cfg.GT_ZLSMA_PERIOD * 2 + cfg.GT_ZLSMA_SLOPE_LOOKBACK + 5,
         16 * 30,   # need ≥30 H4 bars for the H4 regime read
@@ -508,11 +528,19 @@ def _rate_block(name, subset, span_days):
 
 
 def print_summary(signals, candles=None, target_mode=None):
+    # Sub-threshold rows (only present with --record-all) are distribution
+    # data for tools/tune_thresholds.py, never alerts. Counting them as
+    # "opportunities" would silently inflate every rate in this report.
+    below = [s for s in signals if s.get("suppressed_reason") == "below_threshold"]
+    signals = [s for s in signals if s.get("suppressed_reason") != "below_threshold"]
     tradeable = [s for s in signals if s.get("tradeable", True)]
     suppressed = [s for s in signals if not s.get("tradeable", True)]
 
     print(f"\nTarget mode: {target_mode or cfg.TARGET_MODE}")
     print(f"Total opportunities recorded: {len(signals)}")
+    if below:
+        print(f"(+{len(below)} sub-threshold candidates logged for threshold "
+              f"tuning; excluded from every rate below)")
     if not signals:
         return
     print(f"Span: {signals[0]['t']} → {signals[-1]['t']}")
@@ -629,6 +657,10 @@ def main():
     parser.add_argument("--target-mode", choices=["FIXED", "ATR"], default=None,
                         help="Override cfg.TARGET_MODE. Run both and compare "
                              "before concluding the fixed $25 ladder is right.")
+    parser.add_argument("--record-all", action="store_true",
+                        help="Also log candidates scoring below WATCH. Needed by\n"
+                             "tools/tune_thresholds.py, which cannot reason about\n"
+                             "lower thresholds from a log censored at the current one.")
     parser.add_argument("--json", help="Optional per-signal log JSON path")
     args = parser.parse_args()
 
@@ -646,7 +678,8 @@ def main():
         print(f"Loaded {len(m1)} M1 candles from {args.m1}")
 
     target_mode = args.target_mode or cfg.TARGET_MODE
-    signals = run_backtest(candles, m5=m5, m1=m1, target_mode=target_mode)
+    signals = run_backtest(candles, m5=m5, m1=m1, target_mode=target_mode,
+                           record_all=args.record_all)
     print_summary(signals, candles=candles, target_mode=target_mode)
     if args.json:
         with open(args.json, "w") as f:

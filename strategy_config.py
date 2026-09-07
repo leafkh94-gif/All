@@ -20,49 +20,72 @@ ACTIVE_INSTRUMENTS = ["XAUUSD"]
 SCAN_INTERVAL_MINUTES = 15
 
 # ─────────────────────────────────────────────────────────────────────
-# 1.2b  Small-scalp fixed-target mode
+# 1.2b  Target ladder
 # ─────────────────────────────────────────────────────────────────────
-# TARGET_MODE = "FIXED" bypasses golden_trio's structural stop/TP logic and
-# uses fixed point offsets instead. TARGET_MODE = "STRUCTURAL" (or anything
-# else) keeps the original Turtle-band-derived targets.
+# TARGET_MODE selects how stop/TP distances are built:
+#   "ATR"        (default) — distances scale with current M15 volatility
+#   "FIXED"      — fixed dollar distances, retained for comparison
+#   "STRUCTURAL" — Turtle-band-derived (golden_trio only)
 #
-# Cost-aware calibration for gold on M15:
-#   POINT_VALUE = 1.0 means 1 pt = $1 of price. Simpler mental model than
-#   the previous 0.1 mapping.
-#   SL = $25 -- roughly 3-8x M15 gold ATR, wide enough that random wiggle
-#   inside a real setup doesn't hit the stop.
-#   TP1 = $25 (1R), TP2 = $50 (2R), TP3 = $100 (4R). Three genuinely
-#   distinct tiers; TP3 is no longer collapsed onto TP2.
-#   MAX_SPREAD $1.50 = 6% of the $25 stop, versus the old 25% ratio that
-#   ate any edge before the trade even played out.
-TARGET_MODE = "FIXED"
+# WHY ATR IS THE DEFAULT
+# ──────────────────────
+# The previous default was a fixed $25 stop with $25/$50/$100 targets.
+# Measured against a volatility-realistic gold series (M15 ATR ~$3.5,
+# daily range ~1.45% of spot — see tools/make_synthetic_gold.py), that
+# ladder is:
+#
+#   $25 stop  ≈ 7x M15 ATR    median 71 bars (~18h) to resolve;
+#                             only 60% resolve inside one trading day
+#   $100 TP3  ≈ 29x M15 ATR   effectively unreachable on M15
+#
+# A stop that takes most of a day to resolve is not a scalp, and while it
+# sits open it blocks every later setup — which is what made the bot feel
+# silent. The fixed ladder is not deleted, just no longer the default, so
+# the two remain comparable on identical candles via
+# `backtest.py --target-mode FIXED`.
+#
+# HOW ATR_SL_MULT WAS CHOSEN
+# ──────────────────────────
+# Two forces pull opposite ways; 3.0x is where they balance:
+#
+#   xATR  stop$   spread as %R   resolve <=1 day   median bars
+#   1.5    5.24      14.3%            100%              5
+#   2.0    6.98      10.7%            100%              9
+#   3.0   10.47       7.2%             97%             17   <- chosen
+#   4.0   13.96       5.4%             92%             28
+#   8.0   27.92       2.7%             60%             71   <- the old $25
+#
+# Tighter than 3x and the spread eats a punishing share of every trade
+# (gold's spread is large relative to M15 noise). Wider and trades stop
+# resolving inside a session. 3.0x costs ~7% of R in spread at the
+# realistic spread and resolves in ~4 hours at the median.
+TARGET_MODE = "ATR"
 POINT_VALUE = 1.0
+
+# ATR ladder. Within a one-day hold on realistic volatility, price reaches
+# 1R 97% of the time, 2R 75%, 3.5R 42%. The old $100 TP3 essentially never
+# printed, which is why TP2/TP3 hit rates read 0% in earlier runs.
+ATR_SL_MULT = 3.0
+ATR_TP1_R = 1.0
+ATR_TP2_R = 2.0
+ATR_TP3_R = 3.5
+# Bound the stop so a dead tape can't put it inside the spread and a news
+# spike can't produce an absurd distance. At the p10/p90 of realistic M15
+# ATR ($2.2/$5.4) the raw 3x stop is $6.6/$16.2, so these bite only in
+# genuine extremes.
+ATR_SL_MIN_POINTS = 7.0
+ATR_SL_MAX_POINTS = 20.0
+ATR_TARGET_PERIOD = 14
+
+# Legacy fixed ladder — kept so --target-mode FIXED still works.
 FIXED_SL_POINTS = 25
 FIXED_TP1_POINTS = 25
 FIXED_TP2_POINTS = 50
 FIXED_TP3_POINTS = 100
-MAX_SPREAD_POINTS = 1.5
 
-# TARGET_MODE = "ATR" sizes the same 1R / 2R / 4R ladder off current M15
-# ATR instead of a fixed dollar distance. The point of having both is to
-# be able to *test* them against each other on identical candles rather
-# than assume $25 is the right stop in every volatility regime:
-#
-#     python backtest.py --candles X.csv --target-mode FIXED
-#     python backtest.py --candles X.csv --target-mode ATR
-#
-# ATR_SL_MULT is chosen so that at typical M15 gold ATR (~$3) the stop
-# lands near the $25 the fixed mode uses -- the two modes are then
-# comparable at median volatility and diverge only in the tails, which is
-# exactly the behaviour under test. ATR_SL_MIN/MAX_POINTS bound the stop
-# so a news-spike ATR can't produce an absurd distance.
-ATR_SL_MULT = 8.0
-ATR_TP1_R = 1.0
-ATR_TP2_R = 2.0
-ATR_TP3_R = 4.0
-ATR_SL_MIN_POINTS = 12.0
-ATR_SL_MAX_POINTS = 45.0
-ATR_TARGET_PERIOD = 14
+# Was 1.5, which was 6% of a $25 stop but is 14% of the ~$10.5 ATR stop.
+# 1.0 keeps the worst accepted spread under ~10% of risk.
+MAX_SPREAD_POINTS = 1.0
 
 # ─────────────────────────────────────────────────────────────────────
 # 1.3  Round-number levels (gold trades in 50-dollar increments; 3 pts proximity)
