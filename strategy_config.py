@@ -20,49 +20,104 @@ ACTIVE_INSTRUMENTS = ["XAUUSD"]
 SCAN_INTERVAL_MINUTES = 15
 
 # ─────────────────────────────────────────────────────────────────────
-# 1.2b  Small-scalp fixed-target mode
+# 1.2b  Target ladder
 # ─────────────────────────────────────────────────────────────────────
-# TARGET_MODE = "FIXED" bypasses golden_trio's structural stop/TP logic and
-# uses fixed point offsets instead. TARGET_MODE = "STRUCTURAL" (or anything
-# else) keeps the original Turtle-band-derived targets.
+# TARGET_MODE selects how stop/TP distances are built:
+#   "ATR"        (default) — distances scale with current M15 volatility
+#   "FIXED"      — fixed dollar distances, retained for comparison
+#   "STRUCTURAL" — Turtle-band-derived (golden_trio only)
 #
-# Cost-aware calibration for gold on M15:
-#   POINT_VALUE = 1.0 means 1 pt = $1 of price. Simpler mental model than
-#   the previous 0.1 mapping.
-#   SL = $25 -- roughly 3-8x M15 gold ATR, wide enough that random wiggle
-#   inside a real setup doesn't hit the stop.
-#   TP1 = $25 (1R), TP2 = $50 (2R), TP3 = $100 (4R). Three genuinely
-#   distinct tiers; TP3 is no longer collapsed onto TP2.
-#   MAX_SPREAD $1.50 = 6% of the $25 stop, versus the old 25% ratio that
-#   ate any edge before the trade even played out.
-TARGET_MODE = "FIXED"
+# WHY ATR IS THE DEFAULT
+# ──────────────────────
+# The previous default was a fixed $25 stop with $25/$50/$100 targets.
+# Measured against a volatility-realistic gold series (M15 ATR ~$3.5,
+# daily range ~1.45% of spot — see tools/make_synthetic_gold.py), that
+# ladder is:
+#
+#   $25 stop  ≈ 7x M15 ATR    median 71 bars (~18h) to resolve;
+#                             only 60% resolve inside one trading day
+#   $100 TP3  ≈ 29x M15 ATR   effectively unreachable on M15
+#
+# A stop that takes most of a day to resolve is not a scalp, and while it
+# sits open it blocks every later setup — which is what made the bot feel
+# silent. The fixed ladder is not deleted, just no longer the default, so
+# the two remain comparable on identical candles via
+# `backtest.py --target-mode FIXED`.
+#
+# HOW ATR_SL_MULT WAS CHOSEN
+# ──────────────────────────
+# Two forces pull opposite ways; 3.0x is where they balance:
+#
+#   xATR  stop$   spread as %R   resolve <=1 day   median bars
+#   1.5    5.24      14.3%            100%              5
+#   2.0    6.98      10.7%            100%              9
+#   3.0   10.47       7.2%             97%             17   <- chosen
+#   4.0   13.96       5.4%             92%             28
+#   8.0   27.92       2.7%             60%             71   <- the old $25
+#
+# Tighter than 3x and the spread eats a punishing share of every trade
+# (gold's spread is large relative to M15 noise). Wider and trades stop
+# resolving inside a session. 3.0x costs ~7% of R in spread at the
+# realistic spread and resolves in ~4 hours at the median.
+TARGET_MODE = "ATR"
 POINT_VALUE = 1.0
+
+# ATR ladder. Within a one-day hold on realistic volatility, price reaches
+# 1R 97% of the time, 2R 75%, 3.5R 42%. The old $100 TP3 essentially never
+# printed, which is why TP2/TP3 hit rates read 0% in earlier runs.
+ATR_SL_MULT = 3.0
+ATR_TP1_R = 1.0
+ATR_TP2_R = 2.0
+ATR_TP3_R = 3.5
+# Bound the stop so a dead tape can't put it inside the spread and a news
+# spike can't produce an absurd distance. At the p10/p90 of realistic M15
+# ATR ($2.2/$5.4) the raw 3x stop is $6.6/$16.2, so these bite only in
+# genuine extremes.
+ATR_SL_MIN_POINTS = 7.0
+ATR_SL_MAX_POINTS = 20.0
+ATR_TARGET_PERIOD = 14
+
+# ENTRY PLACEMENT
+# ───────────────
+# Enter on a limit a fraction of an ATR BETTER than the trigger bar's
+# close, rather than at the close itself.
+#
+# This is not a refinement, it corrects a structural anti-edge. Measured
+# on a driftless series -- data containing no directional information at
+# all, where any entry must score 50% -- the symmetric +/-1R barrier race
+# from each Golden Trio signal came out:
+#
+#   entry price                        filled   win%
+#   close of the trigger bar             95%    41.6%   <- was
+#   midpoint of the trigger bar          88%    45.2%
+#   trigger bar extreme (low/high)       63%    46.4%
+#   0.5 ATR better than the close        72%    50.2%   <- chosen
+#
+# The cause is positional, not predictive. A BUY triggers on a bar that
+# hooked up off its low, so its close sits near that bar's high: the
+# entry is taken at the top of the move that produced the signal. That
+# starts the trade closer to its stop than to its target in practice, and
+# it cost about 8 points of win rate before any market edge was involved.
+#
+# Requiring a small pullback removes the bias exactly (50.2% vs a 50.0%
+# baseline). The price is fill rate: 72% instead of 95%, so roughly a
+# quarter of setups never fill. That is the right trade -- an unfilled
+# setup costs nothing, while a structurally disadvantaged fill costs real
+# money on every one taken.
+#
+# Because this was measured where no edge can exist, it is a property of
+# the geometry, not a pattern fitted to a particular price path.
+ENTRY_PULLBACK_ATR = 0.5
+
+# Legacy fixed ladder — kept so --target-mode FIXED still works.
 FIXED_SL_POINTS = 25
 FIXED_TP1_POINTS = 25
 FIXED_TP2_POINTS = 50
 FIXED_TP3_POINTS = 100
-MAX_SPREAD_POINTS = 1.5
 
-# TARGET_MODE = "ATR" sizes the same 1R / 2R / 4R ladder off current M15
-# ATR instead of a fixed dollar distance. The point of having both is to
-# be able to *test* them against each other on identical candles rather
-# than assume $25 is the right stop in every volatility regime:
-#
-#     python backtest.py --candles X.csv --target-mode FIXED
-#     python backtest.py --candles X.csv --target-mode ATR
-#
-# ATR_SL_MULT is chosen so that at typical M15 gold ATR (~$3) the stop
-# lands near the $25 the fixed mode uses -- the two modes are then
-# comparable at median volatility and diverge only in the tails, which is
-# exactly the behaviour under test. ATR_SL_MIN/MAX_POINTS bound the stop
-# so a news-spike ATR can't produce an absurd distance.
-ATR_SL_MULT = 8.0
-ATR_TP1_R = 1.0
-ATR_TP2_R = 2.0
-ATR_TP3_R = 4.0
-ATR_SL_MIN_POINTS = 12.0
-ATR_SL_MAX_POINTS = 45.0
-ATR_TARGET_PERIOD = 14
+# Was 1.5, which was 6% of a $25 stop but is 14% of the ~$10.5 ATR stop.
+# 1.0 keeps the worst accepted spread under ~10% of risk.
+MAX_SPREAD_POINTS = 1.0
 
 # ─────────────────────────────────────────────────────────────────────
 # 1.3  Round-number levels (gold trades in 50-dollar increments; 3 pts proximity)
@@ -77,16 +132,34 @@ ROUND_NUMBER_OFFSET_TABLE = {
 # component has to earn its points, so these thresholds mean "actual signal
 # quality" instead of "cleared the artificial floor".
 # ─────────────────────────────────────────────────────────────────────
-# Killzone bonus removed (SCORE_KILLZONE_MAX=0 below) — it concentrated
-# alerts into 13:00–16:00 UTC by adding 10 pts during the London/NY
-# overlap and 0 outside it, so Asian/early-European setups needed 10
-# extra "real" points to reach WATCH. With that gone, WATCH threshold
-# dropped 55 → 45 so a real setup (RSI hook + Turtle proximity +
-# ZLSMA aligned ≈ 50 pts even before H4) qualifies in every session.
+# Thresholds are DERIVED, not guessed. They come from
+# tools/tune_thresholds.py against a volatility-realistic series, by
+# targeting a delivered alert cadence rather than picking a number that
+# "feels" selective.
+#
+# The previous A+ = 70 fired on 4 of 573 signals (0.7%) against a
+# practical score ceiling of 76 — silent. It had been carried unchanged
+# through a scoring rewrite that changed what the score means, which is
+# how a threshold quietly stops matching its own distribution.
+#
+# Measured delivered rates, after the cooldown and one-position gates
+# (exact: these split alerts that genuinely fired):
+#
+#   A+ line   A+/wk   WATCH/wk   split        A+ line   A+/wk   WATCH/wk
+#      48      6.7       4.8     58% A+          53       2.4      9.0
+#      50      4.6       6.9     40% A+          55       1.2     10.2
+#      52      2.9       8.5     25% A+  <-      70       0.1     11.3  <- old
+#
+# 52 puts A+ at roughly one every two to three days and WATCH at ~1.7 a
+# day: about 11 alerts a week, split 25/75. Selective without going quiet.
+#
+# These must be re-derived whenever the score budget or the entry logic
+# changes -- the entry-pullback fix alone moved the A+ share at a fixed
+# line from 26% to 11%, because it changed which setups fill.
 NO_ALERT_MAX = 44
 WATCH_MIN_SCORE = 45
-WATCH_MAX_SCORE = 69
-APLUS_MIN_SCORE = 70
+WATCH_MAX_SCORE = 51
+APLUS_MIN_SCORE = 52
 
 # ─────────────────────────────────────────────────────────────────────
 # Score budget.
