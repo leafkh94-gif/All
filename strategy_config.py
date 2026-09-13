@@ -132,34 +132,39 @@ ROUND_NUMBER_OFFSET_TABLE = {
 # component has to earn its points, so these thresholds mean "actual signal
 # quality" instead of "cleared the artificial floor".
 # ─────────────────────────────────────────────────────────────────────
-# Thresholds are DERIVED, not guessed. They come from
-# tools/tune_thresholds.py against a volatility-realistic series, by
-# targeting a delivered alert cadence rather than picking a number that
-# "feels" selective.
+# Thresholds are DERIVED from REAL data as of the first live-history run
+# (13,000 M15 XAUUSD bars, 2026-03-04 → 2026-09-11, ATR mode).
 #
-# The previous A+ = 70 fired on 4 of 573 signals (0.7%) against a
-# practical score ceiling of 76 — silent. It had been carried unchanged
-# through a scoring rewrite that changed what the score means, which is
-# how a threshold quietly stops matching its own distribution.
+# Realized expectancy by score band, realistic cost:
 #
-# Measured delivered rates, after the cooldown and one-position gates
-# (exact: these split alerts that genuinely fired):
+#   45-49  n=653  wr=45%  -0.12R  pf=0.78     <- loses
+#   50-54  n=423  wr=48%  -0.04R  pf=0.93     <- loses
+#   55-59  n=294  wr=56%  +0.10R  pf=1.22
+#   60-64  n=171  wr=53%  +0.00R  pf=1.01
+#   65-69  n=78   wr=54%  +0.04R  pf=1.09
+#   70-74  n=24   wr=50%  +0.09R  pf=1.19
 #
-#   A+ line   A+/wk   WATCH/wk   split        A+ line   A+/wk   WATCH/wk
-#      48      6.7       4.8     58% A+          53       2.4      9.0
-#      50      4.6       6.9     40% A+          55       1.2     10.2
-#      52      2.9       8.5     25% A+  <-      70       0.1     11.3  <- old
+# Bucketed and split walk-forward, the 55 line is the one real finding:
 #
-# 52 puts A+ at roughly one every two to three days and WATCH at ~1.7 a
-# day: about 11 alerts a week, split 25/75. Selective without going quiet.
+#            45-54            55-64
+#   in-sample   -0.075R        +0.032R
+#   out-of-sample -0.111R      +0.147R
 #
-# These must be re-derived whenever the score budget or the entry logic
-# changes -- the entry-pullback fix alone moved the A+ share at a fixed
-# line from 26% to 11%, because it changed which setups fill.
-NO_ALERT_MAX = 44
-WATCH_MIN_SCORE = 45
-WATCH_MAX_SCORE = 51
-APLUS_MIN_SCORE = 52
+# Everything below 55 lost money in BOTH independent halves; 55-64 made
+# money in both. WATCH_MIN_SCORE moves 45 -> 55 on that evidence. It is
+# the single largest lever found so far: it removes 1,076 of 1,644
+# filled trades averaging -0.087R.
+#
+# HONEST LIMIT: above 55 the score STOPS discriminating. 55-64 (+0.062R)
+# and 65-74 (+0.055R) are indistinguishable, and the calibration verdict
+# on the full sample is NOT MONOTONIC. So A+ is NOT a demonstrated
+# higher-quality tier -- it is only a rarer one. A+ at 65 is a cadence
+# choice, not a quality claim. Do not present A+ to a user as
+# statistically stronger than WATCH until a run shows it is.
+NO_ALERT_MAX = 54
+WATCH_MIN_SCORE = 55
+WATCH_MAX_SCORE = 64
+APLUS_MIN_SCORE = 65
 
 # ─────────────────────────────────────────────────────────────────────
 # Score budget.
@@ -216,15 +221,30 @@ SCORE_H4_ALIGNED = SCORE_H4_MAX
 SCORE_H4_FLAT = 0
 SCORE_H4_OPPOSED = -SCORE_H4_MAX
 
-SCORE_KILLZONE_MAX = 0          # was 10; the bonus concentrated alerts
-                                # into the London/NY overlap and left the
-                                # rest of the day artificially short of
-                                # threshold. Gold trades 24/5 -- alerts
-                                # should reflect actual setup quality,
-                                # not what time it is.
+# Re-enabled at 8 (was zeroed on the reasoning that "gold trades 24/5,
+# so alerts should reflect setup quality not the clock"). Real data says
+# that reasoning was wrong -- the clock carries information:
+#
+#   asian   (00-07)  n=521  wr=44%  -0.11R  pf=0.81
+#   london  (07-13)  n=450  wr=55%  +0.06R  pf=1.14
+#   overlap (13-16)  n=260  wr=49%  -0.06R  pf=0.88
+#   ny      (16-21)  n=296  wr=50%  -0.02R  pf=0.96
+#
+# The Asian session is the worst block in the sample by a clear margin,
+# on the largest n. Thin liquidity is a plausible mechanism, not just a
+# fitted artifact. The KILLZONES table gives Asian 2 and London/NY 12,
+# so a cap of 8 creates a ~6-point handicap for Asian setups: they must
+# bring more non-session evidence to clear the bar.
+SCORE_KILLZONE_MAX = 8
 
 # C. Context.
-SCORE_ROUND_NUMBER = 5
+# Measured marginal expectancy on real data: signals WITH the
+# round-number bonus averaged -0.091R, those without -0.024R
+# (Δ = -0.066R, n=278). The bonus was rewarding the wrong thing --
+# price at a round number is where gold stalls, not where it runs.
+# Zeroed rather than inverted: a negative would be fitting a sign to
+# one sample.
+SCORE_ROUND_NUMBER = 0
 SCORE_ATR_SWEET_SPOT_PENALTY = -10
 SCORE_CHOP_PENALTY = -10        # recent range is compressed (chop regime)
 
@@ -284,7 +304,11 @@ INSTRUMENT_PROFILES = {
 WATCH_EXPIRY_HOURS = 4
 WATCH_UPDATE_INTERVAL_MINUTES = 45
 WATCH_UPGRADE_SCORE = APLUS_MIN_SCORE
-WATCH_COLLAPSE_SCORE = 45
+# Must track the WATCH floor, not a literal. It was left at 45 when
+# WATCH_MIN_SCORE moved to 55, which left a dead band: a re-score of
+# 45-54 was no longer WATCH-worthy but did not collapse the tracker
+# either, so a stale WATCH would sit active below its own threshold.
+WATCH_COLLAPSE_SCORE = WATCH_MIN_SCORE
 
 # ─────────────────────────────────────────────────────────────────────
 # 4.  Health check
@@ -306,8 +330,19 @@ ECON_CALENDAR_RELEVANT_CURRENCIES = {"USD"}   # gold correlates dominantly with 
 ATR_LOOKBACK_BARS = 100
 ATR_LOW_PERCENTILE = 10
 ATR_HIGH_PERCENTILE = 80
+# Dead market is the strongest single negative found on real data:
+# signals in it averaged -0.424R against -0.013R for everything else
+# (Δ = -0.411R, n=91). A -10 point penalty was nowhere near enough to
+# keep them out. Promoted to a hard veto -- when ATR sits below the 10th
+# percentile of its own recent range there is no follow-through to trade,
+# and that is a mechanical claim, not a fitted one.
 ATR_DEAD_MARKET_PENALTY = -10
-ATR_TOO_VOLATILE_PENALTY = -10
+ATR_DEAD_MARKET_VETO = True
+# Measured: signals tagged too_volatile averaged +0.022R vs -0.044R for
+# the rest (Δ = +0.066R, n=220). High ATR is where this strategy does
+# BETTER, not worse -- a stop sized in ATR already adapts, so penalising
+# the regime double-counted. Zeroed.
+ATR_TOO_VOLATILE_PENALTY = 0
 
 # ─────────────────────────────────────────────────────────────────────
 # 6.  Entry expiry (pending-order age cap; ActiveEntryTracker)
