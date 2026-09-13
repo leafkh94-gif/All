@@ -70,31 +70,214 @@ and a timeframe whose candles are unavailable both contribute exactly 0.
 That is what lets an M15-only backtest and a full-MTF live run sit on the
 same score scale instead of differing by a constant offset.
 
-**Targets.** Two selectable ladders, both 1R / 2R / 4R:
-- `TARGET_MODE = "FIXED"` (default): $25 stop, $25 TP1, $50 TP2, $100 TP3.
-- `TARGET_MODE = "ATR"`: the same ladder sized off M15 ATR, clamped to
-  $12–$45.
+**Targets.** Sized in ATR, because gold's volatility varies far more than
+a fixed dollar distance can absorb:
 
-They exist as a matched pair so the question "is a fixed $25 stop right
-across every volatility regime?" can be settled by comparison rather than
-assumption — run the backtest both ways and diff the expectancy.
+- `TARGET_MODE = "ATR"` (default): stop at 3×ATR, ladder 1R / 2R / 3.5R.
+- `TARGET_MODE = "FIXED"`: the legacy $25 / $25 / $50 / $100 ladder, kept
+  so the two can be compared on identical candles.
 
-Max spread accepted per signal: $1.50 (~6% of a $25 stop).
+3× is where two opposing forces balance, measured against a
+volatility-realistic series (M15 ATR ≈ $3.5):
 
-## Validation status
+| stop | in $ | spread as %R | resolves ≤1 day | median bars |
+|---|---|---|---|---|
+| 1.5×ATR | 5.24 | 14.3% | 100% | 5 |
+| **3.0×ATR** | **10.47** | **7.2%** | **97%** | **17** |
+| 8.0×ATR | 27.92 | 2.7% | 60% | 71 |
+
+The old fixed $25 stop was that last row: ~7×ATR, a median of ~18 hours to
+resolve, and only 60% resolving inside a day. While one sat open it
+blocked every later setup — that, not the score thresholds, was what made
+the bot feel silent.
+
+**Entry.** On a limit `ENTRY_PULLBACK_ATR` (0.5) better than the trigger
+bar's close, never at the close itself. This corrects a structural
+anti-edge rather than refining one — see below.
+
+**Alert cadence.** Thresholds are derived from a target delivered rate by
+`tools/tune_thresholds.py`, not chosen by hand: WATCH ≥ 45, A+ ≥ 52,
+giving ~2.9 A+ and ~8.5 WATCH per week (~11/week, a 25/75 split). They
+must be re-derived whenever the score budget or entry logic changes.
+
+## What the no-edge control test found
+
+The most useful result here came from running the strategy against a
+**driftless** series — same volatility, trend structure removed — where
+no entry can beat 50% because there is no directional information to
+find. Anything that deviates from 50% is geometry, not skill.
+
+Two things showed up that no amount of backtesting on trending data would
+have separated from noise:
+
+**1. The entry was on the wrong side of the bar.** A symmetric ±1R
+barrier race from each signal:
+
+```
+random bars, random direction        50.2%   ← correct baseline
+strategy entries, own direction      43.7%
+strategy entries, direction FLIPPED  56.3%
+```
+
+A BUY triggers on a bar that hooked up off its low, so that bar's close
+sits near its high — entering there starts every trade nearer its stop
+than its target. Waiting for a 0.5 ATR pullback restores 50.2% exactly,
+at the cost of fill rate (72% vs 95%). An unfilled setup costs nothing; a
+structurally disadvantaged fill costs on every one taken.
+
+**2. The exit ladder needs a real edge to break even.** With 50/30/20
+partial exits and a move to breakeven after TP1, the typical winner banks
+≈ +0.68R while the typical loser costs −1.00R:
+
+```
+BREAKEVEN WIN RATE REQUIRED = 59%
+```
+
+That is the bar any genuine signal has to clear. It is a property of the
+exit design, not of any dataset, and it is why *expectancy* — not TP1 hit
+rate — is the number that decides whether this is worth trading.
+
+## Real-data results (52 weeks, XAUUSD M15)
+
+Two runs of the backtest workflow against live Capital.com history. The
+second is the one that matters: 25,000 M15 bars, 2025-08-29 → 2026-09-11,
+ATR mode, on the recalibrated config.
+
+```
+n=2039 filled   53% WR   +0.039R ±0.046   pf 1.08   (+80.1R total)
+
+ideal spread        +0.08R   pf 1.17
+realistic ($0.75)   +0.04R   pf 1.08
+conservative ($1.50) +0.00R  pf 1.00
+```
+
+**Read that as approximately breakeven, not as profitable.** Three
+reasons, all visible in the same run:
+
+1. **±0.046 on a +0.039R mean is 0.85 sigma.** Not distinguishable from
+   zero. It is not a result, it is a direction.
+2. **At the conservative spread it is exactly 0.00R.** The whole apparent
+   edge is smaller than the difference between two plausible spread
+   assumptions.
+3. **It is entirely one-directional:**
+   ```
+   BUY   n=1177  56% WR  +0.12R  pf 1.28
+   SELL  n= 862  48% WR  -0.08R  pf 0.85
+   ```
+   Gold trended up across most of this window, so a long bias earns
+   money without any edge being present. Until a run covers a sustained
+   gold *downtrend*, the BUY column cannot be separated from beta.
+
+### What replicated, and what did not
+
+The 26-week run was used to pick the current settings; the 52-week run
+reaches back to Aug 2025, which that choice never saw. Held up:
+
+| finding | 26w | 52w |
+|---|---|---|
+| `h4_confirm` is the strongest component | Δ +0.131R | **Δ +0.208R** |
+| `h4_neutral` / `h4_against` hurt | −0.188 / −0.031 | **−0.237 / −0.116** |
+| Asian session underperforms | Δ −0.065R | **Δ −0.065R** |
+| `round_number` bonus was backwards | Δ −0.066R | **Δ −0.089R** |
+
+Did **not** replicate: `zlsma_flat` measured Δ −0.226R on 26 weeks and
+Δ −0.009R on 52. A fitted finding that evaporated — which is why the
+component table exists.
+
+### The threshold change was curve-fitting, and was reverted
+
+`WATCH_MIN_SCORE` was moved 45 → 55 because the 26-week run showed the
+45-54 band losing money in both of that run's halves. But that run used
+the new threshold, so it contained no sub-threshold signals and could not
+test the change. A 52-week run with `--record-all` could:
+
+```
+           0-44              45-54             55-64
+older     -0.102R ±0.024    +0.053R ±0.049    +0.057R ±0.063
+recent    -0.018R ±0.037    -0.068R ±0.077    +0.005R ±0.098
+```
+
+The 45-54 band was **positive** over the older period — the part the
+choice had never seen — and indistinguishable there from the 55-64 band
+that was kept. It was negative only inside the six-month window used to
+pick 55. **Reverted to 45.** Excluding it discarded ~2,470 signals worth
+roughly +47R on the strength of one sample.
+
+The same table does establish a real floor, just a lower one: **0-44 is
+negative in both halves and 4+ sigma negative in the larger (n=7060)**.
+That is the only threshold finding that has replicated.
+
+### The score barely orders outcomes above 45
+
+Full sample: 45-54 +0.019R, 55-64 +0.042R, 65-74 +0.032R. The
+calibration verdict has been NOT MONOTONIC on every run. A+ (65+) is a
+**cadence tier, not a quality tier**, and must not be presented as
+higher-conviction.
+
+### RETRACTED: "the score works for SMC but not Golden Trio"
+
+An earlier version of this file recommended rebuilding around SMC on the
+strength of this:
+
+```
+                  55-64      65-74
+CHOCH_REVERSAL   +0.022R   +0.228R
+GOLDEN_TRIO      +0.045R   -0.017R
+```
+
+**That recommendation does not hold.** The +0.228R rests on n=97 at
+±0.211 — about 1.1 sigma — and the component marginal flips sign with
+the measured population:
+
+| run | `smc_choch` marginal |
+|---|---|
+| above-threshold signals only | **+0.067R** |
+| all scored candidates | **−0.044R** |
+
+There is no reliable evidence that either detector's score is better
+than the other's. Both are close to noise above 45. Do not rebuild
+around SMC on the basis of this data.
+
+### What replicated across runs
+
+| finding | status |
+|---|---|
+| `0-44` band unprofitable | **replicated**, largest effect in the data |
+| `h4_confirm` strongest component | **replicated** (+0.131 → +0.208 → +0.147R) |
+| `h4_against` / `h4_neutral` hurt | **replicated** |
+| `round_number` bonus backwards | **replicated 3×** (−0.066 / −0.089 / −0.088R) |
+| `WATCH_MIN` 55 better than 45 | **FALSIFIED** — reverted |
+| `zlsma_flat` harmful | **failed** (−0.226R → −0.009R) |
+| Asian session harmful | **ambiguous** (−0.065R → +0.019R, confounded populations) |
+| SMC better than Golden Trio | **flipped sign** (+0.067R → −0.044R) |
+
+Three of the four component changes made after the first real run rest
+on evidence that either failed or is now in doubt. The config records
+which is which.
+
+## Validation status## Validation status
 
 **This is a rule-based prototype, not a validated strategy.** The
-repository contains the machinery to measure an edge; it does not contain
-a demonstrated one, and nothing here should be read as a win-rate or
-profitability claim. Specifically:
+repository contains the machinery to measure an edge and, as of the
+control test above, evidence about its *structure*. It does not contain a
+demonstrated edge, and nothing here is a profitability claim.
 
-- The backtester needs an external historical candle CSV; no large-sample
-  result is committed here.
-- The score thresholds (45 / 70) are structural defaults. Whether a score
-  of X corresponds to any particular expectancy is an open empirical
-  question — `tools/calibrate_scores.py` is what answers it.
-- The two detectors share a score axis. Whether they share a *meaning* is
-  measured, not assumed.
+- No real market data has been run through it. All numbers above come
+  from `tools/make_synthetic_gold.py`, which reproduces gold's
+  volatility, session profile and trend/range alternation but carries no
+  genuine predictive structure.
+- Results on the trending synthetic series look positive. **Ignore them.**
+  That generator has trend regimes built in, and a trend-aware strategy
+  will rediscover them; it is measuring the generator, not the market.
+  The driftless control is the honest read, and there the strategy is
+  negative — as anything must be on data with no edge.
+- The thresholds set cadence, not quality. Whether a score of X predicts
+  anything is untested; `tools/calibrate_scores.py` is what answers it,
+  and only on real history.
+
+What synthetic data *can* settle is structure: stop sizing relative to
+noise, how fast trades resolve, alert cadence, and the two control-test
+findings above. Those transfer. Expectancy does not.
 
 ### Backtesting
 

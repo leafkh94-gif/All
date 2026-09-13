@@ -29,6 +29,12 @@ on:
         default: "FIXED"
         type: choice
         options: ["FIXED", "ATR"]
+      record_all:
+        description: "Log sub-threshold candidates (needed to test the WATCH threshold itself)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
 
 permissions:
   contents: read
@@ -58,6 +64,7 @@ jobs:
             --out bt_out/gold_m15_capital.csv \
             --json bt_out/backtest_result.json \
             --calibrate \
+            ${{ github.event.inputs.record_all == 'true' && '--record-all' || '' }} \
             | tee bt_out/summary.txt
         env:
           CAPITAL_API_KEY:  ${{ secrets.CAPITAL_API_KEY }}

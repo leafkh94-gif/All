@@ -118,6 +118,11 @@ def main():
                          "$25 stop suits every volatility regime.")
     ap.add_argument("--calibrate", action="store_true",
                     help="Also run tools/calibrate_scores.py on the result.")
+    ap.add_argument("--record-all", action="store_true",
+                    help="Log candidates scoring BELOW the WATCH threshold too. "
+                         "Required to test the threshold itself: a normal run "
+                         "contains no sub-threshold signals, so it cannot show "
+                         "whether the excluded band really was unprofitable.")
     args = ap.parse_args()
 
     feed = CapitalFeed()
@@ -143,6 +148,8 @@ def main():
     ]
     if args.target_mode:
         cmd += ["--target-mode", args.target_mode]
+    if args.record_all:
+        cmd += ["--record-all"]
     subprocess.check_call(cmd)
 
     if args.calibrate:

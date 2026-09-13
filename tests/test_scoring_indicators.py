@@ -3,6 +3,7 @@ from unittest.mock import patch
 import pandas as pd
 
 import scoring_indicators as ind
+import strategy_config as cfg
 from strategy import modes
 from tests.helpers import make_candles
 
@@ -74,7 +75,11 @@ def test_atr_sweet_spot_penalty_flags_too_volatile():
     with patch.object(ind, "atr_percentile", return_value=90.0):
         penalty, state = ind.atr_sweet_spot_penalty(df, mode=modes.STANDARD)
     assert state == "too_volatile"
-    assert penalty < 0
+    # The penalty VALUE is a tuned config number (now 0 -- real data showed
+    # high-ATR regimes outperform). What must hold is that the regime is
+    # still detected and reported, so the tag stays available for scoring
+    # and diagnostics whatever the weight becomes.
+    assert penalty == cfg.ATR_TOO_VOLATILE_PENALTY
 
 
 def test_atr_sweet_spot_penalty_defaults_to_standard_mode():
@@ -82,7 +87,7 @@ def test_atr_sweet_spot_penalty_defaults_to_standard_mode():
     with patch.object(ind, "atr_percentile", return_value=82.0):
         penalty, state = ind.atr_sweet_spot_penalty(df)
     assert state == "too_volatile"
-    assert penalty < 0
+    assert penalty == cfg.ATR_TOO_VOLATILE_PENALTY
 
 
 def test_level_store_roundtrip(tmp_path):

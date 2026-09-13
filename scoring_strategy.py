@@ -279,6 +279,13 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     if entry_df is None:
         entry_df = _ensure_df(market["entry"])
     atr_pts, atr_tag = ind.atr_sweet_spot_penalty(entry_df, mode=mode)
+    # Dead market is a veto, not a penalty. On real history, signals in a
+    # dead tape averaged -0.424R against -0.013R for everything else
+    # (n=91). No score penalty small enough to be proportionate was large
+    # enough to keep them out, and there is no follow-through to trade
+    # when ATR sits below the 10th percentile of its own range.
+    if atr_tag == "dead_market" and getattr(cfg, "ATR_DEAD_MARKET_VETO", False):
+        return None
     if atr_pts:
         atr_pts = max(atr_pts, cfg.SCORE_ATR_SWEET_SPOT_PENALTY)
         score += atr_pts

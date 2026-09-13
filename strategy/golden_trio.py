@@ -286,7 +286,13 @@ def find_golden_trio_candidate_diag(candles, target_mode=None):
         zlsma_status = _zlsma_status(zlsma, curr_atr, side)
 
         # Build entry / SL / TPs.
-        entry = curr_close
+        # Enter on a limit a fraction of an ATR better than the trigger
+        # close. Taking the close means buying the top of the bar that
+        # produced the signal, which measured as an ~8-point win-rate
+        # penalty on data with no directional information at all. See
+        # ENTRY_PULLBACK_ATR in strategy_config.
+        entry = curr_close - (1.0 if side == "BUY" else -1.0) * \
+            cfg.ENTRY_PULLBACK_ATR * curr_atr
         if cfg.TARGET_MODE in ("FIXED", "ATR"):
             t = targets.build_targets(entry, side, atr_value=curr_atr,
                                       mode=target_mode or cfg.TARGET_MODE)
