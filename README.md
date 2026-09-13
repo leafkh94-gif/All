@@ -184,39 +184,66 @@ Did **not** replicate: `zlsma_flat` measured Δ −0.226R on 26 weeks and
 Δ −0.009R on 52. A fitted finding that evaporated — which is why the
 component table exists.
 
-### The two findings that change what to build next
+### The threshold change was curve-fitting, and was reverted
 
-**The score stops working above 55.** Buckets 55-64, 65-74 and 75-84
-score +0.042R, +0.032R and +0.036R — flat, and the verdict is NOT
-MONOTONIC on both runs. A+ (n=542, +0.03R) is indistinguishable from
-WATCH (n=1497, +0.04R). **A+ is a rarer tier, not a better one**, and
-must not be presented as higher-conviction.
+`WATCH_MIN_SCORE` was moved 45 → 55 because the 26-week run showed the
+45-54 band losing money in both of that run's halves. But that run used
+the new threshold, so it contained no sub-threshold signals and could not
+test the change. A 52-week run with `--record-all` could:
 
-**The score orders outcomes for SMC but not for Golden Trio:**
+```
+           0-44              45-54             55-64
+older     -0.102R ±0.024    +0.053R ±0.049    +0.057R ±0.063
+recent    -0.018R ±0.037    -0.068R ±0.077    +0.005R ±0.098
+```
+
+The 45-54 band was **positive** over the older period — the part the
+choice had never seen — and indistinguishable there from the 55-64 band
+that was kept. It was negative only inside the six-month window used to
+pick 55. **Reverted to 45.** Excluding it discarded ~2,470 signals worth
+roughly +47R on the strength of one sample.
+
+The same table does establish a real floor, just a lower one: **0-44 is
+negative in both halves and 4+ sigma negative in the larger (n=7060)**.
+That is the only threshold finding that has replicated.
+
+### The score barely orders outcomes above 45
+
+Full sample: 45-54 +0.019R, 55-64 +0.042R, 65-74 +0.032R. The
+calibration verdict has been NOT MONOTONIC on every run. A+ (65+) is a
+**cadence tier, not a quality tier**, and must not be presented as
+higher-conviction.
+
+### The score works for SMC but not Golden Trio
 
 ```
                   55-64      65-74
-CHOCH_REVERSAL   +0.022R   +0.228R    <- score is informative
-GOLDEN_TRIO      +0.045R   -0.017R    <- score is noise
+CHOCH_REVERSAL   +0.022R   +0.228R    <- informative
+GOLDEN_TRIO      +0.045R   -0.017R    <- noise
 ```
 
-Golden Trio supplies 1,739 of 2,039 trades and its own quality score
-carries no information about them. SMC is the smaller detector and the
-better one (`smc_choch` Δ +0.067R vs `gt_setup` Δ −0.067R). That is the
-single most useful thing these runs produced, and it points at the
-signal stack rather than at any parameter.
+Golden Trio supplies the large majority of trades and its own quality
+score carries no information about them. That is the most useful finding
+these runs produced, and it points at the signal stack rather than at
+any parameter.
 
-### Known mis-weightings, deliberately NOT fixed
+### What replicated across runs
 
-`NY_PRE_MARKET` awards +8 points and measures Δ −0.190R (n=126).
-`h1_confirm` — the whole H1 layer — measures Δ −0.050R on both runs.
+| finding | status |
+|---|---|
+| `0-44` band unprofitable | **replicated**, largest effect in the data |
+| `h4_confirm` strongest component | **replicated** (+0.131 → +0.208 → +0.147R) |
+| `h4_against` / `h4_neutral` hurt | **replicated** |
+| `round_number` bonus backwards | **replicated 3×** (−0.066 / −0.089 / −0.088R) |
+| `WATCH_MIN` 55 better than 45 | **FALSIFIED** — reverted |
+| `zlsma_flat` harmful | **failed** (−0.226R → −0.009R) |
+| Asian session harmful | **ambiguous** (−0.065R → +0.019R, confounded populations) |
 
-Both are left alone on purpose. All 52 weeks of available history have
-now been examined, so changing anything further would be fitting with no
-holdout left to check it against. The next honest measurement is
-forward, not backward.
+Three of the four component changes made after the first real run rest
+on evidence that either failed or is now in doubt. The config records
+which is which.
 
-## Validation status
+## Validation status## Validation status
 
 **This is a rule-based prototype, not a validated strategy.** The
 repository contains the machinery to measure an edge and, as of the

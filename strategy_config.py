@@ -132,37 +132,35 @@ ROUND_NUMBER_OFFSET_TABLE = {
 # component has to earn its points, so these thresholds mean "actual signal
 # quality" instead of "cleared the artificial floor".
 # ─────────────────────────────────────────────────────────────────────
-# Thresholds are DERIVED from REAL data as of the first live-history run
-# (13,000 M15 XAUUSD bars, 2026-03-04 → 2026-09-11, ATR mode).
+# Thresholds, after a falsification test that REVERSED an earlier change.
 #
-# Realized expectancy by score band, realistic cost:
+# History: WATCH_MIN_SCORE was moved 45 -> 55 on the strength of a
+# 26-week run (2026-03 -> 2026-09) where the 45-54 band lost money in
+# both of that run's halves. A 52-week run with --record-all then tested
+# the band over 2025-08 -> 2026-09, most of which the choice had never
+# seen:
 #
-#   45-49  n=653  wr=45%  -0.12R  pf=0.78     <- loses
-#   50-54  n=423  wr=48%  -0.04R  pf=0.93     <- loses
-#   55-59  n=294  wr=56%  +0.10R  pf=1.22
-#   60-64  n=171  wr=53%  +0.00R  pf=1.01
-#   65-69  n=78   wr=54%  +0.04R  pf=1.09
-#   70-74  n=24   wr=50%  +0.09R  pf=1.19
+#            0-44              45-54            55-64
+#   older   -0.102R +/-0.024   +0.053R +/-0.049  +0.057R +/-0.063
+#   recent  -0.018R +/-0.037   -0.068R +/-0.077  +0.005R +/-0.098
 #
-# Bucketed and split walk-forward, the 55 line is the one real finding:
+# The 45-54 band was POSITIVE over the older, unseen period and
+# indistinguishable from 55-64 there. It was negative only inside the
+# window used to pick 55. The move to 55 was curve-fitting: it discarded
+# ~2,470 signals worth roughly +47R in aggregate on the strength of one
+# six-month sample. Reverted to 45.
 #
-#            45-54            55-64
-#   in-sample   -0.075R        +0.032R
-#   out-of-sample -0.111R      +0.147R
+# What the same table DOES establish is a real floor at 45, not 55:
+# 0-44 is negative in both halves and 4+ sigma negative in the larger
+# one (n=7060). That is the one threshold finding that replicates.
 #
-# Everything below 55 lost money in BOTH independent halves; 55-64 made
-# money in both. WATCH_MIN_SCORE moves 45 -> 55 on that evidence. It is
-# the single largest lever found so far: it removes 1,076 of 1,644
-# filled trades averaging -0.087R.
-#
-# HONEST LIMIT: above 55 the score STOPS discriminating. 55-64 (+0.062R)
-# and 65-74 (+0.055R) are indistinguishable, and the calibration verdict
-# on the full sample is NOT MONOTONIC. So A+ is NOT a demonstrated
-# higher-quality tier -- it is only a rarer one. A+ at 65 is a cadence
-# choice, not a quality claim. Do not present A+ to a user as
-# statistically stronger than WATCH until a run shows it is.
-NO_ALERT_MAX = 54
-WATCH_MIN_SCORE = 55
+# Above 45 the score carries essentially no additional information --
+# 45-54, 55-64 and 65-74 come out +0.019R / +0.042R / +0.032R on the
+# full sample, and the calibration verdict is NOT MONOTONIC on every run
+# so far. A+ at 65 is therefore a CADENCE choice only (~12% of alerts),
+# not a quality claim, and must not be presented as higher-conviction.
+NO_ALERT_MAX = 44
+WATCH_MIN_SCORE = 45
 WATCH_MAX_SCORE = 64
 APLUS_MIN_SCORE = 65
 
@@ -235,6 +233,13 @@ SCORE_H4_OPPOSED = -SCORE_H4_MAX
 # fitted artifact. The KILLZONES table gives Asian 2 and London/NY 12,
 # so a cap of 8 creates a ~6-point handicap for Asian setups: they must
 # bring more non-session evidence to clear the bar.
+# CAUTION, unresolved: the 52-week --record-all run measured
+# ASIAN_SESSION at delta +0.019R (n=3797) -- the OPPOSITE sign to the
+# -0.065R that motivated re-enabling this. The two are not directly
+# comparable (that run's marginals span all scored candidates including
+# the 0-44 band, the earlier ones only above-threshold signals), so this
+# is left at 8 rather than flipped on a confounded read. Treat the
+# session handicap as unverified, not established.
 SCORE_KILLZONE_MAX = 8
 
 # C. Context.
