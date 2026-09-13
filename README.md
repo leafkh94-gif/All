@@ -137,6 +137,85 @@ That is the bar any genuine signal has to clear. It is a property of the
 exit design, not of any dataset, and it is why *expectancy* — not TP1 hit
 rate — is the number that decides whether this is worth trading.
 
+## Real-data results (52 weeks, XAUUSD M15)
+
+Two runs of the backtest workflow against live Capital.com history. The
+second is the one that matters: 25,000 M15 bars, 2025-08-29 → 2026-09-11,
+ATR mode, on the recalibrated config.
+
+```
+n=2039 filled   53% WR   +0.039R ±0.046   pf 1.08   (+80.1R total)
+
+ideal spread        +0.08R   pf 1.17
+realistic ($0.75)   +0.04R   pf 1.08
+conservative ($1.50) +0.00R  pf 1.00
+```
+
+**Read that as approximately breakeven, not as profitable.** Three
+reasons, all visible in the same run:
+
+1. **±0.046 on a +0.039R mean is 0.85 sigma.** Not distinguishable from
+   zero. It is not a result, it is a direction.
+2. **At the conservative spread it is exactly 0.00R.** The whole apparent
+   edge is smaller than the difference between two plausible spread
+   assumptions.
+3. **It is entirely one-directional:**
+   ```
+   BUY   n=1177  56% WR  +0.12R  pf 1.28
+   SELL  n= 862  48% WR  -0.08R  pf 0.85
+   ```
+   Gold trended up across most of this window, so a long bias earns
+   money without any edge being present. Until a run covers a sustained
+   gold *downtrend*, the BUY column cannot be separated from beta.
+
+### What replicated, and what did not
+
+The 26-week run was used to pick the current settings; the 52-week run
+reaches back to Aug 2025, which that choice never saw. Held up:
+
+| finding | 26w | 52w |
+|---|---|---|
+| `h4_confirm` is the strongest component | Δ +0.131R | **Δ +0.208R** |
+| `h4_neutral` / `h4_against` hurt | −0.188 / −0.031 | **−0.237 / −0.116** |
+| Asian session underperforms | Δ −0.065R | **Δ −0.065R** |
+| `round_number` bonus was backwards | Δ −0.066R | **Δ −0.089R** |
+
+Did **not** replicate: `zlsma_flat` measured Δ −0.226R on 26 weeks and
+Δ −0.009R on 52. A fitted finding that evaporated — which is why the
+component table exists.
+
+### The two findings that change what to build next
+
+**The score stops working above 55.** Buckets 55-64, 65-74 and 75-84
+score +0.042R, +0.032R and +0.036R — flat, and the verdict is NOT
+MONOTONIC on both runs. A+ (n=542, +0.03R) is indistinguishable from
+WATCH (n=1497, +0.04R). **A+ is a rarer tier, not a better one**, and
+must not be presented as higher-conviction.
+
+**The score orders outcomes for SMC but not for Golden Trio:**
+
+```
+                  55-64      65-74
+CHOCH_REVERSAL   +0.022R   +0.228R    <- score is informative
+GOLDEN_TRIO      +0.045R   -0.017R    <- score is noise
+```
+
+Golden Trio supplies 1,739 of 2,039 trades and its own quality score
+carries no information about them. SMC is the smaller detector and the
+better one (`smc_choch` Δ +0.067R vs `gt_setup` Δ −0.067R). That is the
+single most useful thing these runs produced, and it points at the
+signal stack rather than at any parameter.
+
+### Known mis-weightings, deliberately NOT fixed
+
+`NY_PRE_MARKET` awards +8 points and measures Δ −0.190R (n=126).
+`h1_confirm` — the whole H1 layer — measures Δ −0.050R on both runs.
+
+Both are left alone on purpose. All 52 weeks of available history have
+now been examined, so changing anything further would be fitting with no
+holdout left to check it against. The next honest measurement is
+forward, not backward.
+
 ## Validation status
 
 **This is a rule-based prototype, not a validated strategy.** The
