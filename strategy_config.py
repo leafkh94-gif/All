@@ -228,11 +228,13 @@ SCORE_H4_OPPOSED = -SCORE_H4_MAX
 #   overlap (13-16)  n=260  wr=49%  -0.06R  pf=0.88
 #   ny      (16-21)  n=296  wr=50%  -0.02R  pf=0.96
 #
-# The Asian session is the worst block in the sample by a clear margin,
-# on the largest n. Thin liquidity is a plausible mechanism, not just a
-# fitted artifact. The KILLZONES table gives Asian 2 and London/NY 12,
-# so a cap of 8 creates a ~6-point handicap for Asian setups: they must
-# bring more non-session evidence to clear the bar.
+# On THAT sample the Asian session was the worst block by a clear margin,
+# and thin liquidity is a plausible mechanism. The KILLZONES table gives
+# Asian 2 and London/NY 12, so a cap of 8 creates a ~6-point handicap:
+# Asian setups must bring more non-session evidence to clear the bar.
+#
+# The original note here called this "not just a fitted artifact". That
+# was overstated and is withdrawn -- see the caution below.
 # CAUTION, unresolved: the 52-week --record-all run measured
 # ASIAN_SESSION at delta +0.019R (n=3797) -- the OPPOSITE sign to the
 # -0.065R that motivated re-enabling this. The two are not directly

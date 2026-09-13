@@ -214,18 +214,29 @@ calibration verdict has been NOT MONOTONIC on every run. A+ (65+) is a
 **cadence tier, not a quality tier**, and must not be presented as
 higher-conviction.
 
-### The score works for SMC but not Golden Trio
+### RETRACTED: "the score works for SMC but not Golden Trio"
+
+An earlier version of this file recommended rebuilding around SMC on the
+strength of this:
 
 ```
                   55-64      65-74
-CHOCH_REVERSAL   +0.022R   +0.228R    <- informative
-GOLDEN_TRIO      +0.045R   -0.017R    <- noise
+CHOCH_REVERSAL   +0.022R   +0.228R
+GOLDEN_TRIO      +0.045R   -0.017R
 ```
 
-Golden Trio supplies the large majority of trades and its own quality
-score carries no information about them. That is the most useful finding
-these runs produced, and it points at the signal stack rather than at
-any parameter.
+**That recommendation does not hold.** The +0.228R rests on n=97 at
+±0.211 — about 1.1 sigma — and the component marginal flips sign with
+the measured population:
+
+| run | `smc_choch` marginal |
+|---|---|
+| above-threshold signals only | **+0.067R** |
+| all scored candidates | **−0.044R** |
+
+There is no reliable evidence that either detector's score is better
+than the other's. Both are close to noise above 45. Do not rebuild
+around SMC on the basis of this data.
 
 ### What replicated across runs
 
@@ -238,6 +249,7 @@ any parameter.
 | `WATCH_MIN` 55 better than 45 | **FALSIFIED** — reverted |
 | `zlsma_flat` harmful | **failed** (−0.226R → −0.009R) |
 | Asian session harmful | **ambiguous** (−0.065R → +0.019R, confounded populations) |
+| SMC better than Golden Trio | **flipped sign** (+0.067R → −0.044R) |
 
 Three of the four component changes made after the first real run rest
 on evidence that either failed or is now in doubt. The config records
