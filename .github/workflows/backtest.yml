@@ -70,6 +70,11 @@ jobs:
           CAPITAL_API_KEY:  ${{ secrets.CAPITAL_API_KEY }}
           CAPITAL_EMAIL:    ${{ secrets.CAPITAL_EMAIL }}
           CAPITAL_PASSWORD: ${{ secrets.CAPITAL_PASSWORD }}
+      - name: Premise check (tests the strategy's assumptions, not its parameters)
+        run: |
+          python tools/premise_check.py \
+            --candles bt_out/gold_m15_capital.csv \
+            | tee bt_out/premise_check.txt
       - uses: actions/upload-artifact@v4
         with:
           name: backtest-${{ github.event.inputs.target_mode }}-${{ github.run_id }}
