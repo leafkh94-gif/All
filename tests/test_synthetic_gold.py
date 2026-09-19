@@ -3,7 +3,8 @@
 Every distance constant in the config is now derived from statistics
 measured on this generator, so if it drifts away from realistic gold
 volatility those constants silently become wrong again — which is exactly
-the failure that produced a $25 stop sitting at 14x ATR.
+the failure that made a $25 stop LOOK like 14x ATR when, at real
+gold's measured median M15 ATR of $8.76, it is about 2.85x.
 """
 import importlib.util
 import os
@@ -24,7 +25,7 @@ def _df(bars=4000, **kw):
 
 
 def test_m15_atr_lands_in_the_realistic_gold_band():
-    """~$2-6 on M15 at a ~$2650 spot. The old plain random walk produced
+    """~$6-12 on M15 at a ~$4500 spot. The old plain random walk produced
     $1.74, which made every ATR-relative constant wrong. The band is
     centred on the MEASURED median M15 ATR of real XAUUSD, $8.76 over
     25,000 bars; an earlier band of 2.0-6.0 excluded the real value and
