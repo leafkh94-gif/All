@@ -77,28 +77,52 @@ a fixed dollar distance can absorb:
 - `TARGET_MODE = "FIXED"`: the legacy $25 / $25 / $50 / $100 ladder, kept
   so the two can be compared on identical candles.
 
-3× is where two opposing forces balance, measured against a
-volatility-realistic series (M15 ATR ≈ $3.5):
+3×ATR on **real** gold is a $26.29 stop, against a measured median M15
+ATR of **$8.76** (`tools/premise_check.py`, 25,000 real bars):
 
-| stop | in $ | spread as %R | resolves ≤1 day | median bars |
-|---|---|---|---|---|
-| 1.5×ATR | 5.24 | 14.3% | 100% | 5 |
-| **3.0×ATR** | **10.47** | **7.2%** | **97%** | **17** |
-| 8.0×ATR | 27.92 | 2.7% | 60% | 71 |
+| spread | as % of a 3.0×ATR ($26.29) stop |
+|---|---|
+| $0.30 | 1.1% |
+| $0.75 (realistic) | 2.9% |
+| $1.50 (conservative) | 5.7% |
 
-The old fixed $25 stop was that last row: ~7×ATR, a median of ~18 hours to
-resolve, and only 60% resolving inside a day. While one sat open it
-blocked every later setup — that, not the score thresholds, was what made
-the bot feel silent.
+### RETRACTED: "the old $25 stop was ~7×ATR and that is why the bot was silent"
+
+An earlier version of this file carried a table derived from the
+synthetic generator, which produced an M15 ATR of ~$3.5. Real gold's
+median M15 ATR is **$8.76** — the generator was about 2.5× too quiet, so
+every ATR multiple computed from it was inflated by the same factor.
+
+Corrected against real data:
+
+| claim | as published | measured |
+|---|---|---|
+| $25 fixed stop, in ATR | ~7×ATR | **~2.85×ATR** |
+| spread as %R at 3.0×ATR | 7.2% | **2.9%** |
+
+**The $25 fixed stop was approximately the right size.** It sits within
+5% of what `ATR_SL_MULT = 3.0` produces on real candles. The criticism
+of it was an artifact of the generator, and the claim that stop size —
+rather than the thresholds — was what made the bot silent is not
+supported by anything measured on real data.
+
+`TARGET_MODE = "ATR"` is still the better default, because it tracks
+volatility instead of assuming it. But it is not the large correction
+this file previously claimed it was, and the cadence improvement
+attributed to it should be re-measured before it is believed.
 
 **Entry.** On a limit `ENTRY_PULLBACK_ATR` (0.5) better than the trigger
 bar's close, never at the close itself. This corrects a structural
 anti-edge rather than refining one — see below.
 
 **Alert cadence.** Thresholds are derived from a target delivered rate by
-`tools/tune_thresholds.py`, not chosen by hand: WATCH ≥ 45, A+ ≥ 52,
-giving ~2.9 A+ and ~8.5 WATCH per week (~11/week, a 25/75 split). They
-must be re-derived whenever the score budget or entry logic changes.
+`tools/tune_thresholds.py`, not chosen by hand: **WATCH ≥ 45, A+ ≥ 65**
+(`strategy_config.py`). They must be re-derived whenever the score
+budget or entry logic changes.
+
+A+ is a **cadence** tier, not a quality tier — above 45 the score barely
+orders outcomes (see Real-data results). Do not read A+ as "this one is
+more likely to win".
 
 ## What the no-edge control test found
 
@@ -255,7 +279,99 @@ Three of the four component changes made after the first real run rest
 on evidence that either failed or is now in doubt. The config records
 which is which.
 
-## Validation status## Validation status
+## Do the strategy's premises hold? (`tools/premise_check.py`)
+
+Every tuning round in this project fitted parameters and then watched the
+finding evaporate on wider data. This asks a different question, one that
+cannot be curve-fitted: **are the assumptions underneath the strategy
+true of gold at all?** Each test is parameter-free, and each hypothesis
+comes from outside this dataset — published literature, or the
+strategy's own stated logic.
+
+Run on 25,000 real M15 bars. Read |t| > 3 as interesting, |t| > 2 as
+suggestive, and remember that several hypotheses are tested at once.
+
+### 1. The Turtle-band bounce premise is NOT supported
+
+Entry requires price at a Donchian extreme, on the assumption it bounces.
+Measured directly — the next n-bar return after touching an n-bar extreme:
+
+| period | after n-bar LOW | after n-bar HIGH |
+|---|---|---|
+| 10 | +0.485 (t=+1.2, n=3984) | **+0.883 (t=+2.4, n=4763)** |
+| 20 | +1.605 (t=+2.1, n=2487) | +1.177 (t=+2.0, n=3308) |
+
+The bounce premise requires *positive* after a low and *negative* after a
+high. After a 10-bar **high**, gold goes **up** — significantly. At 20
+bars both directions are positive. Selling the top of the band is
+pointed the wrong way on this data.
+
+### 2. Momentum after up-moves, not reversion
+
+Conditional next-k-bar move, given the prior k-bar move:
+
+| k | after UP move | after DOWN move |
+|---|---|---|
+| 2 | +0.121 (t=+1.2) | +0.031 (t=+0.3) |
+| 4 | +0.291 (t=+2.1) | +0.009 (t=+0.1) |
+| 8 | +0.570 (t=+2.8) | +0.030 (t=+0.1) |
+| 16 | **+0.913 (t=+3.4)** | +0.310 (t=+1.0) |
+
+Up-moves **continue**, and more strongly at longer horizons. Down-moves
+do not revert. This is the strongest statistical signal anywhere in this
+repository — and it is the opposite of what a dip-buying, rally-selling
+entry needs.
+
+It also independently reproduces the BUY +0.12R vs SELL −0.08R asymmetry
+seen in the backtest, using a test that involves none of the strategy's
+code. Note the overlap with gold's uptrend over this sample: the effect
+may be a bull-market artifact.
+
+Lag-by-lag autocorrelation disagrees, showing mild *reversion* at lags 3
+and 4 only (t=−3.6, −2.7) and nothing elsewhere. The two tests point
+opposite ways, so the reversion signal is weak and horizon-specific
+while the momentum signal is the more robust of the two.
+
+### 3. Session drift: only 21–24 UTC
+
+| session | mean/bar | t | n | |
+|---|---|---|---|---|
+| asian 00-07 | +0.0593 | +0.6 | 7643 | not significant |
+| london 07-13 | +0.0503 | +0.5 | 6551 | not significant |
+| overlap 13-16 | −0.1872 | −1.0 | 3275 | not significant |
+| ny 16-21 | −0.0602 | −0.6 | 5367 | not significant |
+| **late 21-24** | **+0.5141** | **+2.7** | 2159 | **significant positive** |
+
+The widely-repeated "gold rises in Asia, falls in London" claim is
+blog-sourced, not peer-reviewed, and is **not** reproduced here. The one
+significant window is a different one.
+
+### What this means
+
+The Golden Trio's core reasoning — price is stretched, expect a reversion
+— is the part the data pushes back on hardest. That is a **sign error in
+the core logic, not a parameter problem**, and no threshold round can
+reach it. The indicated next experiment is a momentum/continuation entry
+tested head-to-head against the current one on identical candles.
+
+That experiment has **not** been run. Nothing above should be read as
+evidence that an inverted strategy would be profitable — only that the
+current one is aimed against the one effect this data supports.
+
+### Literature
+
+The published gold edge is at **12-month** horizons (Moskowitz, Ooi &
+Pedersen, time-series momentum), with monthly holding periods — nowhere
+near M15. Intraday gold research concerns **volatility structure**, not
+directional returns (Batten & Lucey; Iwatsubo, Watkins & Xu on Tokyo vs
+New York sessions). Across intraday commodity work the consistent
+finding is that **transaction costs are what kill short-horizon edges**,
+which matches this strategy's own decay from ideal +0.08R to
+conservative +0.00R.
+
+There is no published, validated M15 gold strategy to copy.
+
+## Validation status
 
 **This is a rule-based prototype, not a validated strategy.** The
 repository contains the machinery to measure an edge and, as of the

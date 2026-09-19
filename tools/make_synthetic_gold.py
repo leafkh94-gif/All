@@ -4,12 +4,17 @@ Generate a volatility-realistic synthetic XAUUSD M15 series.
 WHY THIS EXISTS
 ───────────────
 Thresholds and target distances were previously tuned against a plain
-Gaussian random walk whose M15 ATR came out around $1.74. Real gold is
-several times more volatile than that, so every distance-based constant
-calibrated on it was wrong by a large factor: a $25 stop was 14x ATR,
-TP3 at $100 was 57x ATR, and ~70% of trades resolved to neither target
-nor stop inside four days. Those were artefacts of the generator, not
-properties of the strategy.
+Gaussian random walk whose M15 ATR came out around $1.74. Real gold's
+measured median M15 ATR is $8.76, so every distance-based constant
+calibrated on that walk was wrong by ~5x: a $25 stop looked like 14x ATR
+when it is really ~2.85x, TP3 at $100 looked like 57x, and ~70% of
+trades appeared to resolve to neither target nor stop inside four days.
+Those were artefacts of the generator, not properties of the strategy.
+
+This file's first attempt at a fix still guessed -- $3.5 -- and was
+itself 2.5x too quiet, which is what produced the (now retracted) claim
+that the fixed $25 stop was oversized at ~7x ATR. The target is now the
+measured value, not an estimate.
 
 This generator targets the statistical shape of real XAUUSD M15 instead:
 
@@ -43,10 +48,19 @@ import math
 import random
 from datetime import datetime, timedelta, timezone
 
-# Target: M15 ATR(14) in the low-single-dollar range at a ~$2650 spot,
-# which is the ballpark for XAUUSD in normal (non-news) conditions.
-DEFAULT_SPOT = 2650.0
-TARGET_M15_ATR = 3.5
+# Target: the MEASURED median M15 ATR(14) of real XAUUSD -- $8.76 over
+# 25,000 bars (tools/premise_check.py). Do not lower this on intuition:
+# an earlier value of $3.5 was guesswork, and being 2.5x too quiet is
+# what produced the retracted claim that a $25 stop was ~7x ATR. It is
+# ~2.85x ATR. Any distance-based constant tuned on a too-quiet series is
+# wrong by exactly that factor.
+# Midpoint of the observed real range over the 52-week sample
+# (price 3405-5586, tools/premise_check.py). The previous 2650 was stale
+# by ~1.7x, which made the SAME dollar volatility look like 3.3% of spot
+# per day instead of ~1.9%. Spot and target ATR must move together: ATR
+# as a fraction of price is what the realism tests actually check.
+DEFAULT_SPOT = 4500.0
+TARGET_M15_ATR = 8.76
 
 # Session multipliers on volatility, by UTC hour.
 SESSION_VOL = {

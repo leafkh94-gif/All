@@ -25,9 +25,12 @@ def _df(bars=4000, **kw):
 
 def test_m15_atr_lands_in_the_realistic_gold_band():
     """~$2-6 on M15 at a ~$2650 spot. The old plain random walk produced
-    $1.74, which made every ATR-relative constant wrong."""
+    $1.74, which made every ATR-relative constant wrong. The band is
+    centred on the MEASURED median M15 ATR of real XAUUSD, $8.76 over
+    25,000 bars; an earlier band of 2.0-6.0 excluded the real value and
+    so enforced a series 2.5x too quiet."""
     atr = ind.atr(_df()).dropna()
-    assert 2.0 < atr.median() < 6.0, f"median ATR {atr.median():.2f} outside gold-like band"
+    assert 6.0 < atr.median() < 12.0, f"median ATR {atr.median():.2f} outside gold-like band"
 
 
 def test_daily_range_is_a_realistic_fraction_of_spot():
@@ -40,10 +43,18 @@ def test_daily_range_is_a_realistic_fraction_of_spot():
 
 def test_price_stays_in_a_plausible_band():
     """Unanchored trend drift walked price from 2650 to 473 over a long
-    series, which destroys ATR-as-a-fraction-of-price."""
+    series, which destroys ATR-as-a-fraction-of-price.
+
+    Expressed as a MULTIPLE of the starting spot, not as absolute dollar
+    bounds: the old 1800-4200 was written for a 2650 spot and silently
+    became wrong when spot moved. Real gold spanned 3405-5586 over the
+    52-week sample, i.e. about 0.76x-1.24x its midpoint; 0.4x-1.6x leaves
+    room for a longer series while still catching a runaway (the original
+    failure was 0.18x)."""
     df = _df(12000)
-    assert df["c"].min() > 1800, "price wandered implausibly low"
-    assert df["c"].max() < 4200, "price wandered implausibly high"
+    spot = gen_mod.DEFAULT_SPOT
+    assert df["c"].min() > 0.4 * spot, "price wandered implausibly low"
+    assert df["c"].max() < 1.6 * spot, "price wandered implausibly high"
 
 
 def test_volatility_clusters_rather_than_being_constant():
