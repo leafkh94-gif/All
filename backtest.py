@@ -707,6 +707,175 @@ def print_summary(signals, candles=None, target_mode=None, entry_mode=None):
         print("  trading.")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Walk-forward validation
+# ─────────────────────────────────────────────────────────────────────
+# The rest of this file measures the strategy over one undivided window,
+# so an edge that only exists because a threshold was fitted to THIS data
+# reads identically to a real one. Walk-forward separates the two: split
+# the timeline in time order (never shuffled -- shuffling leaks the
+# future into the past), fit/choose on the earlier FIT window, then judge
+# on the later CONFIRM window the choice never saw.
+#
+# The trap on the other side is over-tightening until the confirm window
+# is "clean" but silent. So this reports, for every candidate WATCH
+# threshold, the CADENCE (alerts per week) beside the expectancy in BOTH
+# windows. A threshold is only worth taking if its confirm-window
+# expectancy is positive AND its cadence sits inside a sane band -- not so
+# high it is noise, not so low you would never see a trade. The table
+# shows the whole trade-off; the recommendation picks the LOWEST
+# threshold that clears both bars, i.e. as many alerts as possible while
+# the edge still holds out of sample.
+def _window_weeks(candles, lo_frac, hi_frac):
+    """Length in weeks of the candle slice [lo_frac, hi_frac) of the series."""
+    if not candles:
+        return 1e-9
+    n = len(candles)
+    lo = candles[max(0, min(n - 1, int(n * lo_frac)))]
+    hi = candles[max(0, min(n - 1, int(n * hi_frac) - 1))]
+    a = pd.to_datetime(lo["t"], utc=True)
+    b = pd.to_datetime(hi["t"], utc=True)
+    return max((b - a).total_seconds() / (86400.0 * 7), 1e-9)
+
+
+def _wf_line(subset, weeks, cost="realistic"):
+    """One window's numbers for a threshold: cadence + expectancy.
+
+    Shows BOTH counts on purpose. `n` is candidates (what sets the alert
+    cadence) while every statistic beside it is computed over the subset
+    that actually filled -- a limit entry that never traded has no R.
+    Printing one label for two different denominators invites reading a
+    47-candidate row as a 47-trade result."""
+    n = len(subset)
+    per_week = n / weeks if weeks > 0 else 0.0
+    st = _stats(subset, cost=cost)
+    if not st or st["n"] == 0:
+        return f"n={n:>4} ({per_week:4.1f}/wk) 0 fill  --"
+    return (f"n={n:>4} ({per_week:4.1f}/wk) {st['n']:>4}f "
+            f"avg={st['avg_r']:+.3f}R pf={st['profit_factor']} "
+            f"wr={st['wr']*100:.0f}%")
+
+
+def walk_forward_report(signals, candles, split=0.6,
+                        min_per_week=2.0, max_per_week=25.0,
+                        min_confirm_n=30,
+                        thresholds=(40, 45, 50, 55, 60, 65, 70)):
+    """Split the run in time and score every candidate WATCH threshold on
+    the confirm window it never saw. Requires signals produced with
+    record_all=True so thresholds BELOW the current floor can be explored;
+    a log censored at the live threshold cannot answer "what would looser
+    deliver?".
+    """
+    # Every scored candidate, including sub-threshold ones. The opportunity
+    # rate (not the post-cooldown tradeable rate) is the strategy's own
+    # edge sample, per this file's docstring.
+    scored = [s for s in signals if "score" in s and s.get("score") is not None]
+    if not scored:
+        print("\nWALK-FORWARD: no scored candidates (run with --record-all).")
+        return
+
+    split_ts = pd.to_datetime(candles[int(len(candles) * split)]["t"], utc=True)
+    fit = [s for s in scored if pd.to_datetime(s["t"], utc=True) < split_ts]
+    conf = [s for s in scored if pd.to_datetime(s["t"], utc=True) >= split_ts]
+    fit_weeks = _window_weeks(candles, 0.0, split)
+    conf_weeks = _window_weeks(candles, split, 1.0)
+
+    print("\n" + "=" * 70)
+    print("WALK-FORWARD VALIDATION")
+    print("=" * 70)
+    print(f"  split at {split:.0%} of the timeline ({split_ts:%Y-%m-%d %H:%M} UTC)")
+    print(f"  FIT     window: {fit_weeks:5.1f} weeks, {len(fit)} scored candidates")
+    print(f"  CONFIRM window: {conf_weeks:5.1f} weeks, {len(conf)} scored candidates")
+    print(f"  cadence band treated as sane: {min_per_week:.0f}-{max_per_week:.0f} alerts/week")
+    print(f"  confirm expectancy must clear 0 on n>={min_confirm_n} to count as held\n")
+
+    print(f"  {'thresh':>6} | {'FIT window':^44} | {'CONFIRM window (unseen)':^44} | verdict")
+    print(f"  {'-'*6}-+-{'-'*44}-+-{'-'*44}-+--------")
+    print(f"  {'':>6} | n=candidates (cadence) Nf=filled trades"
+          f"{'':>5} | {'same':^44} |")
+
+    # SELECTION USES THE FIT WINDOW ONLY.
+    #
+    # This is the whole discipline. Picking the threshold that scored
+    # best in the CONFIRM window would consume the holdout: once a
+    # choice is made by looking at a window, that window has been fitted
+    # to and can no longer test it. That is exactly how WATCH_MIN_SCORE
+    # was moved 45 -> 55 on a result that later reversed. So the FIT
+    # columns decide, and the CONFIRM columns only report what the
+    # already-made choice went on to deliver.
+    eligible = []
+    rows = []
+    for th in thresholds:
+        f_sub = [s for s in fit if s["score"] >= th]
+        c_sub = [s for s in conf if s["score"] >= th]
+        f_per_week = len(f_sub) / fit_weeks if fit_weeks > 0 else 0.0
+        c_per_week = len(c_sub) / conf_weeks if conf_weeks > 0 else 0.0
+        f_stats = _stats(f_sub, cost="realistic")
+        c_stats = _stats(c_sub, cost="realistic")
+        f_avg = f_stats["avg_r"] if f_stats else 0.0
+        f_n = f_stats["n"] if f_stats else 0
+        c_avg = c_stats["avg_r"] if c_stats else 0.0
+        c_n = c_stats["n"] if c_stats else 0
+
+        fit_holds = f_avg > 0 and f_n >= min_confirm_n
+        cadence_ok = min_per_week <= f_per_week <= max_per_week
+        if fit_holds and cadence_ok:
+            verdict = "eligible"
+            eligible.append(th)
+        elif fit_holds and f_per_week > max_per_week:
+            verdict = "noisy"      # edge in fit but too many alerts
+        elif fit_holds and f_per_week < min_per_week:
+            verdict = "too rare"   # edge in fit but you'd rarely see one
+        elif f_n < min_confirm_n:
+            verdict = "thin"       # not enough fit trades to choose on
+        else:
+            verdict = "no edge"    # fit expectancy <= 0
+
+        rows.append((th, c_avg, c_n))
+        print(f"  {th:>6} | {_wf_line(f_sub, fit_weeks):<44} | "
+              f"{_wf_line(c_sub, conf_weeks):<44} | {verdict}")
+
+    print()
+    print("  'verdict' judges the FIT column only -- the CONFIRM column is")
+    print("  the test, so it must not also be the chooser.")
+    print()
+    if eligible:
+        # Lowest eligible threshold = most alerts while the fit edge holds.
+        th = min(eligible)
+        c_avg, c_n = next((a, n) for t, a, n in rows if t == th)
+        c_per_week = len([s for s in conf if s["score"] >= th]) / conf_weeks
+        print(f"  CHOSEN ON FIT: WATCH_MIN_SCORE = {th}")
+        print(f"    the loosest threshold whose FIT-window edge holds inside")
+        print(f"    the cadence band.")
+        print()
+        if c_n < min_confirm_n:
+            print(f"    OUT-OF-SAMPLE: only n={c_n} in the confirm window -- too")
+            print(f"    thin to confirm or refute. Treat this as untested.")
+        elif c_avg > 0:
+            print(f"    OUT-OF-SAMPLE: HELD. {c_per_week:.1f} alerts/week at "
+                  f"{c_avg:+.3f}R (n={c_n})")
+            print(f"    on data the choice never saw. This is the one number")
+            print(f"    here worth quoting.")
+        else:
+            print(f"    OUT-OF-SAMPLE: FAILED. {c_avg:+.3f}R (n={c_n}) on data the")
+            print(f"    choice never saw. The fit-window edge did not survive.")
+            print(f"    Do NOT adopt this threshold: that is what the test is for.")
+    else:
+        print("  NO THRESHOLD IS ELIGIBLE on the fit window.")
+        print("  Nothing was chosen, so there is nothing to confirm. On this")
+        print("  data and these rules there is no cutoff to tune around --")
+        print("  change the strategy (entry premise, session filter, costs),")
+        print("  not the threshold.")
+        best_conf = max(rows, key=lambda r: r[1]) if rows else None
+        if best_conf and best_conf[1] > 0:
+            print(f"\n  (The confirm window happens to favour {best_conf[0]} at "
+                  f"{best_conf[1]:+.3f}R.")
+            print("   That is NOT a recommendation. Reading a threshold off the")
+            print("   holdout is the error this whole report exists to prevent.)")
+    print("\n  Re-run with --entry-mode MOMENTUM and compare this whole table.")
+    print("=" * 70)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Replay live pipeline over historical candles.")
     parser.add_argument("--candles", required=True,
@@ -728,6 +897,21 @@ def main():
                              "tools/tune_thresholds.py, which cannot reason about\n"
                              "lower thresholds from a log censored at the current one.")
     parser.add_argument("--json", help="Optional per-signal log JSON path")
+    parser.add_argument("--walk-forward", action="store_true",
+                        help="Split the timeline in time order and score every "
+                             "candidate WATCH threshold on the later CONFIRM "
+                             "window it never saw. Reports alerts/week beside "
+                             "expectancy in both windows so a validated cutoff "
+                             "is not also a silent one. Forces --record-all.")
+    parser.add_argument("--wf-split", type=float, default=0.6,
+                        help="Fraction of the timeline used as the FIT window "
+                             "(default 0.6). The rest is the CONFIRM window.")
+    parser.add_argument("--wf-min-per-week", type=float, default=2.0,
+                        help="Below this many confirm-window alerts/week a "
+                             "threshold is flagged 'too rare' (default 2).")
+    parser.add_argument("--wf-max-per-week", type=float, default=25.0,
+                        help="Above this many confirm-window alerts/week a "
+                             "threshold is flagged 'noisy' (default 25).")
     args = parser.parse_args()
 
     # Tests / CI / local runs shouldn't need real Telegram creds.
@@ -745,8 +929,9 @@ def main():
 
     target_mode = args.target_mode or cfg.TARGET_MODE
     entry_mode = (args.entry_mode or getattr(cfg, "ENTRY_MODE", "REVERSION")).upper()
+    record_all = args.record_all or args.walk_forward
     signals = run_backtest(candles, m5=m5, m1=m1, target_mode=target_mode,
-                           record_all=args.record_all, entry_mode=entry_mode)
+                           record_all=record_all, entry_mode=entry_mode)
     # Persist BEFORE reporting. The run is the expensive part; a bug in
     # the summary formatting must not throw away its results.
     if args.json:
@@ -755,6 +940,10 @@ def main():
         print(f"Per-signal log written to {args.json}")
     print_summary(signals, candles=candles, target_mode=target_mode,
                   entry_mode=entry_mode)
+    if args.walk_forward:
+        walk_forward_report(signals, candles, split=args.wf_split,
+                            min_per_week=args.wf_min_per_week,
+                            max_per_week=args.wf_max_per_week)
     if args.json:
         print("Next: python tools/calibrate_scores.py --signals "
               f"{args.json} --oos-split 0.7")
