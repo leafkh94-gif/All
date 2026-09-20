@@ -100,9 +100,44 @@ def _rsi_reversal_sequence(rsi_series, side):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Shared band-distance quality curve
+# ─────────────────────────────────────────────────────────────────────
+def _band_quality(distance, channel_width, atr_value):
+    """Map a signed distance from the relevant band to (fires, quality).
+
+    `distance` <= 0 means the band is reached or pierced -> quality 1.0.
+    Distance is normalised by CHANNEL WIDTH rather than ATR: see
+    GT_PROXIMITY_CHANNEL_FRAC in strategy_config for why the ATR form
+    could not discriminate. ATR is used only when the channel has
+    collapsed to nothing, which would otherwise divide by ~0."""
+    frac_tol = cfg.GT_PROXIMITY_CHANNEL_FRAC
+    frac_hard = cfg.GT_PROXIMITY_CHANNEL_HARD
+    if channel_width > 1e-9:
+        scale = channel_width
+    elif atr_value > 0:
+        # Degenerate channel: fall back to the legacy ATR form so a flat
+        # patch does not accept everything by dividing by zero.
+        scale = cfg.GT_PROXIMITY_ATR_HARD_VETO * atr_value
+        frac_tol = cfg.GT_PROXIMITY_ATR_MULT / cfg.GT_PROXIMITY_ATR_HARD_VETO
+        frac_hard = 1.0
+    else:
+        return False, 0.0
+
+    d = max(0.0, distance) / scale
+    if d > frac_hard:
+        return False, 0.0
+    if d <= frac_tol:
+        quality = 1.0 - 0.5 * (d / frac_tol)
+    else:
+        span = max(frac_hard - frac_tol, 1e-9)
+        quality = 0.5 * (1.0 - (d - frac_tol) / span)
+    return True, max(0.0, min(1.0, quality))
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Turtle band proximity
 # ─────────────────────────────────────────────────────────────────────
-def _turtle_proximity(df, band, side, atr_value):
+def _turtle_proximity(df, band, side, atr_value, channel_width):
     """Return (fires: bool, quality: 0..1).
 
     Soft gate (was hard). Turtle location now contributes evidence
@@ -119,27 +154,78 @@ def _turtle_proximity(df, band, side, atr_value):
     Fires=False only in that last extreme case, so most setups now
     reach scoring and the ATR distance shows up as a quality signal
     rather than as a silent gate."""
-    if atr_value <= 0:
-        return False, 0.0
-    tol = cfg.GT_PROXIMITY_ATR_MULT * atr_value
-    hard = cfg.GT_PROXIMITY_ATR_HARD_VETO * atr_value
     if side == "BUY":
         extreme = min(df["l"].iloc[-1], df["l"].iloc[-2])
         distance = extreme - band     # positive means above lower band
     else:
         extreme = max(df["h"].iloc[-1], df["h"].iloc[-2])
         distance = band - extreme     # positive means below upper band
-    if distance > hard:
-        return False, 0.0
-    d = max(0.0, distance)
-    if d <= tol:
-        # Inside the "good" zone: quality 1.0 (on band) -> 0.5 (at tol).
-        quality = 1.0 - 0.5 * (d / tol)
+    return _band_quality(distance, channel_width, atr_value)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# MOMENTUM-mode evidence (mirrors of the two functions above)
+# ─────────────────────────────────────────────────────────────────────
+# These are the ONLY behavioural difference between ENTRY_MODE
+# "REVERSION" and "MOMENTUM". Same outputs, same 0..1 contract, same
+# weights, same downstream scoring -- so a head-to-head backtest
+# measures the entry premise and nothing else. See ENTRY_MODE in
+# strategy_config for why this variant exists and what has NOT been
+# shown about it.
+def _rsi_momentum(rsi_series, side):
+    """Return (fires, quality 0..1, rsi_now): evidence that momentum is
+    CONTINUING in `side`'s direction.
+
+    The reversion mirror of this asks "did RSI turn up off a dip?". This
+    asks "is RSI travelling in my direction?" -- no dip required, and no
+    reversal to find. Being overbought on a BUY is not penalised the way
+    it would be in reversion mode; a momentum entry is a bet that the
+    strong reading persists."""
+    bars = cfg.GT_MOM_RSI_SLOPE_BARS
+    if len(rsi_series) < bars + 2:
+        return False, 0.0, 0.0
+    curr = float(rsi_series.iloc[-1])
+    past = float(rsi_series.iloc[-(bars + 1)])
+
+    if side == "BUY":
+        travel = curr - past
+        if travel <= 0:
+            return False, 0.0, curr   # not travelling up -> no continuation
+        quality = min(1.0, travel / cfg.GT_MOM_RSI_SLOPE_SATURATE)
+        if curr < cfg.GT_MOM_RSI_NEUTRAL_FLOOR:
+            quality *= 0.5            # a rise below neutral is a bounce
+        if curr > cfg.GT_MOM_RSI_EXHAUSTION:
+            quality *= 0.8            # discount, deliberately not a veto
+        return True, max(0.0, min(1.0, quality)), curr
+
+    # SELL mirror.
+    travel = past - curr
+    if travel <= 0:
+        return False, 0.0, curr
+    quality = min(1.0, travel / cfg.GT_MOM_RSI_SLOPE_SATURATE)
+    if curr > (100 - cfg.GT_MOM_RSI_NEUTRAL_FLOOR):
+        quality *= 0.5
+    if curr < (100 - cfg.GT_MOM_RSI_EXHAUSTION):
+        quality *= 0.8
+    return True, max(0.0, min(1.0, quality)), curr
+
+
+def _turtle_breakout(df, band, side, atr_value, channel_width):
+    """Return (fires, quality 0..1): evidence that price is AT or THROUGH
+    the n-bar extreme in the direction of travel.
+
+    `band` here is the SAME-direction extreme (upper for a BUY), the
+    opposite of what _turtle_proximity is passed. Distance <= 0 means the
+    band is already broken, which scores 1.0. The decay curve and the
+    hard cap reuse the reversion constants so neither mode gets a wider
+    funnel than the other by accident."""
+    if side == "BUY":
+        extreme = max(df["h"].iloc[-1], df["h"].iloc[-2])
+        distance = band - extreme     # <= 0 means at/through the upper band
     else:
-        # Extended: quality 0.5 (at tol) -> ~0 (at hard cap).
-        span = max(hard - tol, 1e-9)
-        quality = 0.5 * (1.0 - (d - tol) / span)
-    return True, max(0.0, min(1.0, quality))
+        extreme = min(df["l"].iloc[-1], df["l"].iloc[-2])
+        distance = extreme - band     # <= 0 means at/through the lower band
+    return _band_quality(distance, channel_width, atr_value)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -205,16 +291,21 @@ def market_context(candles, direction):
 # ─────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────
-def find_golden_trio_candidate(candles, target_mode=None):
+def find_golden_trio_candidate(candles, target_mode=None, entry_mode=None):
     """Backwards-compatible wrapper: returns just the candidate dict (or None).
     Prefer find_golden_trio_candidate_diag() for per-gate diagnostics."""
-    candidate, _reason = find_golden_trio_candidate_diag(candles, target_mode=target_mode)
+    candidate, _reason = find_golden_trio_candidate_diag(
+        candles, target_mode=target_mode, entry_mode=entry_mode)
     return candidate
 
 
-def find_golden_trio_candidate_diag(candles, target_mode=None):
+def find_golden_trio_candidate_diag(candles, target_mode=None, entry_mode=None):
     """Return (candidate_or_None, block_reason). block_reason is a short
-    string naming the gate that killed every direction, or None on success."""
+    string naming the gate that killed every direction, or None on success.
+
+    entry_mode overrides cfg.ENTRY_MODE for one call, which is how the
+    head-to-head backtest runs both premises over identical candles
+    without mutating global config."""
     warmup = max(
         cfg.GT_ZLSMA_PERIOD * 2,
         cfg.GT_TURTLE_PERIOD,
@@ -252,9 +343,23 @@ def find_golden_trio_candidate_diag(candles, target_mode=None):
     curr_high = float(df["h"].iloc[-1])
     curr_low = float(df["l"].iloc[-1])
     curr_range = max(curr_high - curr_low, 1e-9)
+    # Width of the Donchian channel the band belongs to. Band proximity is
+    # scored as a fraction of THIS, not of ATR.
+    channel_width = max(curr_upper - curr_lower, 0.0)
+
+    mode = str(entry_mode or getattr(cfg, "ENTRY_MODE", "REVERSION")).upper()
+    if mode not in ("REVERSION", "MOMENTUM"):
+        return None, f"bad ENTRY_MODE {mode!r}"
+
+    # The band a side cares about inverts with the premise. REVERSION
+    # buys the low and targets the high; MOMENTUM buys through the high.
+    if mode == "MOMENTUM":
+        side_bands = [("BUY", curr_upper, curr_lower), ("SELL", curr_lower, curr_upper)]
+    else:
+        side_bands = [("BUY", curr_lower, curr_upper), ("SELL", curr_upper, curr_lower)]
 
     per_side_reasons = []
-    for side, band, opp_band in [("BUY", curr_lower, curr_upper), ("SELL", curr_upper, curr_lower)]:
+    for side, band, opp_band in side_bands:
         # Reject only a *decisively* counter-direction trigger bar. Dojis and
         # small counter-bodies at reversal pivots are normal -- rsi-seq +
         # turtle + zlsma already confirm direction.
@@ -266,16 +371,29 @@ def find_golden_trio_candidate_diag(candles, target_mode=None):
             per_side_reasons.append(f"{side}:strong-bullish-body")
             continue
 
-        # Sequenced RSI gate.
-        fires, rsi_quality_frac, dip_value = _rsi_reversal_sequence(rsi_series, side)
+        # RSI evidence -- reversal hook, or continuation travel.
+        if mode == "MOMENTUM":
+            fires, rsi_quality_frac, dip_value = _rsi_momentum(rsi_series, side)
+            rsi_tag = "rsi-momentum"
+        else:
+            fires, rsi_quality_frac, dip_value = _rsi_reversal_sequence(rsi_series, side)
+            rsi_tag = "rsi-seq"
         if not fires:
-            per_side_reasons.append(f"{side}:rsi-seq")
+            per_side_reasons.append(f"{side}:{rsi_tag}")
             continue
 
-        # Turtle band proximity gate.
-        band_ok, turtle_quality_frac = _turtle_proximity(df, band, side, curr_atr)
+        # Turtle evidence -- distance to the band being bounced off, or
+        # broken through.
+        if mode == "MOMENTUM":
+            band_ok, turtle_quality_frac = _turtle_breakout(
+                df, band, side, curr_atr, channel_width)
+            turtle_tag = "turtle-breakout"
+        else:
+            band_ok, turtle_quality_frac = _turtle_proximity(
+                df, band, side, curr_atr, channel_width)
+            turtle_tag = "turtle"
         if not band_ok:
-            per_side_reasons.append(f"{side}:turtle")
+            per_side_reasons.append(f"{side}:{turtle_tag}")
             continue
 
         # ZLSMA direction -- a scored axis, never a veto. XAUUSD often
@@ -286,7 +404,13 @@ def find_golden_trio_candidate_diag(candles, target_mode=None):
         zlsma_status = _zlsma_status(zlsma, curr_atr, side)
 
         # Build entry / SL / TPs.
-        entry = curr_close
+        # Enter on a limit a fraction of an ATR better than the trigger
+        # close. Taking the close means buying the top of the bar that
+        # produced the signal, which measured as an ~8-point win-rate
+        # penalty on data with no directional information at all. See
+        # ENTRY_PULLBACK_ATR in strategy_config.
+        entry = curr_close - (1.0 if side == "BUY" else -1.0) * \
+            cfg.ENTRY_PULLBACK_ATR * curr_atr
         if cfg.TARGET_MODE in ("FIXED", "ATR"):
             t = targets.build_targets(entry, side, atr_value=curr_atr,
                                       mode=target_mode or cfg.TARGET_MODE)
@@ -295,6 +419,14 @@ def find_golden_trio_candidate_diag(candles, target_mode=None):
                 continue
             stop, tp1, tp2, tp3 = t["stop_loss"], t["tp1"], t["tp2"], t["tp3"]
             risk = t["risk"]
+        elif mode == "MOMENTUM":
+            # STRUCTURAL derives the stop from `band` and TP3 from
+            # `opp_band`, which only makes sense when `band` is BELOW a
+            # BUY entry. In momentum mode `band` is the level being
+            # broken UPWARD, so that geometry inverts and would emit a
+            # stop above the entry. Refuse rather than emit nonsense.
+            per_side_reasons.append(f"{side}:structural-targets-need-REVERSION")
+            continue
         else:
             # Structural: SL just past the tested band + buffer; TPs scale
             # by distance to opposite band.
@@ -340,6 +472,7 @@ def find_golden_trio_candidate_diag(candles, target_mode=None):
         return {
             "pattern": PATTERN_NAME,
             "direction": side,
+            "entry_mode": mode,
             "setup_quality": float(max(0.0, min(1.0, setup_quality))),
             "entry_price": float(entry),
             "stop_loss": float(stop),

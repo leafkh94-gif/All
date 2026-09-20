@@ -185,10 +185,16 @@ def _normalized_quality(cand):
     return _setup_quality(cand)
 
 
-def find_candidate(entry_candles, target_mode=None):
+def find_candidate(entry_candles, target_mode=None, entry_mode=None):
     """Run both detectors; return the candidate with the higher setup
-    quality. Ties broken by GT preference (mean-reversion is the primary)."""
-    gt = find_golden_trio_candidate(entry_candles, target_mode=target_mode)
+    quality. Ties broken by GT preference (it is the primary detector).
+
+    entry_mode is passed to Golden Trio only. SMC finds order blocks and
+    CHOCH structure, which are not phrased as bounce-vs-breakout, so it
+    is identical in both modes -- and that is useful: it acts as a
+    control arm across the head-to-head."""
+    gt = find_golden_trio_candidate(entry_candles, target_mode=target_mode,
+                                    entry_mode=entry_mode)
     smc = _prepare_smc(find_smc_candidate(entry_candles), entry_candles, target_mode)
     if not gt and not smc:
         return None
@@ -199,11 +205,12 @@ def find_candidate(entry_candles, target_mode=None):
     return smc if _setup_quality(smc) > _setup_quality(gt) else gt
 
 
-def find_candidate_diag(entry_candles, target_mode=None):
+def find_candidate_diag(entry_candles, target_mode=None, entry_mode=None):
     """(candidate_or_None, block_reason_str). Runs both detectors; reports
     which one fired, or the GT block reason if neither did."""
     smc = _prepare_smc(find_smc_candidate(entry_candles), entry_candles, target_mode)
-    gt, gt_reason = find_golden_trio_candidate_diag(entry_candles, target_mode=target_mode)
+    gt, gt_reason = find_golden_trio_candidate_diag(
+        entry_candles, target_mode=target_mode, entry_mode=entry_mode)
     if smc and gt:
         winner = smc if _setup_quality(smc) > _setup_quality(gt) else gt
         return winner, None
@@ -279,6 +286,13 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
     if entry_df is None:
         entry_df = _ensure_df(market["entry"])
     atr_pts, atr_tag = ind.atr_sweet_spot_penalty(entry_df, mode=mode)
+    # Dead market is a veto, not a penalty. On real history, signals in a
+    # dead tape averaged -0.424R against -0.013R for everything else
+    # (n=91). No score penalty small enough to be proportionate was large
+    # enough to keep them out, and there is no follow-through to trade
+    # when ATR sits below the 10th percentile of its own range.
+    if atr_tag == "dead_market" and getattr(cfg, "ATR_DEAD_MARKET_VETO", False):
+        return None
     if atr_pts:
         atr_pts = max(atr_pts, cfg.SCORE_ATR_SWEET_SPOT_PENALTY)
         score += atr_pts

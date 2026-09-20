@@ -125,15 +125,31 @@ def test_score_candidate_score_is_bounded_0_100():
     assert 0 <= scored["score"] <= 100
 
 
-def test_score_candidate_omits_killzone_bonus():
-    # Killzone bonus intentionally disabled (SCORE_KILLZONE_MAX=0) so alerts
-    # aren't concentrated into the London/NY overlap. Verify no killzone
-    # tag reaches the breakdown regardless of scan time.
+def test_killzone_bonus_is_applied_and_capped():
+    """The killzone bonus was zeroed on the reasoning that gold trades
+    24/5 so the clock shouldn't matter. Real data disagreed -- the Asian
+    session averaged -0.11R against London's +0.06R -- so it is back at
+    SCORE_KILLZONE_MAX. What must hold is that it never exceeds the cap."""
     candidate = strat.find_candidate(_long_setup_candles())
     market = _market(_long_setup_candles())
-    scored = strat.score_candidate("XAUUSD", "COMMODITY", candidate, market, _now(), _StubLevelStore())
-    tags = [tag for tag, _ in scored["breakdown"]]
-    assert not any("KILLZONE" in tag for tag in tags)
+    scored = strat.score_candidate("XAUUSD", "COMMODITY", candidate, market,
+                                   _now(), _StubLevelStore())
+    kz = [pts for tag, pts in scored["breakdown"] if "KILLZONE" in tag or "SESSION" in tag]
+    for pts in kz:
+        assert 0 <= pts <= cfg.SCORE_KILLZONE_MAX
+
+
+def test_asian_session_scores_below_london_for_the_same_setup():
+    """The session handicap has to actually bite, or the config change is
+    cosmetic."""
+    import datetime as dt
+    candidate = strat.find_candidate(_long_setup_candles())
+    market = _market(_long_setup_candles())
+    asian = dt.datetime(2026, 7, 1, 2, 0, tzinfo=dt.timezone.utc)
+    london = dt.datetime(2026, 7, 1, 7, 30, tzinfo=dt.timezone.utc)
+    a = strat.score_candidate("XAUUSD", "COMMODITY", candidate, market, asian, _StubLevelStore())
+    l = strat.score_candidate("XAUUSD", "COMMODITY", candidate, market, london, _StubLevelStore())
+    assert a["score"] < l["score"]
 
 
 def test_score_candidate_short_setup_bias_bear_returns_scored_dict():
