@@ -116,6 +116,18 @@ def main():
                     help="Target ladder to test. Dispatch once per mode and "
                          "diff the expectancy before concluding the fixed "
                          "$25 stop suits every volatility regime.")
+    ap.add_argument("--entry-mode", choices=["REVERSION", "MOMENTUM"],
+                    default=None,
+                    help="Entry premise to test. REVERSION buys the n-bar "
+                         "low; MOMENTUM buys through the n-bar high. Use "
+                         "--also-entry-mode to run both over ONE fetch.")
+    ap.add_argument("--also-entry-mode", choices=["REVERSION", "MOMENTUM"],
+                    default=None,
+                    help="Run a second backtest in this mode over the SAME "
+                         "candles, writing <json>.<mode>.json. The whole "
+                         "point of the head-to-head is identical input, so "
+                         "prefer this over two dispatches -- two fetches can "
+                         "land on different windows.")
     ap.add_argument("--calibrate", action="store_true",
                     help="Also run tools/calibrate_scores.py on the result.")
     ap.add_argument("--record-all", action="store_true",
@@ -148,9 +160,28 @@ def main():
     ]
     if args.target_mode:
         cmd += ["--target-mode", args.target_mode]
+    if args.entry_mode:
+        cmd += ["--entry-mode", args.entry_mode]
     if args.record_all:
         cmd += ["--record-all"]
     subprocess.check_call(cmd)
+
+    if args.also_entry_mode:
+        # Same CSV, same flags, only the entry premise differs. Anything
+        # else varying between the two would confound the comparison.
+        second_json = f"{args.json}.{args.also_entry_mode}.json"
+        print(f"\n=== running backtest ({args.also_entry_mode}) ===")
+        cmd2 = [
+            sys.executable, "backtest.py",
+            "--candles", args.out,
+            "--json", second_json,
+            "--entry-mode", args.also_entry_mode,
+        ]
+        if args.target_mode:
+            cmd2 += ["--target-mode", args.target_mode]
+        if args.record_all:
+            cmd2 += ["--record-all"]
+        subprocess.check_call(cmd2)
 
     if args.calibrate:
         # Cheap (seconds) next to the backtest itself, and it is the step

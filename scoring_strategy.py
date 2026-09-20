@@ -185,10 +185,16 @@ def _normalized_quality(cand):
     return _setup_quality(cand)
 
 
-def find_candidate(entry_candles, target_mode=None):
+def find_candidate(entry_candles, target_mode=None, entry_mode=None):
     """Run both detectors; return the candidate with the higher setup
-    quality. Ties broken by GT preference (mean-reversion is the primary)."""
-    gt = find_golden_trio_candidate(entry_candles, target_mode=target_mode)
+    quality. Ties broken by GT preference (it is the primary detector).
+
+    entry_mode is passed to Golden Trio only. SMC finds order blocks and
+    CHOCH structure, which are not phrased as bounce-vs-breakout, so it
+    is identical in both modes -- and that is useful: it acts as a
+    control arm across the head-to-head."""
+    gt = find_golden_trio_candidate(entry_candles, target_mode=target_mode,
+                                    entry_mode=entry_mode)
     smc = _prepare_smc(find_smc_candidate(entry_candles), entry_candles, target_mode)
     if not gt and not smc:
         return None
@@ -199,11 +205,12 @@ def find_candidate(entry_candles, target_mode=None):
     return smc if _setup_quality(smc) > _setup_quality(gt) else gt
 
 
-def find_candidate_diag(entry_candles, target_mode=None):
+def find_candidate_diag(entry_candles, target_mode=None, entry_mode=None):
     """(candidate_or_None, block_reason_str). Runs both detectors; reports
     which one fired, or the GT block reason if neither did."""
     smc = _prepare_smc(find_smc_candidate(entry_candles), entry_candles, target_mode)
-    gt, gt_reason = find_golden_trio_candidate_diag(entry_candles, target_mode=target_mode)
+    gt, gt_reason = find_golden_trio_candidate_diag(
+        entry_candles, target_mode=target_mode, entry_mode=entry_mode)
     if smc and gt:
         winner = smc if _setup_quality(smc) > _setup_quality(gt) else gt
         return winner, None

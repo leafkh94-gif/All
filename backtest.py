@@ -12,6 +12,7 @@ Usage:
     python backtest.py --candles XAUUSD_M15.csv
     python backtest.py --candles XAUUSD_M15.csv --m5 XAUUSD_M5.csv --m1 XAUUSD_M1.csv
     python backtest.py --candles XAUUSD_M15.csv --target-mode ATR
+    python backtest.py --candles XAUUSD_M15.csv --entry-mode MOMENTUM
     python backtest.py --candles XAUUSD_M15.csv --json out.json
 
 CSV must have columns t, o, h, l, c (v optional). Timestamps ISO 8601 UTC.
@@ -278,7 +279,7 @@ class BacktestRun:
     """
 
     def __init__(self, candles, mode=None, m5=None, m1=None, target_mode=None,
-                 record_all=False):
+                 record_all=False, entry_mode=None):
         self.candles = candles
         # record_all keeps candidates that scored below WATCH too. The
         # normal log is censored at WATCH_MIN_SCORE, which makes it
@@ -287,6 +288,8 @@ class BacktestRun:
         self.record_all = record_all
         self.mode = mode or modes.STANDARD
         self.target_mode = target_mode or cfg.TARGET_MODE
+        self.entry_mode = str(entry_mode or getattr(cfg, "ENTRY_MODE",
+                                                    "REVERSION")).upper()
 
         # Optional finer timeframes for the real M5 / M1 layers.
         self.m5 = m5 or []
@@ -361,7 +364,8 @@ class BacktestRun:
         }
 
     def _find(self, market):
-        return strat.find_candidate(market["entry"], target_mode=self.target_mode)
+        return strat.find_candidate(market["entry"], target_mode=self.target_mode,
+                                    entry_mode=self.entry_mode)
 
     def _tick_pending(self, i):
         """Live analog: evaluate_pending_confirmations. Exactly one bar
@@ -479,6 +483,7 @@ class BacktestRun:
             "zlsma_status": scored.get("zlsma_status"),
             "chop_regime": scored.get("chop_regime"),
             "target_mode": scored.get("target_mode"),
+            "entry_mode": scored.get("entry_mode", self.entry_mode),
             "mtf_points": scored.get("mtf_points"),
             "mtf_available": scored.get("mtf_available"),
             # Execution
@@ -497,10 +502,10 @@ class BacktestRun:
 
 
 def run_backtest(candles, mode=None, m5=None, m1=None, target_mode=None,
-                 record_all=False):
+                 record_all=False, entry_mode=None):
     """Walk every bar, emit signals through the live pipeline."""
     run = BacktestRun(candles, mode=mode, m5=m5, m1=m1, target_mode=target_mode,
-                      record_all=record_all)
+                      record_all=record_all, entry_mode=entry_mode)
     warmup = max(
         cfg.GT_ZLSMA_PERIOD * 2 + cfg.GT_ZLSMA_SLOPE_LOOKBACK + 5,
         16 * 30,   # need ≥30 H4 bars for the H4 regime read
@@ -580,7 +585,7 @@ def _rate_block(name, subset, span_days):
     print(f"  {name}: n={n}  ({per_week:.1f}/week)  {_fmt(_stats(subset))}")
 
 
-def print_summary(signals, candles=None, target_mode=None):
+def print_summary(signals, candles=None, target_mode=None, entry_mode=None):
     # Sub-threshold rows (only present with --record-all) are distribution
     # data for tools/tune_thresholds.py, never alerts. Counting them as
     # "opportunities" would silently inflate every rate in this report.
@@ -589,7 +594,8 @@ def print_summary(signals, candles=None, target_mode=None):
     tradeable = [s for s in signals if s.get("tradeable", True)]
     suppressed = [s for s in signals if not s.get("tradeable", True)]
 
-    print(f"\nTarget mode: {target_mode or cfg.TARGET_MODE}")
+    print(f"\nEntry mode:  {entry_mode or getattr(cfg, 'ENTRY_MODE', 'REVERSION')}")
+    print(f"Target mode: {target_mode or cfg.TARGET_MODE}")
     print(f"Total opportunities recorded: {len(signals)}")
     if below:
         print(f"(+{len(below)} sub-threshold candidates logged for threshold "
@@ -707,6 +713,13 @@ def main():
                         help="M15 CSV path with columns t,o,h,l,c[,v] chronological")
     parser.add_argument("--m5", help="Optional M5 CSV; enables the real M5 confirmation layer")
     parser.add_argument("--m1", help="Optional M1 CSV; enables the real M1 timing layer")
+    parser.add_argument("--entry-mode", choices=["REVERSION", "MOMENTUM"],
+                        default=None,
+                        help="REVERSION buys the n-bar low (original Golden "
+                             "Trio); MOMENTUM buys through the n-bar high. "
+                             "Everything downstream is identical, so running "
+                             "both on one file is a clean head-to-head on the "
+                             "entry premise. See ENTRY_MODE in strategy_config.")
     parser.add_argument("--target-mode", choices=["FIXED", "ATR"], default=None,
                         help="Override cfg.TARGET_MODE. Run both and compare "
                              "before concluding the fixed $25 ladder is right.")
@@ -731,15 +744,17 @@ def main():
         print(f"Loaded {len(m1)} M1 candles from {args.m1}")
 
     target_mode = args.target_mode or cfg.TARGET_MODE
+    entry_mode = (args.entry_mode or getattr(cfg, "ENTRY_MODE", "REVERSION")).upper()
     signals = run_backtest(candles, m5=m5, m1=m1, target_mode=target_mode,
-                           record_all=args.record_all)
+                           record_all=args.record_all, entry_mode=entry_mode)
     # Persist BEFORE reporting. The run is the expensive part; a bug in
     # the summary formatting must not throw away its results.
     if args.json:
         with open(args.json, "w") as f:
             json.dump(signals, f, indent=2, default=str)
         print(f"Per-signal log written to {args.json}")
-    print_summary(signals, candles=candles, target_mode=target_mode)
+    print_summary(signals, candles=candles, target_mode=target_mode,
+                  entry_mode=entry_mode)
     if args.json:
         print("Next: python tools/calibrate_scores.py --signals "
               f"{args.json} --oos-split 0.7")

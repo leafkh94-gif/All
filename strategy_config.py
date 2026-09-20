@@ -109,6 +109,47 @@ ATR_TARGET_PERIOD = 14
 # the geometry, not a pattern fitted to a particular price path.
 ENTRY_PULLBACK_ATR = 0.5
 
+# ─────────────────────────────────────────────────────────────────────
+# ENTRY_MODE — which direction the setup leans
+# ─────────────────────────────────────────────────────────────────────
+# "REVERSION": the original Golden Trio. A BUY wants price at the n-bar
+#   LOW with RSI hooking up off a dip -- buy weakness, expect a bounce.
+# "MOMENTUM":  the mirror. A BUY wants price at or through the n-bar
+#   HIGH with RSI rising -- buy strength, expect continuation.
+#
+# This exists because tools/premise_check.py measured the reversion
+# premise on 25,000 real M15 bars and did not find it:
+#
+#   after a 10-bar HIGH, the next 10-bar move was +0.883 (t=+2.4)
+#   after a 10-bar LOW,  the next 10-bar move was +0.485 (t=+1.2)
+#
+# The bounce premise needs the second number positive and the FIRST
+# NEGATIVE. Instead both are positive and the high side is the
+# significant one. The conditional test agreed: after up-moves the next
+# move is positive and strengthens with horizon (t=+2.1 -> +2.8 -> +3.4),
+# while down-moves do not revert at all.
+#
+# Everything else -- scoring, MTF, targets, thresholds, the position
+# gate -- is IDENTICAL between the two modes. That is deliberate: it is
+# the only way the head-to-head measures the entry premise rather than a
+# confound. Switch with --entry-mode on backtest.py.
+#
+# CAUTION: the momentum evidence above is one instrument over one year
+# with several horizons tested, and it overlaps a gold uptrend. It is a
+# reason to TEST continuation, not a finding that continuation is
+# profitable. Nothing has validated MOMENTUM as a live default.
+ENTRY_MODE = "REVERSION"
+
+# Momentum-mode evidence constants. Only read when ENTRY_MODE ==
+# "MOMENTUM"; the reversion path is untouched by them.
+GT_MOM_RSI_SLOPE_BARS = 3        # bars over which RSI slope is measured
+GT_MOM_RSI_SLOPE_SATURATE = 10.0  # RSI points of travel that saturate quality
+GT_MOM_RSI_NEUTRAL_FLOOR = 50     # a BUY below this is a bounce inside a
+                                  # downtrend, not continuation: 0.5x weight
+GT_MOM_RSI_EXHAUSTION = 80        # overbought is NOT a veto in momentum mode
+                                  # -- that is the point -- but extreme
+                                  # readings get a mild 0.8x discount
+
 # Legacy fixed ladder — kept so --target-mode FIXED still works.
 FIXED_SL_POINTS = 25
 FIXED_TP1_POINTS = 25
@@ -430,6 +471,34 @@ GT_PROXIMITY_ATR_MULT = 2.0
 # now fires with a smoothly decaying quality score instead of being
 # silently rejected.
 GT_PROXIMITY_ATR_HARD_VETO = 5.0
+
+# ─────────────────────────────────────────────────────────────────────
+# Band proximity is measured against the CHANNEL, not against ATR
+# ─────────────────────────────────────────────────────────────────────
+# The ATR constants above are retained only as a degenerate fallback for
+# a collapsed channel. They are not the live thresholds, because in ATR
+# terms they could not discriminate anything:
+#
+#   measured 10-bar Donchian width   = 2.98 ATR (median)
+#   GT_PROXIMITY_ATR_MULT      = 2.0 ATR = 67% of the whole channel
+#   GT_PROXIMITY_ATR_HARD_VETO = 5.0 ATR = 168% of the whole channel
+#
+# A hard cap wider than the channel it guards can never reject a bar
+# inside that channel, and a "good zone" spanning two thirds of the
+# range makes every bar simultaneously near the low AND near the high.
+# So turtle_quality -- weighted GT_QUALITY_WEIGHT_TURTLE (0.4) of
+# setup_quality -- was contributing close to noise, and "at the band"
+# had no meaning. Measured directly: reversion BUYs sat at median 0.43
+# of the channel and momentum BUYs at 0.51, where the two premises
+# should be at opposite ends.
+#
+# Expressed as a fraction of channel width the thresholds bind, and the
+# two entry premises become genuinely different populations.
+#
+# NOTE: this changes the REVERSION baseline too. Every result recorded
+# before this fix was measured with an inert location axis.
+GT_PROXIMITY_CHANNEL_FRAC = 0.25   # outer quarter = "at the band": 1.0 -> 0.5
+GT_PROXIMITY_CHANNEL_HARD = 0.70   # past 70% across the channel -> reject
 GT_SL_BUFFER_ATR_MULT = 0.25
 GT_QUALITY_MAX = 40
 
