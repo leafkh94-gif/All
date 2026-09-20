@@ -163,9 +163,15 @@ rate — is the number that decides whether this is worth trading.
 
 ## Real-data results (52 weeks, XAUUSD M15)
 
+> **SUPERSEDED.** The figures in this section predate the
+> channel-relative proximity fix and were measured with a location axis
+> that could not discriminate. The current REVERSION baseline is
+> **+0.004R on n=3419 filled** — see "The entry premise, measured"
+> above. The reasoning below still holds; the numbers do not.
+
 Two runs of the backtest workflow against live Capital.com history. The
-second is the one that matters: 25,000 M15 bars, 2025-08-29 → 2026-09-11,
-ATR mode, on the recalibrated config.
+second was, at the time, the one that mattered: 25,000 M15 bars,
+2025-08-29 → 2026-09-11, ATR mode.
 
 ```
 n=2039 filled   53% WR   +0.039R ±0.046   pf 1.08   (+80.1R total)
@@ -278,6 +284,88 @@ around SMC on the basis of this data.
 Three of the four component changes made after the first real run rest
 on evidence that either failed or is now in doubt. The config records
 which is which.
+
+## The entry premise, measured (`tools/compare_entry_modes.py`)
+
+The premise check below says gold continues after up-moves and does not
+bounce off band extremes. `ENTRY_MODE = "MOMENTUM"` was built to act on
+that, and run head-to-head against `REVERSION` over **one fetch** of the
+same 25,000 real M15 bars, so the candles are identical and only the
+entry premise differs.
+
+```
+cost          mode            n   win%     avgR   ±1.96SE     PF
+ideal         REVERSION    3419    51%   +0.043     0.037   1.09
+ideal         MOMENTUM     3810    52%   +0.065     0.034   1.14
+              diff                       +0.022   t=+0.9  not significant
+              paired       2085          -0.006   t=-1.3  not significant
+
+realistic     REVERSION    3419    51%   +0.004     0.035   1.01
+realistic     MOMENTUM     3810    52%   +0.024     0.033   1.05
+              diff                       +0.020   t=+0.8  not significant
+              paired       2085          -0.006   t=-1.3  not significant
+
+conservative  REVERSION    3419    51%   -0.033     0.034   0.93
+conservative  MOMENTUM     3810    52%   -0.013     0.032   0.97
+              diff                       +0.020   t=+0.8  not significant
+              paired       2085          -0.005   t=-1.3  not significant
+```
+
+### The momentum rewrite did not deliver an edge
+
+This is the headline and it is negative. The premise check produced the
+strongest statistical signal in this repository (momentum after up-moves,
+t=+3.4). Building the entry around it moved realistic expectancy from
++0.004R to +0.024R — **t=+0.8, indistinguishable from noise**.
+
+A true premise does not automatically make a tradeable strategy. What
+sits between them here: a 0.5-ATR pullback entry, a 3×ATR stop, a
+50/30/20 partial-exit ladder, spread, and a score threshold. Any of those
+can consume a drift this small.
+
+**At conservative cost both modes lose money** (PF 0.93 and 0.97).
+
+### Paired and unpaired disagree, again
+
+Unpaired, momentum leads at every cost level. Paired — comparing only the
+2,085 bars where *both* modes traded — reversion leads slightly at every
+cost level. The same inversion appeared on synthetic data.
+
+That means momentum's apparent lead comes from **which bars it selects**,
+not from handling the same bar better. Neither difference is significant,
+so the honest reading is that the two premises are indistinguishable here.
+
+### RETRACTED: the +0.039R reversion baseline
+
+The 52-week REVERSION figure quoted before this run was **+0.039R
+(n=2039 filled)**. It is superseded: that run predates the
+channel-relative proximity fix, so it was measured with a location axis
+that could not discriminate.
+
+| | old (inert gate) | current |
+|---|---|---|
+| realistic avgR | +0.039R | **+0.004R** |
+| filled | 2039 | 3419 |
+
+Fixing the gate produced **more** candidates at **lower** expectancy. Do
+not quote the old number.
+
+### The most likely explanation, and the one test that would check it
+
+`ENTRY_PULLBACK_ATR = 0.5` was designed and validated against the
+REVERSION setup on a driftless control, where entering at the trigger
+bar's close was a measured ~8-point win-rate penalty. For a *continuation*
+entry that logic may invert: waiting for price to retrace half an ATR
+against a breakout means you are preferentially filled on the breakouts
+that **fail**, which is textbook adverse selection.
+
+Fill rates do not settle it (72% reversion, 75% momentum), because fill
+rate alone cannot show whether the filled subset is the worse subset.
+
+The single clean test is MOMENTUM with `ENTRY_PULLBACK_ATR = 0`. **It has
+not been run.** Note also that this is now several variants deep on one
+instrument over one window, which is exactly the regime where a
+nice-looking result means least.
 
 ## Do the strategy's premises hold? (`tools/premise_check.py`)
 
