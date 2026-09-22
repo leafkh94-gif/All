@@ -1,60 +1,40 @@
 """
-Gold-only trading alert bot — scoring engine.
+Gold-only trading alert bot — scoring engine (SATS).
 
-    M15 SETUP (Golden Trio / SMC) creates the opportunity.
-    M5 / H1 / H4 / M1 modify confidence. They do not veto.
+The bot runs SATS (Self-Aware Trend System) as its sole strategy. A
+confirmed SuperTrend flip on the entry timeframe (M15) is the signal; the
+signal is graded by its Trend Quality Index (TQI). See strategy/sats.py for
+the engine.
 
-Score is assembled from three groups on one 0..100 scale:
+    score = round(100 * TQI)
 
-  A. SETUP    setup_quality * SCORE_SETUP_MAX, plus a signed
-              trend-alignment axis (ZLSMA slope for GT, the same slope
-              measured against the structural direction for SMC).
-  B. MTF      strategy.mtf -- H4 regime, H1 context, M5 confirmation,
-              M1 entry timing. Each signed and bounded; unavailable ==
-              neutral == exactly 0 points.
-  C. CONTEXT  round-number confluence, chop-regime penalty, ATR
-              sweet-spot penalty.
+so the whole downstream — tiers, tools/calibrate_scores.py,
+tools/tune_thresholds.py, the walk-forward report — keeps working on the
+familiar 0..100 scale. Tiers (strategy_config):
 
-Tiers:
-    WATCH: score >= WATCH_MIN_SCORE
-    A+   : score >= APLUS_MIN_SCORE
+    WATCH: score >= WATCH_MIN_SCORE   (TQI >= 0.35)
+    A+   : score >= APLUS_MIN_SCORE   (TQI >= 0.70)
 
-There are deliberately **no post-score vetoes**. An unfavourable H4
-regime, a flat or opposing ZLSMA, and a chop regime all cost points;
-none of them can take a 75-point setup and refuse to call it A+. The
-penalties are sized so a setup with genuinely bad context cannot reach
-the A+ threshold on setup quality alone.
+SATS is single-timeframe and self-contained: it does not consult H1/H4/M5/M1
+and there is no ZLSMA/SMC/round-number/killzone layer. Those modules remain
+in the tree for reference but are no longer on the live path. `market` is
+still accepted by score_candidate for interface compatibility (and so the
+backtester's look-ahead audit still records the higher-timeframe bar
+timestamps), but nothing in it changes a SATS score.
 
-Two things this file does NOT claim:
-  - that a GT setup_quality of 0.8 and an SMC setup_quality of 0.8 carry
-    the same expectancy. They share an axis and a budget; whether they
-    share a *meaning* is measured by tools/calibrate_scores.py.
-  - that any particular score maps to any particular win rate. The
-    thresholds are structural defaults, not calibrated ones, until a
-    large out-of-sample run says otherwise.
-
-PERF: accepts pre-built DataFrames to avoid per-call reconstruction.
+Golden Trio and SMC previously created candidates here; that history and its
+evaluation live in git and the README. The one thing worth repeating: a
+grade is a description of the current tape, not a probability of profit.
 """
 import json
 import os
 
 import pandas as pd
 
-import market_sessions
-import scoring_indicators as ind
 import strategy_config as cfg
-from strategy import mtf, targets
-from strategy.golden_trio import (
-    find_golden_trio_candidate,
-    find_golden_trio_candidate_diag,
-    market_context,
-)
-from strategy.smc_detector import find_smc_candidate
+from strategy import sats
 
 
-# ────────────────────────────────────────────────────────────────██[...]
-# Higher-timeframe bias
-# ────────────────────────────────────────────────────────────────██[...]
 def _ensure_df(data):
     """Convert candle list to DataFrame if needed; pass-through if already a DF."""
     if isinstance(data, pd.DataFrame):
@@ -62,261 +42,77 @@ def _ensure_df(data):
     return pd.DataFrame(data)
 
 
-def htf_bias(candles_h4, flat_band_pct=cfg.MTF_H4_FLAT_BAND_PCT):
-    """Bull / bear / flat from H4 candles.
-
-    Thin wrapper over strategy.mtf.h4_regime so the regime label shown in
-    alerts and the H4 points added to the score can never disagree --
-    there is one implementation, not two. The direction passed is
-    irrelevant to the returned label.
-    """
-    return mtf.h4_regime(candles_h4 or [], "BUY", flat_band_pct=flat_band_pct)["bias"]
-
-
-def opposes(bias, direction):
-    """True when an H4 regime label contradicts a trade direction.
-
-    No longer used for scoring -- H4 is a continuous signed contribution
-    in strategy.mtf now, not a boolean. Retained because the alert
-    formatting and diagnostics still want the plain-English label.
-    """
-    return (bias == "BULL" and direction == "SELL") or (bias == "BEAR" and direction == "BUY")
-
-
-def aligns(bias, direction):
-    """True when an H4 regime label agrees with a trade direction."""
-    return (bias == "BULL" and direction == "BUY") or (bias == "BEAR" and direction == "SELL")
-
-
-# Back-compat aliases.
-_opposes = opposes
-_aligns = aligns
-
-
-# ────────────────────────────────────────────────────────────────██[...]
-# Candidate discovery + scoring
-# ────────────────────────────────────────────────────────────────██[...]
-SMC_PATTERNS = ("ORDER_BLOCK", "CHOCH_REVERSAL", "SMC_LIQUIDITY_SWEEP")
-
-
-def _setup_quality(cand):
-    """Both detectors' quality on ONE 0..1 axis.
-
-    Golden Trio reports setup_quality directly (weighted RSI + Turtle
-    evidence). SMC reports a 0..PATTERN_QUALITY_BASE_MAX integer, divided
-    here. Older candidate dicts without setup_quality fall back to the
-    legacy sum so nothing crashes mid-upgrade.
-
-    Sharing an axis makes the two *comparable*; it does not make them
-    *equivalent*. Run tools/calibrate_scores.py to find out whether GT
-    0.8 and SMC 0.8 actually earn the same expectancy, and reweight
-    GT_QUALITY_WEIGHT_* / PATTERN_QUALITY_BASE_MAX from that, not from
-    the fact that both now happen to end at 1.0.
-    """
-    if not cand:
-        return -1.0
-    q = cand.get("setup_quality")
-    if q is not None:
-        return float(max(0.0, min(1.0, q)))
-    if cand.get("quality") is not None:
-        qmax = cand.get("quality_max") or cfg.PATTERN_QUALITY_BASE_MAX
-        return float(max(0.0, min(1.0, cand["quality"] / qmax))) if qmax else 0.0
-    legacy = cand.get("rsi_quality", 0) + cand.get("turtle_quality", 0)
-    return float(max(0.0, min(1.0, legacy / 50.0)))
-
-
-def _attach_targets_if_missing(cand, entry_candles=None, target_mode=None):
-    """SMC detectors return sweep_price + direction; attach the same
-    entry/stop/TP ladder Golden Trio uses so score_candidate sees a
-    uniform candidate shape. Uses strategy.targets so FIXED and ATR modes
-    behave identically for both detectors."""
-    if not cand or "entry_price" in cand:
-        return cand
-    mode = target_mode or cfg.TARGET_MODE
-    if mode not in ("FIXED", "ATR"):
-        return cand   # structural SMC entry/exit not implemented here
-    entry = cand.get("sweep_price")
-    if entry is None:
-        return cand
-    atr_value = cand.get("atr") or targets.atr_from_candles(entry_candles)
-    t = targets.build_targets(entry, cand["direction"], atr_value=atr_value, mode=mode)
-    if not t:
-        return cand
-    cand["entry_price"] = float(entry)
-    cand["stop_loss"] = float(t["stop_loss"])
-    cand["tp1"] = float(t["tp1"])
-    cand["tp2"] = float(t["tp2"])
-    cand["tp3"] = float(t["tp3"])
-    cand["risk"] = float(t["risk"])
-    cand["target_mode"] = t["target_mode"]
-    return cand
-
-
-def _attach_context(cand, entry_candles):
-    """Give an SMC candidate the same trend-alignment and chop axes
-    Golden Trio produces, measured the same way on the same candles.
-
-    Without this, SMC candidates carried no zlsma_status at all and the
-    trend axis was simply skipped for half the signals -- which is not a
-    fair comparison between detectors, it's a different score formula
-    per detector."""
-    if not cand or cand.get("zlsma_status") is not None:
-        return cand
-    ctx = market_context(entry_candles, cand["direction"])
-    if ctx:
-        cand["zlsma_status"] = ctx["zlsma_status"]
-        cand.setdefault("chop_regime", ctx["chop_regime"])
-        cand.setdefault("atr", ctx["atr"])
-    return cand
-
-
-def _prepare_smc(cand, entry_candles, target_mode=None):
-    cand = _attach_context(cand, entry_candles)
-    return _attach_targets_if_missing(cand, entry_candles, target_mode=target_mode)
-
-
-# Back-compat alias for callers/tests that imported the old name.
-def _add_fixed_targets_if_missing(cand):
-    return _attach_targets_if_missing(cand)
-
-
-def _normalized_quality(cand):
-    """Deprecated alias for _setup_quality; kept for external callers."""
-    return _setup_quality(cand)
-
-
+# ────────────────────────────────────────────────────────────────
+# Candidate discovery
+# ────────────────────────────────────────────────────────────────
 def find_candidate(entry_candles, target_mode=None, entry_mode=None):
-    """Run both detectors; return the candidate with the higher setup
-    quality. Ties broken by GT preference (it is the primary detector).
+    """Return a SATS signal for a confirmed flip on the last candle, or None.
 
-    entry_mode is passed to Golden Trio only. SMC finds order blocks and
-    CHOCH structure, which are not phrased as bounce-vs-breakout, so it
-    is identical in both modes -- and that is useful: it acts as a
-    control arm across the head-to-head."""
-    gt = find_golden_trio_candidate(entry_candles, target_mode=target_mode,
-                                    entry_mode=entry_mode)
-    smc = _prepare_smc(find_smc_candidate(entry_candles), entry_candles, target_mode)
-    if not gt and not smc:
-        return None
-    if not smc:
-        return gt
-    if not gt:
-        return smc
-    return smc if _setup_quality(smc) > _setup_quality(gt) else gt
+    target_mode / entry_mode are accepted for backwards compatibility with
+    the backtester's call sites but do not apply to SATS: it is a single
+    trend-following model with its own TP mode (cfg.SATS_TP_MODE) and no
+    reversion/momentum variants. They are ignored.
+    """
+    return sats.evaluate(entry_candles)
 
 
 def find_candidate_diag(entry_candles, target_mode=None, entry_mode=None):
-    """(candidate_or_None, block_reason_str). Runs both detectors; reports
-    which one fired, or the GT block reason if neither did."""
-    smc = _prepare_smc(find_smc_candidate(entry_candles), entry_candles, target_mode)
-    gt, gt_reason = find_golden_trio_candidate_diag(
-        entry_candles, target_mode=target_mode, entry_mode=entry_mode)
-    if smc and gt:
-        winner = smc if _setup_quality(smc) > _setup_quality(gt) else gt
-        return winner, None
-    if smc:
-        return smc, None
-    if gt:
-        return gt, None
-    return None, f"GT: {gt_reason} | SMC: none"
+    """(candidate_or_None, block_reason_str) — see strategy.sats.evaluate_diag."""
+    sig, reason = sats.evaluate_diag(entry_candles)
+    return sig, (None if sig else f"SATS: {reason}")
+
+
+# ────────────────────────────────────────────────────────────────
+# Scoring
+# ────────────────────────────────────────────────────────────────
+def _setup_quality(cand):
+    """SATS setup quality is the TQI directly (0..1)."""
+    if not cand:
+        return -1.0
+    q = cand.get("setup_quality")
+    if q is None:
+        q = cand.get("tqi", 0.0)
+    return float(max(0.0, min(1.0, q)))
 
 
 def score_candidate(instrument, instrument_class, candidate, market, now_utc, level_store,
                     pending_store=None, mode=None, entry_df=None):
-    """Score a candidate from scratch (base 0).
+    """Grade a SATS candidate. score = round(100 * TQI); tier from thresholds.
 
-    Args:
-        market: dict with "entry" plus any of "m1"/"m5"/"h1"/"h4". Missing
-                timeframes contribute exactly 0 -- see strategy.mtf.
-        entry_df: Pre-built DataFrame for market["entry"]. If None, built
-                  on-demand. PERF: pass this to avoid reconstruction.
+    `market`, `now_utc`, `level_store`, `entry_df` are accepted for interface
+    compatibility. SATS grades purely on TQI, so they do not affect the
+    score — but keeping the signature lets the live loop and the backtester
+    call this unchanged.
     """
     if candidate is None:
         return None
 
-    direction = candidate["direction"]
-    zlsma_status = candidate.get("zlsma_status")
-    is_smc = candidate["pattern"] in SMC_PATTERNS
+    tqi = _setup_quality(candidate)
+    score = int(round(100 * tqi))
 
-    score = 0
-    breakdown = []
-
-    # ── A. M15 setup ────────────────────────────────────────────────
-    quality = _setup_quality(candidate)
-    setup_pts = int(round(quality * cfg.SCORE_SETUP_MAX))
-    score += setup_pts
-    setup_tag = f"smc_{candidate['pattern'].lower()}" if is_smc else "gt_setup"
-    breakdown.append((setup_tag, setup_pts))
-
-    # Trend-alignment axis. Same points, same measurement, both detectors.
-    if zlsma_status == "aligned":
-        score += cfg.SCORE_ZLSMA_ALIGNED
-        breakdown.append(("zlsma_aligned", cfg.SCORE_ZLSMA_ALIGNED))
-    elif zlsma_status == "against":
-        score += cfg.SCORE_ZLSMA_AGAINST
-        breakdown.append(("zlsma_against", cfg.SCORE_ZLSMA_AGAINST))
-    else:  # "flat" or unavailable
-        breakdown.append(("zlsma_flat", 0))
-
-    # ── B. MTF layer ────────────────────────────────────────────────
-    mtf_pts, mtf_rows, mtf_detail = mtf.evaluate(
-        market, direction, entry_price=candidate.get("entry_price"))
-    score += mtf_pts
-    breakdown.extend(mtf_rows)
-    bias = mtf_detail["h4"].get("bias", "FLAT")
-
-    # ── C. Context ──────────────────────────────────────────────────
-    if candidate.get("chop_regime"):
-        score += cfg.SCORE_CHOP_PENALTY
-        breakdown.append(("chop_regime", cfg.SCORE_CHOP_PENALTY))
-
-    killzone_pts, killzone_tag = market_sessions.killzone_score(now_utc, instrument_class)
-    killzone_pts = min(killzone_pts, cfg.SCORE_KILLZONE_MAX)
-    if killzone_pts:
-        score += killzone_pts
-        breakdown.append((killzone_tag, killzone_pts))
-
-    rn_pts = ind.round_number_bonus(candidate["entry_price"], instrument)
-    if rn_pts:
-        rn_pts = min(rn_pts, cfg.SCORE_ROUND_NUMBER)
-        score += rn_pts
-        breakdown.append(("round_number", rn_pts))
-
-    # PERF: use pre-built entry_df if provided, avoid reconstruction.
-    if entry_df is None:
-        entry_df = _ensure_df(market["entry"])
-    atr_pts, atr_tag = ind.atr_sweet_spot_penalty(entry_df, mode=mode)
-    # Dead market is a veto, not a penalty. On real history, signals in a
-    # dead tape averaged -0.424R against -0.013R for everything else
-    # (n=91). No score penalty small enough to be proportionate was large
-    # enough to keep them out, and there is no follow-through to trade
-    # when ATR sits below the 10th percentile of its own range.
-    if atr_tag == "dead_market" and getattr(cfg, "ATR_DEAD_MARKET_VETO", False):
-        return None
-    if atr_pts:
-        atr_pts = max(atr_pts, cfg.SCORE_ATR_SWEET_SPOT_PENALTY)
-        score += atr_pts
-        breakdown.append((atr_tag, atr_pts))
-
-    score = max(0, min(100, score))
-
-    # ── Tier ────────────────────────────────────────────────────────
-    # No post-score vetoes. Everything that used to block A+ here (H4
-    # opposed, chop regime, non-aligned ZLSMA) is now a signed score
-    # contribution above, so "this is a 75-point setup that we refuse to
-    # call A+" can no longer happen. A setup carrying all three
-    # negatives loses roughly 34 points, which is more than enough to
-    # keep it under APLUS_MIN_SCORE without a separate gate.
     m = mode
     aplus_min = m.aplus_min_score if m is not None else cfg.APLUS_MIN_SCORE
     watch_min = m.watch_min_score if m is not None else cfg.WATCH_MIN_SCORE
     aplus_eligible = score >= aplus_min
     tier = "A+" if aplus_eligible else ("WATCH" if score >= watch_min else "NONE")
 
+    # Breakdown values must be ints: the alert formatter renders them with
+    # ":+d". TQI and ER are shown on a 0..100 scale; the flip reason and
+    # char-flip flag ride on dedicated keys below, not in the breakdown.
+    er = candidate.get("er")
+    breakdown = [
+        ("sats_tqi", score),
+        ("sats_er", int(round(er * 100)) if er is not None else 0),
+    ]
+    if candidate.get("char_flip"):
+        breakdown.append(("char_flip", 1))
+
+    trend_lbl = "UP" if candidate["direction"] == "BUY" else "DOWN"
+
     return {
         "instrument": instrument,
         "instrument_class": instrument_class,
-        "direction": direction,
+        "direction": candidate["direction"],
         "pattern": candidate["pattern"],
         "entry_price": candidate["entry_price"],
         "stop_loss": candidate["stop_loss"],
@@ -327,25 +123,30 @@ def score_candidate(instrument, instrument_class, candidate, market, now_utc, le
         "score": score,
         "tier": tier,
         "breakdown": breakdown,
-        "htf_bias": bias,
-        "zlsma_status": zlsma_status,
+        # SATS is single-timeframe: no H4 bias, no ZLSMA, no MTF layer.
+        "htf_bias": f"TREND {trend_lbl}",
+        "zlsma_status": None,
         "aplus_eligible": aplus_eligible,
-        "setup_quality": round(quality, 4),
-        "mtf": mtf_detail,
-        "mtf_points": mtf_pts,
-        "mtf_available": mtf.availability(mtf_detail),
-        "target_mode": candidate.get("target_mode", cfg.TARGET_MODE),
+        "setup_quality": round(tqi, 4),
+        "tqi": round(tqi, 4),
+        "char_flip": bool(candidate.get("char_flip")),
+        "reason": candidate.get("reason"),
+        "mtf": {},
+        "mtf_points": 0,
+        "mtf_available": "none",
+        "target_mode": candidate.get("target_mode", "SATS_FIXED"),
         "chop_regime": bool(candidate.get("chop_regime")),
-        "rsi": candidate.get("rsi"),
-        "zlsma": candidate.get("zlsma"),
-        "turtle_upper": candidate.get("turtle_upper"),
-        "turtle_lower": candidate.get("turtle_lower"),
+        "rsi": None,
+        "zlsma": None,
+        "turtle_upper": None,
+        "turtle_lower": None,
+        "st_line": candidate.get("st_line"),
     }
 
 
-# ────────────────────────────────────────────────────────────────██[...]
+# ────────────────────────────────────────────────────────────────
 # Pending A+ store — 1-candle confirmation delay before an alert fires
-# ────────────────────────────────────────────────────────────────██[...]
+# ────────────────────────────────────────────────────────────────
 class PendingAPlusStore:
     def __init__(self, path=None):
         self.path = path or os.path.join("state", "pending_aplus.json")
