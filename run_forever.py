@@ -29,7 +29,6 @@ import requests
 import main_alerts as ma
 import scoring_strategy as strat
 from strategy import modes
-from strategy.smc_detector import assert_smc_available
 
 TELEGRAM_API = f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}"
 CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
@@ -352,10 +351,8 @@ def next_scan_timestamp(now_ts=None, interval_minutes=None):
 
 
 def main():
-    # Half the signal engine is SMC. If the library is missing the SMC
-    # detectors silently return None and the bot ships gold alerts on
-    # Golden Trio alone with no warning. Fail here instead.
-    assert_smc_available()
+    # The bot runs SATS (strategy/sats.py), which depends only on
+    # pandas/numpy — no external signal library to check for.
     deadline = time.time() + MAX_RUNTIME_MINUTES * 60 if MAX_RUNTIME_MINUTES else None
     print(f"bot starting — real-time mode"
           + (f" (bounded, {MAX_RUNTIME_MINUTES:.0f} min)" if deadline else ""))

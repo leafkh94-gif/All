@@ -200,10 +200,88 @@ ROUND_NUMBER_OFFSET_TABLE = {
 # full sample, and the calibration verdict is NOT MONOTONIC on every run
 # so far. A+ at 65 is therefore a CADENCE choice only (~12% of alerts),
 # not a quality claim, and must not be presented as higher-conviction.
-NO_ALERT_MAX = 44
-WATCH_MIN_SCORE = 45
-WATCH_MAX_SCORE = 64
-APLUS_MIN_SCORE = 65
+# ─────────────────────────────────────────────────────────────────────
+# STRATEGY: the bot now runs SATS (Self-Aware Trend System) as its sole
+# strategy. Golden Trio, SMC and the MTF veto layer are no longer on the
+# live path (their modules remain in the tree for reference and their own
+# tests). See strategy/sats.py.
+#
+# A SATS signal is graded by its Trend Quality Index: the pipeline sets
+# score = round(100 * TQI), so these thresholds are TQI grades on a 0..100
+# scale and every existing tier / calibration / walk-forward tool keeps
+# working unchanged. Grades mirror the Pine indicator's TQI ladder:
+#   A+  TQI >= 0.70   (score 70)
+#   A   TQI >= 0.50   (score 50)   -> WATCH band
+#   B   TQI >= 0.35   (score 35)   -> WATCH floor; below this = no alert
+# NOTE: these are quality grades, not calibrated win-rate thresholds. A
+# high TQI means "the tape is currently behaving like a clean trend", not
+# "this trade will win".
+STRATEGY = "SATS"
+
+NO_ALERT_MAX = 34
+WATCH_MIN_SCORE = 35
+WATCH_MAX_SCORE = 69
+APLUS_MIN_SCORE = 70
+
+# ─────────────────────────────────────────────────────────────────────
+# SATS engine parameters (strategy/sats.py). Defaults mirror the Pine
+# "Default" preset. All distances are in ATR multiples; the engine is
+# single-timeframe (the entry timeframe, M15).
+# ─────────────────────────────────────────────────────────────────────
+SATS_ATR_LEN = 14
+SATS_BASE_MULT = 2.0            # base SuperTrend band width (xATR)
+SATS_ER_LEN = 20               # Kaufman efficiency window
+SATS_ATR_BASELINE_LEN = 100    # long ATR baseline for the vol-regime factor
+
+# Legacy ER adaptation (linear); TQI below is the primary engine.
+SATS_USE_ADAPTIVE = True
+SATS_ADAPT_STRENGTH = 0.5
+
+# Trend Quality Index
+SATS_USE_TQI = True
+SATS_QUALITY_STRENGTH = 0.4    # how hard TQI compresses/expands bands
+SATS_QUALITY_CURVE = 1.5       # >1: ignore mild quality drops, react to severe
+SATS_MULT_SMOOTH = True        # EMA-smooth multipliers before the ratchet
+SATS_USE_ASYM = True           # tighten active side, widen passive side
+SATS_ASYM_STRENGTH = 0.5
+SATS_USE_EFF_ATR = True        # scale ATR by (0.5 + 0.5*ER)
+
+# TQI factor weights (need not sum to 1; normalised internally)
+SATS_TQI_W_ER = 0.35
+SATS_TQI_W_VOL = 0.20
+SATS_TQI_W_STRUCT = 0.25
+SATS_TQI_W_MOM = 0.20
+SATS_STRUCT_LEN = 20
+SATS_MOM_LEN = 10
+# Volatility-regime factor source: "ATR" (ATR/baseline) or "VOLUME"
+# (volume z-score). ATR is the safe default; volume feeds can be flat or
+# missing on CFD data, in which case VOLUME excludes itself from the blend.
+SATS_VOL_MODE = "ATR"
+SATS_VOL_Z_LEN = 20
+
+# Character-flip: flip on a TQI collapse even without a price break.
+SATS_USE_CHARFLIP = True
+SATS_CHARFLIP_MIN_AGE = 5      # min trend age AND the TQI collapse window
+SATS_CHARFLIP_HIGH = 0.55
+SATS_CHARFLIP_LOW = 0.25
+
+# Risk model: pivot-anchored stop with an ATR buffer and a hard cap.
+SATS_PIVOT_LEN = 3
+SATS_PIVOT_MAX_AGE = 100
+SATS_SL_MULT = 1.5             # SL buffer (xATR)
+SATS_SL_MAX_DIST = 4.0         # hard cap on stop distance (xATR)
+
+# Take-profit: R-multiples. Mode "FIXED" or "DYNAMIC" (TQI+vol scaled).
+SATS_TP_MODE = "FIXED"
+SATS_TP1_R = 1.0
+SATS_TP2_R = 2.0
+SATS_TP3_R = 3.0
+SATS_DYN_TP_TQI_W = 0.6
+SATS_DYN_TP_VOL_W = 0.4
+SATS_DYN_TP_MIN = 0.5
+SATS_DYN_TP_MAX = 2.0
+SATS_DYN_TP_FLOOR_R1 = 0.5
+SATS_DYN_TP_CEIL_R = 8.0
 
 # ─────────────────────────────────────────────────────────────────────
 # Score budget.

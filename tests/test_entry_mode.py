@@ -86,16 +86,23 @@ def test_unknown_entry_mode_is_refused(candles):
     assert "ENTRY_MODE" in reason
 
 
-def test_entry_mode_threads_through_find_candidate(candles):
-    """scoring_strategy must pass the mode down, or the backtest would
-    silently compare a mode against itself."""
-    seen = set()
-    for i in range(400, 800):
-        for mode in ("REVERSION", "MOMENTUM"):
-            c = strat.find_candidate(candles[:i], entry_mode=mode)
-            if c and c.get("pattern") == gt.PATTERN_NAME:
-                seen.add(c["entry_mode"])
-    assert seen == {"REVERSION", "MOMENTUM"}, seen
+def test_find_candidate_returns_sats_and_ignores_entry_mode(candles):
+    """The live path now runs SATS. scoring_strategy.find_candidate returns
+    SATS candidates and accepts entry_mode only for signature compatibility
+    (SATS has no reversion/momentum variants). The Golden Trio modes are
+    still exercised directly against strategy.golden_trio above."""
+    saw_sats = False
+    for i in range(400, 900):
+        a = strat.find_candidate(candles[:i], entry_mode="REVERSION")
+        b = strat.find_candidate(candles[:i], entry_mode="MOMENTUM")
+        # entry_mode must not change what find_candidate returns.
+        assert (a is None) == (b is None)
+        if a is not None:
+            assert a["pattern"] == "SATS"
+            assert b["pattern"] == "SATS"
+            assert a["entry_price"] == b["entry_price"]
+            saw_sats = True
+    assert saw_sats, "SATS never fired on the fixture series"
 
 
 def test_default_mode_is_reversion_and_matches_config(candles):

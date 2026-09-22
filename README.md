@@ -1,128 +1,120 @@
-# Gold Alert Bot — Golden Trio + SMC
+# Gold Alert Bot — SATS (Self-Aware Trend System)
 
-Alert-only trading bot for **XAUUSD (Gold)** on Capital.com CFDs. It sends
-WATCH ⚡ / A+ 🟢 alerts to Telegram. **It suggests. It never executes trades.**
+Alert-only trading bot for **XAUUSD (spot gold CFD)** on Capital.com. It
+sends WATCH ⚡ / A+ 🟢 alerts to Telegram. **It suggests. It never executes
+trades.**
+
+The bot runs **SATS**, an adaptive SuperTrend trend-follower, as its sole
+strategy. The earlier Golden Trio + SMC + MTF engine was evaluated at length
+(that evaluation is kept below, unedited, because it is the honest record of
+what was tried and what it showed) and then replaced with SATS at the
+owner's direction.
 
 ## Architecture
 
 ```
-                     XAUUSD
-                        │
-                 ┌──────┴──────┐
-           Golden Trio        SMC
-                 │             │
-                 └──────┬──────┘
-                        │
-                   M15 SETUP          ← creates the opportunity
-                        │
-              ┌─────────┼─────────┐
-             M5         H1        H4   ← modify confidence
-         confirmation  context   regime
-              └─────────┼─────────┘
-                        │
-                       M1             ← entry timing only
-                        │
-                      SCORE
-                        │
-              ┌─────────┴─────────┐
-            WATCH                 A+
+                        XAUUSD M15
+                            │
+                    ┌───────┴────────┐
+              Trend Quality        Adaptive
+              Index (TQI 0..1)     SuperTrend (ATR band)
+                    └───────┬────────┘
+                            │  TQI modulates band width,
+                            │  asymmetry, and flip logic
+                            ▼
+                   confirmed FLIP  ── price break, or
+                            │        character-flip (TQI collapse)
+                            ▼
+                     TRADE PLAN
+              entry · pivot-anchored SL · TP1/TP2/TP3 (R-multiples)
+                            │
+                    graded by TQI
+                            │
+                  ┌─────────┴─────────┐
+                WATCH               A+
+             (TQI ≥ 0.35)        (TQI ≥ 0.70)
 ```
 
-**M15 creates the opportunity. The other timeframes modify confidence;
-none of them can veto it.**
+It is a **single-timeframe** model: everything is computed on M15. There is
+no H1/H4/M5/M1 confirmation layer, no ZLSMA/SMC/round-number/killzone
+scoring. The whole signal is "the SuperTrend flipped, and here is how clean
+the tape is right now."
 
-### The two detectors
+### The engine (`strategy/sats.py`)
 
-1. **Golden Trio** — RSI(14) momentum evidence plus 10-bar Turtle
-   (Donchian) location evidence, with ZLSMA(30) slope as a separate
-   signed trend-alignment axis. RSI and Turtle are *quality inputs*, not
-   permission gates: there is no minimum RSI hook, no absolute level to
-   cross, and no oversold veto. ZLSMA is 30 not 50 because the
-   Capital.com M15 API caps at ~80 bars per request.
-2. **Smart Money Concepts** — Order Block, Change of Character (CHOCH),
-   and Liquidity Sweep detection via the `smartmoneyconcepts` library.
+1. **SuperTrend** — an ATR trailing band. Price closing beyond the opposite
+   band flips the trend.
+2. **Trend Quality Index (TQI, 0..1)** — a weighted blend of four factors
+   measured every bar:
+   - **Efficiency** (Kaufman ER, weight 0.35): directed move ÷ total path.
+   - **Volatility regime** (0.20): ATR vs a long ATR baseline (or volume
+     z-score if `SATS_VOL_MODE = "VOLUME"` and volume is present).
+   - **Structure** (0.25): how far price sits from the middle of its recent
+     range — trends pin price to an edge, chop oscillates around the middle.
+   - **Momentum persistence** (0.20): fraction of recent bars aligned with
+     the window's net move.
+3. **Non-linear band modulation** — high TQI compresses the bands (lock
+   profit tighter in clean trends), low TQI widens them (avoid whipsaws in
+   chop), via a power curve so mild quality dips are ignored and severe ones
+   react hard.
+4. **Asymmetric bands** — the active (trailing) side tightens and the passive
+   side widens as TQI rises.
+5. **EMA-smoothed multipliers** — band multipliers are smoothed before the
+   ratchet so a single TQI spike cannot jam the band.
+6. **Character-flip** — the trend can flip on a TQI collapse (high → low
+   within a lookback window, price already moving against the trend) even
+   before price breaks the band, after a minimum trend age.
+7. **Trade plan** — entry at the flip close; a pivot-anchored stop with an
+   ATR buffer and a hard max-distance cap; TP1/TP2/TP3 at R-multiples
+   (optionally scaled by TQI + volatility in `DYNAMIC` TP mode).
 
-Each scan runs both and keeps the higher-quality candidate. Both report
-quality on the **same 0..1 axis** against the same point budget, and both
-are measured on the same ZLSMA and chop axes — so the comparison between
-them is structural rather than an arbitrary rescale of two unrelated
-point totals.
+### Scoring and tiers
 
-### Scoring
+A SATS signal is graded by its TQI, mapped onto the familiar 0..100 scale so
+every existing tool keeps working:
 
-| Group | Components | Range |
-|---|---|---|
-| Setup (M15) | `setup_quality × SCORE_SETUP_MAX` | 0 … +45 |
-| | ZLSMA / structure alignment | −12 … +15 |
-| MTF | H4 regime | −12 … +12 |
-| | H1 context (range location + EMA slope) | −10 … +10 |
-| | M5 confirmation (displacement, RSI slope, participation) | −10 … +10 |
-| | M1 entry timing (pressure, chase penalty) | −5 … +5 |
-| Context | round number / chop / ATR regime | −20 … +5 |
+```
+score = round(100 × TQI)
+```
 
-Tiers are a **pure function of the score**: WATCH at ≥ 45, A+ at ≥ 70.
-There are no post-score vetoes — an unfavourable H4 regime, a flat or
-opposing ZLSMA and a chop regime all cost points, so the system can never
-say "this is a 75-point setup" and then refuse to call it A+.
-
-Each MTF contribution is **zero-centred**: a timeframe that is neutral
-and a timeframe whose candles are unavailable both contribute exactly 0.
-That is what lets an M15-only backtest and a full-MTF live run sit on the
-same score scale instead of differing by a constant offset.
-
-**Targets.** Sized in ATR, because gold's volatility varies far more than
-a fixed dollar distance can absorb:
-
-- `TARGET_MODE = "ATR"` (default): stop at 3×ATR, ladder 1R / 2R / 3.5R.
-- `TARGET_MODE = "FIXED"`: the legacy $25 / $25 / $50 / $100 ladder, kept
-  so the two can be compared on identical candles.
-
-3×ATR on **real** gold is a $26.29 stop, against a measured median M15
-ATR of **$8.76** (`tools/premise_check.py`, 25,000 real bars):
-
-| spread | as % of a 3.0×ATR ($26.29) stop |
+| Tier | Threshold |
 |---|---|
-| $0.30 | 1.1% |
-| $0.75 (realistic) | 2.9% |
-| $1.50 (conservative) | 5.7% |
+| A+   | score ≥ 70  (TQI ≥ 0.70) |
+| WATCH | score ≥ 35  (TQI ≥ 0.35) |
+| (none) | below 35 — no alert |
 
-### RETRACTED: "the old $25 stop was ~7×ATR and that is why the bot was silent"
+**A grade describes the current tape, not the odds of a win.** A high TQI
+means "the market is behaving like a clean trend right now"; it can still
+fail on the next bar. Nothing here has been shown to have a positive edge on
+your instrument — see the evaluation history below for how easily an
+M15 gold signal can look good on one window and evaporate on another. The
+responsible way to use this is exactly what the "Before real money" section
+says: paper-trade and log first.
 
-An earlier version of this file carried a table derived from the
-synthetic generator, which produced an M15 ATR of ~$3.5. Real gold's
-median M15 ATR is **$8.76** — the generator was about 2.5× too quiet, so
-every ATR multiple computed from it was inflated by the same factor.
+### Faithful-port notes
 
-Corrected against real data:
+The Python engine is a port of the TradingView/Pine v1.13.1 indicator. The
+strategy logic (TQI, adaptive/asymmetric SuperTrend, character-flip, the
+R-multiple plan) is ported; the Pine-only surface (on-chart dashboard,
+watermark, labels, the webhook-v2 schema, the two grade ladders in the alert
+dialog) is not — this bot has its own alert formatting, cooldown, tiering and
+backtester. The Pine indicator is stateful across all history; this bot calls
+detectors statelessly with a fixed window of recent candles
+(`cfg.MTF_FETCH_BARS["15min"]`), the **same window live and in backtest**, so
+the two cannot silently diverge. Parameters live under the `SATS_*` keys in
+`strategy_config.py`.
 
-| claim | as published | measured |
-|---|---|---|
-| $25 fixed stop, in ATR | ~7×ATR | **~2.85×ATR** |
-| spread as %R at 3.0×ATR | 7.2% | **2.9%** |
+---
 
-**The $25 fixed stop was approximately the right size.** It sits within
-5% of what `ATR_SL_MULT = 3.0` produces on real candles. The criticism
-of it was an artifact of the generator, and the claim that stop size —
-rather than the thresholds — was what made the bot silent is not
-supported by anything measured on real data.
+# Previous strategy (Golden Trio / SMC) — evaluation history
 
-`TARGET_MODE = "ATR"` is still the better default, because it tracks
-volatility instead of assuming it. But it is not the large correction
-this file previously claimed it was, and the cadence improvement
-attributed to it should be re-measured before it is believed.
-
-**Entry.** On a limit `ENTRY_PULLBACK_ATR` (0.5) better than the trigger
-bar's close, never at the close itself. This corrects a structural
-anti-edge rather than refining one — see below.
-
-**Alert cadence.** Thresholds are derived from a target delivered rate by
-`tools/tune_thresholds.py`, not chosen by hand: **WATCH ≥ 45, A+ ≥ 65**
-(`strategy_config.py`). They must be re-derived whenever the score
-budget or entry logic changes.
-
-A+ is a **cadence** tier, not a quality tier — above 45 the score barely
-orders outcomes (see Real-data results). Do not read A+ as "this one is
-more likely to win".
+**This section is historical.** It documents the strategy the bot ran before
+SATS, and the evaluation that led to replacing it. It is kept intact, not
+because it describes the current bot, but because deleting an honest record
+of what was tested — and how many of its findings reversed under wider data —
+would be exactly the kind of tidying-up that produces false confidence. Read
+it as the reason the bar for believing *any* M15 gold signal (SATS included)
+is set where it is.
 
 ## What the no-edge control test found
 
@@ -524,6 +516,13 @@ table split by detector, an in-sample/out-of-sample walk-forward split,
 and the marginal expectancy of each score component. It flags
 under-powered buckets and refuses to call a score informative on a sample
 too small to say so.
+
+---
+
+# Operating the bot
+
+_The sections below apply to the current bot (SATS) — running it, its
+environment, tests, and going live._
 
 ## How to run it (real-time mode — recommended)
 

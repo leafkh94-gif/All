@@ -443,6 +443,7 @@ class OpenTradeTracker:
 # ─────────────────────────────────────────────────────────────────────
 _PATTERN_DISPLAY = {
     "GOLDEN_TRIO": "Golden Trio (Turtle + RSI + ZLSMA)",
+    "SATS": "SATS (Self-Aware Trend System)",
 }
 
 

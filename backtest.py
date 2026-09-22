@@ -594,8 +594,15 @@ def print_summary(signals, candles=None, target_mode=None, entry_mode=None):
     tradeable = [s for s in signals if s.get("tradeable", True)]
     suppressed = [s for s in signals if not s.get("tradeable", True)]
 
-    print(f"\nEntry mode:  {entry_mode or getattr(cfg, 'ENTRY_MODE', 'REVERSION')}")
-    print(f"Target mode: {target_mode or cfg.TARGET_MODE}")
+    strategy = getattr(cfg, "STRATEGY", "GOLDEN_TRIO")
+    print(f"\nStrategy:    {strategy}")
+    # Entry mode / target mode only describe the Golden Trio path; SATS is a
+    # single trend-following model with its own TP mode (cfg.SATS_TP_MODE).
+    if strategy == "SATS":
+        print(f"TP mode:     SATS_{cfg.SATS_TP_MODE}")
+    else:
+        print(f"Entry mode:  {entry_mode or getattr(cfg, 'ENTRY_MODE', 'REVERSION')}")
+        print(f"Target mode: {target_mode or cfg.TARGET_MODE}")
     print(f"Total opportunities recorded: {len(signals)}")
     if below:
         print(f"(+{len(below)} sub-threshold candidates logged for threshold "
